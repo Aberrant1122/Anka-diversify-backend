@@ -15,6 +15,7 @@ import {
   ProjectTask,
   User,
 } from "../types";
+import { ProjectGitHubService } from "./github.service";
 
 const prisma = new PrismaClient();
 
@@ -234,7 +235,7 @@ export class AiService {
       throw new Error("Project not found");
     }
 
-    const [summary, recentMessages, recentDecisions, rules, activeTasks] =
+    const [summary, recentMessages, recentDecisions, rules, activeTasks, repoSnapshot] =
       await Promise.all([
         prisma.projectMemorySummary.findUnique({
           where: { projectId },
@@ -267,6 +268,7 @@ export class AiService {
           orderBy: { priority: "desc", dueDate: "asc" },
           take: 20,
         }),
+        ProjectGitHubService.getSnapshot(projectId),
       ]);
 
     return {
@@ -318,6 +320,7 @@ export class AiService {
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
       })),
+      repoSnapshot: repoSnapshot || undefined,
     };
   }
 
@@ -381,14 +384,36 @@ ${context.recentMessages
   .slice(-5)
   .map((msg) => `${msg.role}: ${msg.content}`)
   .join("\n")}
+${
+  context.repoSnapshot
+    ? `
+CODEBASE (GitHub: ${context.repoSnapshot.repoName}):
+- Branch: ${context.repoSnapshot.defaultBranch}
+- Description: ${context.repoSnapshot.description || "N/A"}
+- Languages: ${Object.entries(context.repoSnapshot.languages)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 6)
+        .map(([lang]) => lang)
+        .join(", ")}
+- Last synced: ${context.repoSnapshot.lastSyncedAt.toLocaleDateString()}
+
+FILE STRUCTURE (${context.repoSnapshot.fileTree.length} files):
+${context.repoSnapshot.fileTree.slice(0, 80).join("\n")}
+
+KEY FILES:
+${context.repoSnapshot.keyFiles
+  .map((f) => `--- ${f.path} ---\n${f.content}`)
+  .join("\n\n")}`
+    : ""
+}
 
 GUIDELINES:
 - Always consider project context in your responses
 - Reference project rules, decisions, and tasks when relevant
+- When answering code questions, reference actual files and patterns from the codebase above
 - Help with project-specific questions and planning
 - Suggest next steps based on current progress
-- Keep responses actionable and project-focused
-- If asked about things outside this project, gently redirect to the project scope`;
+- Keep responses actionable and project-focused`;
 
     return [
       { role: "system", content: systemPrompt },

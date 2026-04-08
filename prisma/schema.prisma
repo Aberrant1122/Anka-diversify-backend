@@ -35,10 +35,11 @@ model Project {
 
   user           User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   aiChatSessions AiChatSession[]
-  memorySummary ProjectMemorySummary?
-  decisions     ProjectDecision[]
-  rules         ProjectRule[]
-  tasks         ProjectTask[]
+  memorySummary  ProjectMemorySummary?
+  repoSnapshot   ProjectRepoSnapshot?
+  decisions      ProjectDecision[]
+  rules          ProjectRule[]
+  tasks          ProjectTask[]
 
   @@map("projects")
 }
@@ -125,4 +126,21 @@ model ProjectTask {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@map("project_tasks")
+}
+
+model ProjectRepoSnapshot {
+  id            String   @id @default(cuid())
+  projectId     String   @unique
+  githubUrl     String
+  repoName      String
+  defaultBranch String
+  description   String   @default("")
+  fileTree      String   @db.Text
+  languages     String
+  keyFiles      String   @db.Text
+  lastSyncedAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("project_repo_snapshots")
 }

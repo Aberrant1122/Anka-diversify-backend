@@ -14,7 +14,31 @@ export interface Project {
   phase?: string;
   progress: number;
   teamSize: number;
+  github_url?: string;
+  github_context?: string;
+  last_commit_message?: string;
+  last_commit_author?: string;
+  last_commit_timestamp?: string;
+  start_date: string;
+  due_date: string;
+  priority: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
   userId: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface Task {
+  id: string;
+  projectId: string;
+  title: string;
+  description?: string;
+  status: "todo" | "in-progress" | "review" | "done";
+  priority: "low" | "medium" | "high" | "critical";
+  assigneeId?: string;
+  dueDate?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -51,9 +75,10 @@ export interface ProjectDecision {
   projectId: string;
   title: string;
   description: string;
-  impact?: string;
-  madeAt: Date;
-  madeBy?: string;
+  options: string[];
+  selectedOption?: string;
+  createdAt: Date;
+  resolvedAt?: Date;
 }
 
 export interface ProjectRule {
@@ -95,6 +120,21 @@ export interface ChatResponse {
   };
 }
 
+export interface RepoKeyFile {
+  path: string;
+  content: string;
+}
+
+export interface RepoSnapshot {
+  repoName: string;
+  defaultBranch: string;
+  description: string;
+  languages: Record<string, number>;
+  fileTree: string[];
+  keyFiles: RepoKeyFile[];
+  lastSyncedAt: Date;
+}
+
 export interface ProjectContext {
   project: Project;
   summary?: ProjectMemorySummary;
@@ -102,6 +142,7 @@ export interface ProjectContext {
   recentDecisions: ProjectDecision[];
   rules: ProjectRule[];
   activeTasks: ProjectTask[];
+  repoSnapshot?: RepoSnapshot;
 }
 
 export interface GeneralContext {
