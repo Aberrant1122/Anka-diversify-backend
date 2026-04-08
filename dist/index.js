@@ -13,6 +13,7 @@ const middleware_1 = require("./middleware");
 const ai_routes_1 = __importDefault(require("./routes/ai-routes"));
 const auth_routes_1 = __importDefault(require("./routes/auth-routes"));
 const admin_routes_1 = __importDefault(require("./routes/admin-routes"));
+const project_routes_1 = __importDefault(require("./routes/project-routes"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 3001;
@@ -49,6 +50,7 @@ app.get("/health", (req, res) => {
 app.use("/api/ai", ai_routes_1.default);
 app.use("/api/auth", auth_routes_1.default);
 app.use("/api/admin", admin_routes_1.default);
+app.use("/api/projects", project_routes_1.default);
 // Error handler
 app.use(middleware_1.errorHandler);
 // Start server
