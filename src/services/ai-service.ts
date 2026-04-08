@@ -235,41 +235,47 @@ export class AiService {
       throw new Error("Project not found");
     }
 
-    const [summary, recentMessages, recentDecisions, rules, activeTasks, repoSnapshot] =
-      await Promise.all([
-        prisma.projectMemorySummary.findUnique({
-          where: { projectId },
-        }),
-        prisma.aiChatMessage.findMany({
-          where: {
-            session: {
-              projectId,
-              type: "project",
-            },
-          },
-          orderBy: { createdAt: "desc" },
-          take: 15,
-          include: { session: true },
-        }),
-        prisma.projectDecision.findMany({
-          where: { projectId },
-          orderBy: { madeAt: "desc" },
-          take: 10,
-        }),
-        prisma.projectRule.findMany({
-          where: { projectId },
-          orderBy: { priority: "desc", createdAt: "desc" },
-        }),
-        prisma.projectTask.findMany({
-          where: {
+    const [
+      summary,
+      recentMessages,
+      recentDecisions,
+      rules,
+      activeTasks,
+      repoSnapshot,
+    ] = await Promise.all([
+      prisma.projectMemorySummary.findUnique({
+        where: { projectId },
+      }),
+      prisma.aiChatMessage.findMany({
+        where: {
+          session: {
             projectId,
-            status: { in: ["todo", "in_progress"] },
+            type: "project",
           },
-          orderBy: { priority: "desc", dueDate: "asc" },
-          take: 20,
-        }),
-        ProjectGitHubService.getSnapshot(projectId),
-      ]);
+        },
+        orderBy: { createdAt: "desc" },
+        take: 15,
+        include: { session: true },
+      }),
+      prisma.projectDecision.findMany({
+        where: { projectId },
+        orderBy: { madeAt: "desc" },
+        take: 10,
+      }),
+      prisma.projectRule.findMany({
+        where: { projectId },
+        orderBy: { priority: "desc", createdAt: "desc" },
+      }),
+      prisma.projectTask.findMany({
+        where: {
+          projectId,
+          status: { in: ["todo", "in_progress"] },
+        },
+        orderBy: { priority: "desc", dueDate: "asc" },
+        take: 20,
+      }),
+      ProjectGitHubService.getSnapshot(projectId),
+    ]);
 
     return {
       project: {
@@ -279,9 +285,16 @@ export class AiService {
         phase: project.phase || undefined,
         progress: project.progress,
         teamSize: project.teamSize,
+        priority: project.priority,
+        status: project.status,
+        githubUrl: project.githubUrl || undefined,
         userId: project.userId,
         createdAt: project.createdAt,
         updatedAt: project.updatedAt,
+        start_date: project.startDate?.toISOString() || "",
+        due_date: project.dueDate?.toISOString() || "",
+        created_at: project.createdAt.toISOString(),
+        updated_at: project.updatedAt.toISOString(),
       },
       summary: summary || undefined,
       recentMessages: recentMessages.reverse().map((msg: any) => ({
@@ -300,6 +313,8 @@ export class AiService {
         impact: decision.impact || undefined,
         madeAt: decision.madeAt,
         madeBy: decision.madeBy || undefined,
+        options: decision.options || undefined,
+        createdAt: decision.createdAt,
       })),
       rules: rules.map((rule: any) => ({
         id: rule.id,
@@ -320,7 +335,15 @@ export class AiService {
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
       })),
-      repoSnapshot: repoSnapshot || undefined,
+      repoSnapshot: repoSnapshot
+        ? {
+            ...repoSnapshot,
+            keyFiles: repoSnapshot.keyFiles.map((file: any) => ({
+              ...file,
+              repoSnapshot: repoSnapshot,
+            })),
+          }
+        : undefined,
     };
   }
 

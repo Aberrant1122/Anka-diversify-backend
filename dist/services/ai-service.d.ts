@@ -17,12 +17,17 @@ export declare class AiService {
     private getMessageCount;
     getSessions(userId: string, type: "general" | "project", projectId?: string): Promise<({
         project: {
-            id: string;
-            name: string;
+            priority: string;
             description: string | null;
+            id: string;
+            githubUrl: string | null;
+            name: string;
             phase: string | null;
             progress: number;
             teamSize: number;
+            status: string;
+            startDate: Date;
+            dueDate: Date | null;
             userId: string;
             createdAt: Date;
             updatedAt: Date;
@@ -37,11 +42,11 @@ export declare class AiService {
         }[];
     } & {
         id: string;
+        projectId: string | null;
         userId: string;
         createdAt: Date;
         updatedAt: Date;
         type: string;
-        projectId: string | null;
         title: string | null;
     })[]>;
     getSessionMessages(sessionId: string, userId: string): Promise<{
@@ -55,11 +60,11 @@ export declare class AiService {
         }[];
     } & {
         id: string;
+        projectId: string | null;
         userId: string;
         createdAt: Date;
         updatedAt: Date;
         type: string;
-        projectId: string | null;
         title: string | null;
     }>;
     getProjectContext(projectId: string, userId: string): Promise<ProjectContext>;

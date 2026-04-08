@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AiService = void 0;
 const openai_1 = __importDefault(require("openai"));
 const client_1 = require("@prisma/client");
+const github_service_1 = require("./github.service");
 const prisma = new client_1.PrismaClient();
 class AiService {
     constructor() {
@@ -165,7 +166,7 @@ class AiService {
         if (!project) {
             throw new Error("Project not found");
         }
-        const [summary, recentMessages, recentDecisions, rules, activeTasks] = await Promise.all([
+        const [summary, recentMessages, recentDecisions, rules, activeTasks, repoSnapshot,] = await Promise.all([
             prisma.projectMemorySummary.findUnique({
                 where: { projectId },
             }),
@@ -197,6 +198,7 @@ class AiService {
                 orderBy: { priority: "desc", dueDate: "asc" },
                 take: 20,
             }),
+            github_service_1.ProjectGitHubService.getSnapshot(projectId),
         ]);
         return {
             project: {
@@ -206,9 +208,16 @@ class AiService {
                 phase: project.phase || undefined,
                 progress: project.progress,
                 teamSize: project.teamSize,
+                priority: project.priority,
+                status: project.status,
+                githubUrl: project.githubUrl || undefined,
                 userId: project.userId,
                 createdAt: project.createdAt,
                 updatedAt: project.updatedAt,
+                start_date: project.startDate?.toISOString() || "",
+                due_date: project.dueDate?.toISOString() || "",
+                created_at: project.createdAt.toISOString(),
+                updated_at: project.updatedAt.toISOString(),
             },
             summary: summary || undefined,
             recentMessages: recentMessages.reverse().map((msg) => ({
@@ -227,6 +236,8 @@ class AiService {
                 impact: decision.impact || undefined,
                 madeAt: decision.madeAt,
                 madeBy: decision.madeBy || undefined,
+                options: decision.options || undefined,
+                createdAt: decision.createdAt,
             })),
             rules: rules.map((rule) => ({
                 id: rule.id,
@@ -247,6 +258,15 @@ class AiService {
                 createdAt: task.createdAt,
                 updatedAt: task.updatedAt,
             })),
+            repoSnapshot: repoSnapshot
+                ? {
+                    ...repoSnapshot,
+                    keyFiles: repoSnapshot.keyFiles.map((file) => ({
+                        ...file,
+                        repoSnapshot: repoSnapshot,
+                    })),
+                }
+                : undefined,
         };
     }
     buildGeneralPrompt(userMessage, context) {
@@ -301,14 +321,34 @@ ${context.recentMessages
             .slice(-5)
             .map((msg) => `${msg.role}: ${msg.content}`)
             .join("\n")}
+${context.repoSnapshot
+            ? `
+CODEBASE (GitHub: ${context.repoSnapshot.repoName}):
+- Branch: ${context.repoSnapshot.defaultBranch}
+- Description: ${context.repoSnapshot.description || "N/A"}
+- Languages: ${Object.entries(context.repoSnapshot.languages)
+                .sort(([, a], [, b]) => b - a)
+                .slice(0, 6)
+                .map(([lang]) => lang)
+                .join(", ")}
+- Last synced: ${context.repoSnapshot.lastSyncedAt.toLocaleDateString()}
+
+FILE STRUCTURE (${context.repoSnapshot.fileTree.length} files):
+${context.repoSnapshot.fileTree.slice(0, 80).join("\n")}
+
+KEY FILES:
+${context.repoSnapshot.keyFiles
+                .map((f) => `--- ${f.path} ---\n${f.content}`)
+                .join("\n\n")}`
+            : ""}
 
 GUIDELINES:
 - Always consider project context in your responses
 - Reference project rules, decisions, and tasks when relevant
+- When answering code questions, reference actual files and patterns from the codebase above
 - Help with project-specific questions and planning
 - Suggest next steps based on current progress
-- Keep responses actionable and project-focused
-- If asked about things outside this project, gently redirect to the project scope`;
+- Keep responses actionable and project-focused`;
         return [
             { role: "system", content: systemPrompt },
             { role: "user", content: userMessage },
