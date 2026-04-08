@@ -1,267 +1,147 @@
-import { DatabaseService } from "../utils/database";
-import { Project, Task } from "../types";
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
+
+const DEMO_USER_ID = "demo-user-id";
+
+// Ensure the demo user exists (for unauthenticated/demo usage)
+async function ensureUser(userId: string): Promise<void> {
+  const exists = await prisma.user.findUnique({ where: { id: userId } });
+  if (!exists) {
+    await prisma.user.create({
+      data: {
+        id: userId,
+        email: `${userId}@demo.anka.io`,
+        name: "Demo User",
+        password: "demo",
+        role: "admin",
+      },
+    });
+  }
+}
 
 export class ProjectService {
-  private db: DatabaseService;
-
-  constructor() {
-    this.db = new DatabaseService();
+  async getAllProjects(userId: string = DEMO_USER_ID) {
+    await ensureUser(userId);
+    return prisma.project.findMany({
+      where: { userId },
+      include: {
+        tasks: true,
+        memorySummary: { select: { summary: true, lastUpdated: true } },
+        repoSnapshot: { select: { githubUrl: true, repoName: true, lastSyncedAt: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
   }
 
-  // Get all projects
-  async getAllProjects(): Promise<Project[]> {
-    try {
-      const result = await this.db.query(`
-        SELECT p.*, 
-               COUNT(t.id) as task_count
-        FROM projects p
-        LEFT JOIN tasks t ON p.id = t.project_id
-        GROUP BY p.id
-        ORDER BY p.created_at DESC
-      `);
-      return result;
-    } catch (error) {
-      console.error("Error fetching projects:", error);
-      throw error;
-    }
+  async getProjectById(id: string, userId: string = DEMO_USER_ID) {
+    await ensureUser(userId);
+    return prisma.project.findFirst({
+      where: { id, userId },
+      include: {
+        tasks: true,
+        memorySummary: true,
+        repoSnapshot: true,
+        decisions: { orderBy: { madeAt: "desc" }, take: 10 },
+        rules: { orderBy: { createdAt: "desc" } },
+      },
+    });
   }
 
-  // Get project by ID
-  async getProjectById(id: string): Promise<Project | null> {
-    try {
-      const result = await this.db.query(
-        `
-        SELECT p.*, 
-               COUNT(t.id) as task_count,
-               GROUP_CONCAT(
-                 JSON_OBJECT(
-                   'id', t.id,
-                   'title', t.title,
-                   'status', t.status,
-                   'priority', t.priority
-                 )
-               ) as tasks
-        FROM projects p
-        LEFT JOIN tasks t ON p.id = t.project_id
-        WHERE p.id = ?
-        GROUP BY p.id
-      `,
-        [id],
-      );
-
-      return result.length > 0 ? result[0] : null;
-    } catch (error) {
-      console.error("Error fetching project:", error);
-      throw error;
-    }
+  async createProject(
+    data: {
+      name: string;
+      description?: string;
+      phase?: string;
+      priority?: string;
+      githubUrl?: string;
+      startDate?: string;
+      dueDate?: string;
+      status?: string;
+    },
+    userId: string = DEMO_USER_ID,
+  ) {
+    await ensureUser(userId);
+    return prisma.project.create({
+      data: {
+        name: data.name,
+        description: data.description,
+        phase: data.phase || "product-modeling",
+        priority: data.priority || "medium",
+        status: data.status || "active",
+        githubUrl: data.githubUrl,
+        startDate: data.startDate ? new Date(data.startDate) : new Date(),
+        dueDate: data.dueDate ? new Date(data.dueDate) : undefined,
+        userId,
+      },
+    });
   }
 
-  // Create new project
-  async createProject(projectData: {
-    name: string;
-    description?: string;
-    phase: string;
-    priority: string;
-    github_url?: string;
-    start_date: string;
-    due_date: string;
-    status: string;
-  }): Promise<Project> {
-    try {
-      const result = await this.db.query(
-        `
-        INSERT INTO projects (
-          name, description, phase, priority, github_url, 
-          start_date, due_date, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING *
-      `,
-        [
-          projectData.name,
-          projectData.description || null,
-          projectData.phase,
-          projectData.priority,
-          projectData.github_url || null,
-          projectData.start_date,
-          projectData.due_date,
-          projectData.status,
-          new Date().toISOString(),
-          new Date().toISOString(),
-        ],
-      );
-
-      return result[0];
-    } catch (error) {
-      console.error("Error creating project:", error);
-      throw error;
-    }
-  }
-
-  // Update project
   async updateProject(
     id: string,
-    updateData: {
+    data: {
       name?: string;
       description?: string;
       phase?: string;
       priority?: string;
-      github_url?: string;
+      githubUrl?: string;
       status?: string;
+      progress?: number;
     },
-  ): Promise<Project | null> {
-    try {
-      const fields = [];
-      const values = [];
+    userId: string = DEMO_USER_ID,
+  ) {
+    const project = await prisma.project.findFirst({ where: { id, userId } });
+    if (!project) return null;
 
-      if (updateData.name !== undefined) {
-        fields.push("name = ?");
-        values.push(updateData.name);
-      }
-      if (updateData.description !== undefined) {
-        fields.push("description = ?");
-        values.push(updateData.description);
-      }
-      if (updateData.phase !== undefined) {
-        fields.push("phase = ?");
-        values.push(updateData.phase);
-      }
-      if (updateData.priority !== undefined) {
-        fields.push("priority = ?");
-        values.push(updateData.priority);
-      }
-      if (updateData.github_url !== undefined) {
-        fields.push("github_url = ?");
-        values.push(updateData.github_url);
-      }
-      if (updateData.status !== undefined) {
-        fields.push("status = ?");
-        values.push(updateData.status);
-      }
-
-      fields.push("updated_at = ?");
-      values.push(new Date().toISOString());
-
-      const result = await this.db.query(
-        `
-        UPDATE projects 
-        SET ${fields.join(", ")}
-        WHERE id = ?
-        RETURNING *
-      `,
-        [...values, id],
-      );
-
-      return result.length > 0 ? result[0] : null;
-    } catch (error) {
-      console.error("Error updating project:", error);
-      throw error;
-    }
+    return prisma.project.update({
+      where: { id },
+      data: {
+        ...(data.name !== undefined && { name: data.name }),
+        ...(data.description !== undefined && { description: data.description }),
+        ...(data.phase !== undefined && { phase: data.phase }),
+        ...(data.priority !== undefined && { priority: data.priority }),
+        ...(data.githubUrl !== undefined && { githubUrl: data.githubUrl }),
+        ...(data.status !== undefined && { status: data.status }),
+        ...(data.progress !== undefined && { progress: data.progress }),
+      },
+    });
   }
 
-  // Delete project
-  async deleteProject(id: string): Promise<boolean> {
-    try {
-      await this.db.query("DELETE FROM projects WHERE id = ?", [id]);
-      return true;
-    } catch (error) {
-      console.error("Error deleting project:", error);
-      throw error;
-    }
+  async deleteProject(id: string, userId: string = DEMO_USER_ID) {
+    const project = await prisma.project.findFirst({ where: { id, userId } });
+    if (!project) return false;
+
+    await prisma.project.delete({ where: { id } });
+    return true;
   }
 
-  // Get project tasks
-  async getProjectTasks(projectId: string): Promise<Task[]> {
-    try {
-      const result = await this.db.query(
-        `
-        SELECT * FROM tasks 
-        WHERE project_id = ? 
-        ORDER BY created_at DESC
-      `,
-        [projectId],
-      );
-
-      return result;
-    } catch (error) {
-      console.error("Error fetching project tasks:", error);
-      throw error;
-    }
+  async getProjectTasks(projectId: string, userId: string = DEMO_USER_ID) {
+    await ensureUser(userId);
+    return prisma.projectTask.findMany({
+      where: { projectId },
+      orderBy: { createdAt: "desc" },
+    });
   }
 
-  // Create project task
-  async createTask(taskData: {
-    project_id: string;
-    title: string;
-    description?: string;
-    status: string;
-    priority: string;
-    assignee_id?: string;
-    due_date?: string;
-  }): Promise<Task> {
-    try {
-      const result = await this.db.query(
-        `
-        INSERT INTO tasks (
-          project_id, title, description, status, priority, 
-          assignee_id, due_date, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING *
-      `,
-        [
-          taskData.project_id,
-          taskData.title,
-          taskData.description || null,
-          taskData.status,
-          taskData.priority,
-          taskData.assignee_id || null,
-          taskData.due_date || null,
-          new Date().toISOString(),
-          new Date().toISOString(),
-        ],
-      );
-
-      return result[0];
-    } catch (error) {
-      console.error("Error creating task:", error);
-      throw error;
-    }
-  }
-
-  // Get projects by phase
-  async getProjectsByPhase(phase: string): Promise<Project[]> {
-    try {
-      const result = await this.db.query(
-        `
-        SELECT * FROM projects 
-        WHERE phase = ? 
-        ORDER BY created_at DESC
-      `,
-        [phase],
-      );
-
-      return result;
-    } catch (error) {
-      console.error("Error fetching projects by phase:", error);
-      throw error;
-    }
-  }
-
-  // Search projects
-  async searchProjects(query: string): Promise<Project[]> {
-    try {
-      const result = await this.db.query(
-        `
-        SELECT * FROM projects 
-        WHERE name LIKE ? OR description LIKE ?
-        ORDER BY created_at DESC
-      `,
-        [`%${query}%`, `%${query}%`],
-      );
-
-      return result;
-    } catch (error) {
-      console.error("Error searching projects:", error);
-      throw error;
-    }
+  async createTask(
+    data: {
+      project_id: string;
+      title: string;
+      description?: string;
+      status?: string;
+      priority?: string;
+      due_date?: string;
+    },
+  ) {
+    return prisma.projectTask.create({
+      data: {
+        projectId: data.project_id,
+        title: data.title,
+        description: data.description,
+        status: data.status || "todo",
+        priority: data.priority || "medium",
+        dueDate: data.due_date ? new Date(data.due_date) : undefined,
+      },
+    });
   }
 }

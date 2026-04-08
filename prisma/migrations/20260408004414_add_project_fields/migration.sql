@@ -1,0 +1,6 @@
+-- AlterTable
+ALTER TABLE "projects" ADD COLUMN     "dueDate" TIMESTAMP(3),
+ADD COLUMN     "githubUrl" TEXT,
+ADD COLUMN     "priority" TEXT NOT NULL DEFAULT 'medium',
+ADD COLUMN     "startDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN     "status" TEXT NOT NULL DEFAULT 'active';

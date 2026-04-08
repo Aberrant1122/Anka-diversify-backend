@@ -8,6 +8,7 @@ import { errorHandler, requestLogger } from "./middleware";
 import aiRoutes from "./routes/ai-routes";
 import authRoutes from "./routes/auth-routes";
 import adminRoutes from "./routes/admin-routes";
+import projectRoutes from "./routes/project-routes";
 import { authenticateToken } from "./middleware/auth";
 
 dotenv.config();
@@ -53,6 +54,7 @@ app.get("/health", (req, res) => {
 app.use("/api/ai", aiRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/projects", projectRoutes);
 
 // Error handler
 app.use(errorHandler);

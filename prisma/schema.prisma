@@ -29,6 +29,11 @@ model Project {
   phase       String?
   progress    Float    @default(0)
   teamSize    Int      @default(1)
+  priority    String   @default("medium") // 'low', 'medium', 'high', 'critical'
+  status      String   @default("active") // 'active', 'on-hold', 'completed'
+  githubUrl   String?
+  startDate   DateTime @default(now())
+  dueDate     DateTime?
   userId      String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
