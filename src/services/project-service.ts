@@ -87,6 +87,7 @@ export class ProjectService {
       githubUrl?: string;
       status?: string;
       progress?: number;
+      dueDate?: string;
     },
     userId: string = DEMO_USER_ID,
   ) {
@@ -103,6 +104,7 @@ export class ProjectService {
         ...(data.githubUrl !== undefined && { githubUrl: data.githubUrl }),
         ...(data.status !== undefined && { status: data.status }),
         ...(data.progress !== undefined && { progress: data.progress }),
+        ...(data.dueDate !== undefined && { dueDate: new Date(data.dueDate) }),
       },
     });
   }
@@ -123,16 +125,15 @@ export class ProjectService {
     });
   }
 
-  async createTask(
-    data: {
-      project_id: string;
-      title: string;
-      description?: string;
-      status?: string;
-      priority?: string;
-      due_date?: string;
-    },
-  ) {
+  async createTask(data: {
+    project_id: string;
+    title: string;
+    description?: string;
+    status?: string;
+    priority?: string;
+    phase?: string;
+    due_date?: string;
+  }) {
     return prisma.projectTask.create({
       data: {
         projectId: data.project_id,
@@ -140,8 +141,37 @@ export class ProjectService {
         description: data.description,
         status: data.status || "todo",
         priority: data.priority || "medium",
+        phase: data.phase || "development",
         dueDate: data.due_date ? new Date(data.due_date) : undefined,
       },
     });
+  }
+
+  async updateTask(taskId: string, data: {
+    title?: string;
+    description?: string;
+    status?: string;
+    priority?: string;
+    phase?: string;
+    dueDate?: string;
+  }) {
+    return prisma.projectTask.update({
+      where: { id: taskId },
+      data: {
+        ...(data.title !== undefined && { title: data.title }),
+        ...(data.description !== undefined && { description: data.description }),
+        ...(data.status !== undefined && { status: data.status }),
+        ...(data.priority !== undefined && { priority: data.priority }),
+        ...(data.phase !== undefined && { phase: data.phase }),
+        ...(data.dueDate !== undefined && { dueDate: new Date(data.dueDate) }),
+      },
+    });
+  }
+
+  async deleteTask(taskId: string) {
+    const task = await prisma.projectTask.findUnique({ where: { id: taskId } });
+    if (!task) return false;
+    await prisma.projectTask.delete({ where: { id: taskId } });
+    return true;
   }
 }

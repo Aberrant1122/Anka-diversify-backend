@@ -143,12 +143,39 @@ export class ProjectController {
         description: req.body.description,
         status: req.body.status,
         priority: req.body.priority,
+        phase: req.body.phase,
         due_date: req.body.dueDate,
       });
       res.status(201).json({ success: true, data: task, message: "Task created successfully" });
     } catch (error) {
       console.error("Error creating task:", error);
       res.status(500).json({ success: false, error: "Failed to create task" });
+    }
+  }
+
+  async updateTask(req: Request, res: Response) {
+    try {
+      const task = await projectService.updateTask(param(req, "taskId"), req.body);
+      if (!task) {
+        return res.status(404).json({ success: false, error: "Task not found" });
+      }
+      res.json({ success: true, data: task });
+    } catch (error) {
+      console.error("Error updating task:", error);
+      res.status(500).json({ success: false, error: "Failed to update task" });
+    }
+  }
+
+  async deleteTask(req: Request, res: Response) {
+    try {
+      const deleted = await projectService.deleteTask(param(req, "taskId"));
+      if (!deleted) {
+        return res.status(404).json({ success: false, error: "Task not found" });
+      }
+      res.json({ success: true, message: "Task deleted successfully" });
+    } catch (error) {
+      console.error("Error deleting task:", error);
+      res.status(500).json({ success: false, error: "Failed to delete task" });
     }
   }
 }

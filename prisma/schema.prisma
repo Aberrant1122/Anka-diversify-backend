@@ -122,8 +122,9 @@ model ProjectTask {
   projectId   String
   title       String
   description String?
-  status      String   @default("todo") // 'todo', 'in_progress', 'done'
-  priority    String   @default("medium") // 'low', 'medium', 'high'
+  status      String   @default("todo")
+  priority    String   @default("medium")
+  phase       String   @default("development")
   dueDate     DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

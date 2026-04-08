@@ -22,10 +22,10 @@ router.delete('/:id', projectController.deleteProject.bind(projectController));
 // Sync GitHub repo context for a project
 router.post('/:id/sync-github', projectController.syncGithub.bind(projectController));
 
-// Get project tasks
+// Project tasks
 router.get('/:id/tasks', projectController.getProjectTasks.bind(projectController));
-
-// Create project task
 router.post('/:id/tasks', projectController.createTask.bind(projectController));
+router.put('/:id/tasks/:taskId', projectController.updateTask.bind(projectController));
+router.delete('/:id/tasks/:taskId', projectController.deleteTask.bind(projectController));
 
 export default router;

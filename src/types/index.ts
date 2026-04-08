@@ -14,15 +14,13 @@ export interface Project {
   phase?: string;
   progress: number;
   teamSize: number;
-  github_url?: string;
-  github_context?: string;
-  last_commit_message?: string;
-  last_commit_author?: string;
-  last_commit_timestamp?: string;
-  start_date: string;
-  due_date: string;
   priority: string;
   status: string;
+  githubUrl?: string;
+  // snake_case aliases kept for backward compat
+  github_url?: string;
+  start_date: string;
+  due_date: string;
   created_at: string;
   updated_at: string;
   userId: string;
@@ -75,10 +73,9 @@ export interface ProjectDecision {
   projectId: string;
   title: string;
   description: string;
-  options: string[];
-  selectedOption?: string;
-  createdAt: Date;
-  resolvedAt?: Date;
+  impact?: string;
+  madeAt: Date;
+  madeBy?: string;
 }
 
 export interface ProjectRule {
@@ -121,6 +118,7 @@ export interface ChatResponse {
 }
 
 export interface RepoKeyFile {
+  repoSnapshot: any;
   path: string;
   content: string;
 }
