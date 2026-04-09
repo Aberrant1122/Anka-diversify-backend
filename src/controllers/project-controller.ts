@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
+import { uploadToCloudinary } from "../services/upload.service";
 
 const projectService = new ProjectService();
 const DEMO_USER_ID = "demo-user-id";
@@ -207,6 +208,39 @@ export class ProjectController {
     }
   }
 
+  async uploadFile(req: Request, res: Response) {
+    try {
+      const multerFile = (req as any).file;
+      if (!multerFile) {
+        return res.status(400).json({ success: false, error: "No file provided" });
+      }
+
+      const projectId = param(req, "id");
+      const { phase, type } = req.body;
+
+      const { url, size } = await uploadToCloudinary(
+        multerFile.buffer,
+        multerFile.originalname,
+        projectId,
+      );
+
+      const file = await projectService.createFile({
+        projectId,
+        name: multerFile.originalname,
+        type: type || detectType(multerFile.mimetype),
+        phase: phase || "development",
+        url,
+        size,
+        uploadedBy: getUserId(req),
+      });
+
+      res.status(201).json({ success: true, data: file });
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      res.status(500).json({ success: false, error: "Failed to upload file" });
+    }
+  }
+
   async deleteFile(req: Request, res: Response) {
     try {
       const deleted = await projectService.deleteFile(param(req, "fileId"));
@@ -219,4 +253,13 @@ export class ProjectController {
       res.status(500).json({ success: false, error: "Failed to delete file" });
     }
   }
+}
+
+function detectType(mimetype: string): string {
+  if (mimetype.startsWith("image/")) return "image";
+  if (mimetype === "application/pdf") return "doc";
+  if (mimetype.includes("spreadsheet") || mimetype.includes("excel") || mimetype.includes("csv")) return "spreadsheet";
+  if (mimetype.includes("presentation") || mimetype.includes("powerpoint")) return "design";
+  if (mimetype.includes("javascript") || mimetype.includes("typescript") || mimetype.includes("text/plain")) return "code";
+  return "doc";
 }

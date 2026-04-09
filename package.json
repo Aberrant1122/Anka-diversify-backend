@@ -18,8 +18,10 @@
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^5.22.0",
+    "@types/multer": "^2.1.0",
     "@types/sqlite3": "^3.1.11",
     "bcryptjs": "^3.0.3",
+    "cloudinary": "^2.9.0",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
@@ -27,6 +29,7 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
+    "multer": "^2.1.1",
     "openai": "^6.33.0",
     "prisma": "^5.22.0",
     "sqlite3": "^6.0.1"

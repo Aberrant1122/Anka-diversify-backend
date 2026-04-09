@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ProjectController = void 0;
 const project_service_1 = require("../services/project-service");
 const github_service_1 = require("../services/github.service");
+const upload_service_1 = require("../services/upload.service");
 const projectService = new project_service_1.ProjectService();
 const DEMO_USER_ID = "demo-user-id";
 function getUserId(req) {
@@ -189,6 +190,31 @@ class ProjectController {
             res.status(500).json({ success: false, error: "Failed to create file" });
         }
     }
+    async uploadFile(req, res) {
+        try {
+            const multerFile = req.file;
+            if (!multerFile) {
+                return res.status(400).json({ success: false, error: "No file provided" });
+            }
+            const projectId = param(req, "id");
+            const { phase, type } = req.body;
+            const { url, size } = await (0, upload_service_1.uploadToCloudinary)(multerFile.buffer, multerFile.originalname, projectId);
+            const file = await projectService.createFile({
+                projectId,
+                name: multerFile.originalname,
+                type: type || detectType(multerFile.mimetype),
+                phase: phase || "development",
+                url,
+                size,
+                uploadedBy: getUserId(req),
+            });
+            res.status(201).json({ success: true, data: file });
+        }
+        catch (error) {
+            console.error("Error uploading file:", error);
+            res.status(500).json({ success: false, error: "Failed to upload file" });
+        }
+    }
     async deleteFile(req, res) {
         try {
             const deleted = await projectService.deleteFile(param(req, "fileId"));
@@ -204,4 +230,17 @@ class ProjectController {
     }
 }
 exports.ProjectController = ProjectController;
+function detectType(mimetype) {
+    if (mimetype.startsWith("image/"))
+        return "image";
+    if (mimetype === "application/pdf")
+        return "doc";
+    if (mimetype.includes("spreadsheet") || mimetype.includes("excel") || mimetype.includes("csv"))
+        return "spreadsheet";
+    if (mimetype.includes("presentation") || mimetype.includes("powerpoint"))
+        return "design";
+    if (mimetype.includes("javascript") || mimetype.includes("typescript") || mimetype.includes("text/plain"))
+        return "code";
+    return "doc";
+}
 //# sourceMappingURL=project-controller.js.map
