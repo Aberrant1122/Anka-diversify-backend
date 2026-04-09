@@ -264,7 +264,7 @@ export class AiService {
       }),
       prisma.projectRule.findMany({
         where: { projectId },
-        orderBy: { priority: "desc", createdAt: "desc" },
+        orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
       }),
       prisma.projectTask.findMany({
         where: {
