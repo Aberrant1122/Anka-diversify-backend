@@ -188,6 +188,7 @@ export class ProjectService {
     type?: string;
     phase?: string;
     url?: string;
+    s3Key?: string;
     size?: string;
     uploadedBy?: string;
   }) {
@@ -198,6 +199,7 @@ export class ProjectService {
         type: data.type || "doc",
         phase: data.phase || "development",
         url: data.url,
+        s3Key: data.s3Key,
         size: data.size,
         uploadedBy: data.uploadedBy,
       },
@@ -206,8 +208,8 @@ export class ProjectService {
 
   async deleteFile(fileId: string) {
     const file = await prisma.projectFile.findUnique({ where: { id: fileId } });
-    if (!file) return false;
+    if (!file) return null;
     await prisma.projectFile.delete({ where: { id: fileId } });
-    return true;
+    return file.s3Key || null; // return key so controller can delete from S3
   }
 }

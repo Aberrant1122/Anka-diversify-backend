@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
-import { uploadToCloudinary } from "../services/upload.service";
+import { generatePresignedUrl, deleteFromS3, detectType } from "../services/upload.service";
 
 const projectService = new ProjectService();
 const DEMO_USER_ID = "demo-user-id";
@@ -208,44 +208,54 @@ export class ProjectController {
     }
   }
 
-  async uploadFile(req: Request, res: Response) {
+  // Step 1: get presigned URL to upload directly to S3 from browser
+  async presignUpload(req: Request, res: Response) {
     try {
-      const multerFile = (req as any).file;
-      if (!multerFile) {
-        return res.status(400).json({ success: false, error: "No file provided" });
+      const { filename, mimetype, phase, size } = req.body;
+      if (!filename || !mimetype) {
+        return res.status(400).json({ success: false, error: "filename and mimetype required" });
       }
-
       const projectId = param(req, "id");
-      const { phase, type } = req.body;
+      const { uploadUrl, fileUrl, key } = await generatePresignedUrl(projectId, filename, mimetype);
+      res.json({ success: true, data: { uploadUrl, fileUrl, key, type: detectType(mimetype) } });
+    } catch (error) {
+      console.error("Error generating presigned URL:", error);
+      res.status(500).json({ success: false, error: "Failed to generate upload URL" });
+    }
+  }
 
-      const { url, size } = await uploadToCloudinary(
-        multerFile.buffer,
-        multerFile.originalname,
-        projectId,
-      );
-
+  // Step 2: after browser uploads to S3, save file record in DB
+  async confirmUpload(req: Request, res: Response) {
+    try {
+      const { name, type, phase, url, s3Key, size } = req.body;
+      if (!name || !url) {
+        return res.status(400).json({ success: false, error: "name and url required" });
+      }
       const file = await projectService.createFile({
-        projectId,
-        name: multerFile.originalname,
-        type: type || detectType(multerFile.mimetype),
-        phase: phase || "development",
+        projectId: param(req, "id"),
+        name,
+        type,
+        phase,
         url,
+        s3Key,
         size,
         uploadedBy: getUserId(req),
       });
-
       res.status(201).json({ success: true, data: file });
     } catch (error) {
-      console.error("Error uploading file:", error);
-      res.status(500).json({ success: false, error: "Failed to upload file" });
+      console.error("Error confirming upload:", error);
+      res.status(500).json({ success: false, error: "Failed to save file" });
     }
   }
 
   async deleteFile(req: Request, res: Response) {
     try {
-      const deleted = await projectService.deleteFile(param(req, "fileId"));
-      if (!deleted) {
+      const s3Key = await projectService.deleteFile(param(req, "fileId"));
+      if (s3Key === undefined) {
         return res.status(404).json({ success: false, error: "File not found" });
+      }
+      if (s3Key) {
+        deleteFromS3(s3Key).catch((err) => console.error("S3 delete failed:", err));
       }
       res.json({ success: true, message: "File deleted successfully" });
     } catch (error) {
@@ -255,11 +265,3 @@ export class ProjectController {
   }
 }
 
-function detectType(mimetype: string): string {
-  if (mimetype.startsWith("image/")) return "image";
-  if (mimetype === "application/pdf") return "doc";
-  if (mimetype.includes("spreadsheet") || mimetype.includes("excel") || mimetype.includes("csv")) return "spreadsheet";
-  if (mimetype.includes("presentation") || mimetype.includes("powerpoint")) return "design";
-  if (mimetype.includes("javascript") || mimetype.includes("typescript") || mimetype.includes("text/plain")) return "code";
-  return "doc";
-}

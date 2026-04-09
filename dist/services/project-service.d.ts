@@ -214,6 +214,7 @@ export declare class ProjectService {
         updatedAt: Date;
         type: string;
         url: string | null;
+        s3Key: string | null;
         size: string | null;
         uploadedBy: string | null;
     }[]>;
@@ -223,6 +224,7 @@ export declare class ProjectService {
         type?: string;
         phase?: string;
         url?: string;
+        s3Key?: string;
         size?: string;
         uploadedBy?: string;
     }): Promise<{
@@ -234,9 +236,10 @@ export declare class ProjectService {
         updatedAt: Date;
         type: string;
         url: string | null;
+        s3Key: string | null;
         size: string | null;
         uploadedBy: string | null;
     }>;
-    deleteFile(fileId: string): Promise<boolean>;
+    deleteFile(fileId: string): Promise<string | null>;
 }
 //# sourceMappingURL=project-service.d.ts.map

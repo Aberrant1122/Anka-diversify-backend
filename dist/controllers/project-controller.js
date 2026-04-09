@@ -190,36 +190,54 @@ class ProjectController {
             res.status(500).json({ success: false, error: "Failed to create file" });
         }
     }
-    async uploadFile(req, res) {
+    // Step 1: get presigned URL to upload directly to S3 from browser
+    async presignUpload(req, res) {
         try {
-            const multerFile = req.file;
-            if (!multerFile) {
-                return res.status(400).json({ success: false, error: "No file provided" });
+            const { filename, mimetype, phase, size } = req.body;
+            if (!filename || !mimetype) {
+                return res.status(400).json({ success: false, error: "filename and mimetype required" });
             }
             const projectId = param(req, "id");
-            const { phase, type } = req.body;
-            const { url, size } = await (0, upload_service_1.uploadToCloudinary)(multerFile.buffer, multerFile.originalname, projectId);
+            const { uploadUrl, fileUrl, key } = await (0, upload_service_1.generatePresignedUrl)(projectId, filename, mimetype);
+            res.json({ success: true, data: { uploadUrl, fileUrl, key, type: (0, upload_service_1.detectType)(mimetype) } });
+        }
+        catch (error) {
+            console.error("Error generating presigned URL:", error);
+            res.status(500).json({ success: false, error: "Failed to generate upload URL" });
+        }
+    }
+    // Step 2: after browser uploads to S3, save file record in DB
+    async confirmUpload(req, res) {
+        try {
+            const { name, type, phase, url, s3Key, size } = req.body;
+            if (!name || !url) {
+                return res.status(400).json({ success: false, error: "name and url required" });
+            }
             const file = await projectService.createFile({
-                projectId,
-                name: multerFile.originalname,
-                type: type || detectType(multerFile.mimetype),
-                phase: phase || "development",
+                projectId: param(req, "id"),
+                name,
+                type,
+                phase,
                 url,
+                s3Key,
                 size,
                 uploadedBy: getUserId(req),
             });
             res.status(201).json({ success: true, data: file });
         }
         catch (error) {
-            console.error("Error uploading file:", error);
-            res.status(500).json({ success: false, error: "Failed to upload file" });
+            console.error("Error confirming upload:", error);
+            res.status(500).json({ success: false, error: "Failed to save file" });
         }
     }
     async deleteFile(req, res) {
         try {
-            const deleted = await projectService.deleteFile(param(req, "fileId"));
-            if (!deleted) {
+            const s3Key = await projectService.deleteFile(param(req, "fileId"));
+            if (s3Key === undefined) {
                 return res.status(404).json({ success: false, error: "File not found" });
+            }
+            if (s3Key) {
+                (0, upload_service_1.deleteFromS3)(s3Key).catch((err) => console.error("S3 delete failed:", err));
             }
             res.json({ success: true, message: "File deleted successfully" });
         }
@@ -230,17 +248,4 @@ class ProjectController {
     }
 }
 exports.ProjectController = ProjectController;
-function detectType(mimetype) {
-    if (mimetype.startsWith("image/"))
-        return "image";
-    if (mimetype === "application/pdf")
-        return "doc";
-    if (mimetype.includes("spreadsheet") || mimetype.includes("excel") || mimetype.includes("csv"))
-        return "spreadsheet";
-    if (mimetype.includes("presentation") || mimetype.includes("powerpoint"))
-        return "design";
-    if (mimetype.includes("javascript") || mimetype.includes("typescript") || mimetype.includes("text/plain"))
-        return "code";
-    return "doc";
-}
 //# sourceMappingURL=project-controller.js.map

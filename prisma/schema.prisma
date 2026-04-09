@@ -142,6 +142,7 @@ model ProjectFile {
   type        String   @default("doc") // 'doc', 'image', 'spreadsheet', 'design', 'code', 'other'
   phase       String   @default("development") // 'product-modeling', 'development', 'marketing'
   url         String?
+  s3Key       String?
   size        String?
   uploadedBy  String?
   createdAt   DateTime @default(now())

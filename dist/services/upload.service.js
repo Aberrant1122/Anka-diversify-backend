@@ -1,29 +1,45 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.uploadToCloudinary = uploadToCloudinary;
-const cloudinary_1 = require("cloudinary");
-const stream_1 = require("stream");
-cloudinary_1.v2.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
+exports.detectType = detectType;
+exports.generatePresignedUrl = generatePresignedUrl;
+exports.deleteFromS3 = deleteFromS3;
+const client_s3_1 = require("@aws-sdk/client-s3");
+const s3_request_presigner_1 = require("@aws-sdk/s3-request-presigner");
+const crypto_1 = require("crypto");
+const s3 = new client_s3_1.S3Client({
+    region: process.env.AWS_REGION || "us-east-1",
+    credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    },
 });
-async function uploadToCloudinary(buffer, originalName, projectId) {
-    return new Promise((resolve, reject) => {
-        const stream = cloudinary_1.v2.uploader.upload_stream({
-            folder: `anka-os/projects/${projectId}`,
-            resource_type: "auto", // handles images, PDFs, docs
-            public_id: `${Date.now()}-${originalName.replace(/[^a-zA-Z0-9.]/g, "_")}`,
-        }, (error, result) => {
-            if (error || !result)
-                return reject(error || new Error("Upload failed"));
-            const bytes = result.bytes;
-            const size = bytes < 1024 ? `${bytes} B`
-                : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB`
-                    : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-            resolve({ url: result.secure_url, size, publicId: result.public_id });
-        });
-        stream_1.Readable.from(buffer).pipe(stream);
+const BUCKET = process.env.AWS_S3_BUCKET;
+function detectType(mimetype) {
+    if (mimetype.startsWith("image/"))
+        return "image";
+    if (mimetype === "application/pdf")
+        return "doc";
+    if (mimetype.includes("spreadsheet") || mimetype.includes("excel") || mimetype.includes("csv"))
+        return "spreadsheet";
+    if (mimetype.includes("presentation") || mimetype.includes("powerpoint"))
+        return "design";
+    if (mimetype.includes("javascript") || mimetype.includes("typescript") || mimetype.includes("text/plain"))
+        return "code";
+    return "doc";
+}
+async function generatePresignedUrl(projectId, filename, mimetype) {
+    const ext = filename.includes(".") ? filename.split(".").pop() : "";
+    const key = `projects/${projectId}/${(0, crypto_1.randomUUID)()}${ext ? `.${ext}` : ""}`;
+    const command = new client_s3_1.PutObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        ContentType: mimetype,
     });
+    const uploadUrl = await (0, s3_request_presigner_1.getSignedUrl)(s3, command, { expiresIn: 300 }); // 5 min
+    const fileUrl = `https://${BUCKET}.s3.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com/${key}`;
+    return { uploadUrl, fileUrl, key };
+}
+async function deleteFromS3(key) {
+    await s3.send(new client_s3_1.DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
 }
 //# sourceMappingURL=upload.service.js.map

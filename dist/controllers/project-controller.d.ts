@@ -12,7 +12,8 @@ export declare class ProjectController {
     deleteTask(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
     getProjectFiles(req: Request, res: Response): Promise<void>;
     createFile(req: Request, res: Response): Promise<void>;
-    uploadFile(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+    presignUpload(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+    confirmUpload(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
     deleteFile(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
 }
 //# sourceMappingURL=project-controller.d.ts.map

@@ -1,8 +1,5 @@
 import { Router } from 'express';
-import multer from 'multer';
 import { ProjectController } from '../controllers/project-controller';
-
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB
 
 const router = Router();
 const projectController = new ProjectController();
@@ -34,7 +31,8 @@ router.delete('/:id/tasks/:taskId', projectController.deleteTask.bind(projectCon
 // Project files
 router.get('/:id/files', projectController.getProjectFiles.bind(projectController));
 router.post('/:id/files', projectController.createFile.bind(projectController));
-router.post('/:id/files/upload', upload.single('file'), projectController.uploadFile.bind(projectController));
+router.post('/:id/files/presign', projectController.presignUpload.bind(projectController));
+router.post('/:id/files/confirm', projectController.confirmUpload.bind(projectController));
 router.delete('/:id/files/:fileId', projectController.deleteFile.bind(projectController));
 
 export default router;

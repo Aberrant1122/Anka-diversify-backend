@@ -1,34 +1,46 @@
-import { v2 as cloudinary } from "cloudinary";
-import { Readable } from "stream";
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { randomUUID } from "crypto";
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
+const s3 = new S3Client({
+  region: process.env.AWS_REGION || "us-east-1",
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  },
 });
 
-export async function uploadToCloudinary(
-  buffer: Buffer,
-  originalName: string,
+const BUCKET = process.env.AWS_S3_BUCKET!;
+
+export function detectType(mimetype: string): string {
+  if (mimetype.startsWith("image/")) return "image";
+  if (mimetype === "application/pdf") return "doc";
+  if (mimetype.includes("spreadsheet") || mimetype.includes("excel") || mimetype.includes("csv")) return "spreadsheet";
+  if (mimetype.includes("presentation") || mimetype.includes("powerpoint")) return "design";
+  if (mimetype.includes("javascript") || mimetype.includes("typescript") || mimetype.includes("text/plain")) return "code";
+  return "doc";
+}
+
+export async function generatePresignedUrl(
   projectId: string,
-): Promise<{ url: string; size: string; publicId: string }> {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        folder: `anka-os/projects/${projectId}`,
-        resource_type: "auto", // handles images, PDFs, docs
-        public_id: `${Date.now()}-${originalName.replace(/[^a-zA-Z0-9.]/g, "_")}`,
-      },
-      (error, result) => {
-        if (error || !result) return reject(error || new Error("Upload failed"));
-        const bytes = result.bytes;
-        const size =
-          bytes < 1024 ? `${bytes} B`
-          : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB`
-          : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-        resolve({ url: result.secure_url, size, publicId: result.public_id });
-      },
-    );
-    Readable.from(buffer).pipe(stream);
+  filename: string,
+  mimetype: string,
+): Promise<{ uploadUrl: string; fileUrl: string; key: string }> {
+  const ext = filename.includes(".") ? filename.split(".").pop() : "";
+  const key = `projects/${projectId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
+
+  const command = new PutObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+    ContentType: mimetype,
   });
+
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 300 }); // 5 min
+  const fileUrl = `https://${BUCKET}.s3.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com/${key}`;
+
+  return { uploadUrl, fileUrl, key };
+}
+
+export async function deleteFromS3(key: string): Promise<void> {
+  await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
 }

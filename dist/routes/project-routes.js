@@ -1,12 +1,7 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
-const multer_1 = __importDefault(require("multer"));
 const project_controller_1 = require("../controllers/project-controller");
-const upload = (0, multer_1.default)({ storage: multer_1.default.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB
 const router = (0, express_1.Router)();
 const projectController = new project_controller_1.ProjectController();
 // Get all projects
@@ -29,7 +24,8 @@ router.delete('/:id/tasks/:taskId', projectController.deleteTask.bind(projectCon
 // Project files
 router.get('/:id/files', projectController.getProjectFiles.bind(projectController));
 router.post('/:id/files', projectController.createFile.bind(projectController));
-router.post('/:id/files/upload', upload.single('file'), projectController.uploadFile.bind(projectController));
+router.post('/:id/files/presign', projectController.presignUpload.bind(projectController));
+router.post('/:id/files/confirm', projectController.confirmUpload.bind(projectController));
 router.delete('/:id/files/:fileId', projectController.deleteFile.bind(projectController));
 exports.default = router;
 //# sourceMappingURL=project-routes.js.map
