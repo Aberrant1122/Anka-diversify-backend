@@ -10,5 +10,8 @@ export declare class ProjectController {
     createTask(req: Request, res: Response): Promise<void>;
     updateTask(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
     deleteTask(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+    getProjectFiles(req: Request, res: Response): Promise<void>;
+    createFile(req: Request, res: Response): Promise<void>;
+    deleteFile(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
 }
 //# sourceMappingURL=project-controller.d.ts.map

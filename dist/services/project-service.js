@@ -126,6 +126,32 @@ class ProjectService {
         await prisma.projectTask.delete({ where: { id: taskId } });
         return true;
     }
+    async getProjectFiles(projectId) {
+        return prisma.projectFile.findMany({
+            where: { projectId },
+            orderBy: { createdAt: "desc" },
+        });
+    }
+    async createFile(data) {
+        return prisma.projectFile.create({
+            data: {
+                projectId: data.projectId,
+                name: data.name,
+                type: data.type || "doc",
+                phase: data.phase || "development",
+                url: data.url,
+                size: data.size,
+                uploadedBy: data.uploadedBy,
+            },
+        });
+    }
+    async deleteFile(fileId) {
+        const file = await prisma.projectFile.findUnique({ where: { id: fileId } });
+        if (!file)
+            return false;
+        await prisma.projectFile.delete({ where: { id: fileId } });
+        return true;
+    }
 }
 exports.ProjectService = ProjectService;
 //# sourceMappingURL=project-service.js.map

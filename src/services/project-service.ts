@@ -174,4 +174,40 @@ export class ProjectService {
     await prisma.projectTask.delete({ where: { id: taskId } });
     return true;
   }
+
+  async getProjectFiles(projectId: string) {
+    return prisma.projectFile.findMany({
+      where: { projectId },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  async createFile(data: {
+    projectId: string;
+    name: string;
+    type?: string;
+    phase?: string;
+    url?: string;
+    size?: string;
+    uploadedBy?: string;
+  }) {
+    return prisma.projectFile.create({
+      data: {
+        projectId: data.projectId,
+        name: data.name,
+        type: data.type || "doc",
+        phase: data.phase || "development",
+        url: data.url,
+        size: data.size,
+        uploadedBy: data.uploadedBy,
+      },
+    });
+  }
+
+  async deleteFile(fileId: string) {
+    const file = await prisma.projectFile.findUnique({ where: { id: fileId } });
+    if (!file) return false;
+    await prisma.projectFile.delete({ where: { id: fileId } });
+    return true;
+  }
 }

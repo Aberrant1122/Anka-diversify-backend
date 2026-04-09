@@ -21,5 +21,9 @@ router.get('/:id/tasks', projectController.getProjectTasks.bind(projectControlle
 router.post('/:id/tasks', projectController.createTask.bind(projectController));
 router.put('/:id/tasks/:taskId', projectController.updateTask.bind(projectController));
 router.delete('/:id/tasks/:taskId', projectController.deleteTask.bind(projectController));
+// Project files
+router.get('/:id/files', projectController.getProjectFiles.bind(projectController));
+router.post('/:id/files', projectController.createFile.bind(projectController));
+router.delete('/:id/files/:fileId', projectController.deleteFile.bind(projectController));
 exports.default = router;
 //# sourceMappingURL=project-routes.js.map

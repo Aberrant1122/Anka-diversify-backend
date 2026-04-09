@@ -45,6 +45,7 @@ model Project {
   decisions      ProjectDecision[]
   rules          ProjectRule[]
   tasks          ProjectTask[]
+  files          ProjectFile[]
 
   @@map("projects")
 }
@@ -132,6 +133,23 @@ model ProjectTask {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@map("project_tasks")
+}
+
+model ProjectFile {
+  id          String   @id @default(cuid())
+  projectId   String
+  name        String
+  type        String   @default("doc") // 'doc', 'image', 'spreadsheet', 'design', 'code', 'other'
+  phase       String   @default("development") // 'product-modeling', 'development', 'marketing'
+  url         String?
+  size        String?
+  uploadedBy  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("project_files")
 }
 
 model ProjectRepoSnapshot {

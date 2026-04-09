@@ -178,4 +178,45 @@ export class ProjectController {
       res.status(500).json({ success: false, error: "Failed to delete task" });
     }
   }
+
+  async getProjectFiles(req: Request, res: Response) {
+    try {
+      const files = await projectService.getProjectFiles(param(req, "id"));
+      res.json({ success: true, data: files, count: files.length });
+    } catch (error) {
+      console.error("Error fetching project files:", error);
+      res.status(500).json({ success: false, error: "Failed to fetch files" });
+    }
+  }
+
+  async createFile(req: Request, res: Response) {
+    try {
+      const file = await projectService.createFile({
+        projectId: param(req, "id"),
+        name: req.body.name,
+        type: req.body.type,
+        phase: req.body.phase,
+        url: req.body.url,
+        size: req.body.size,
+        uploadedBy: req.body.uploadedBy,
+      });
+      res.status(201).json({ success: true, data: file });
+    } catch (error) {
+      console.error("Error creating file:", error);
+      res.status(500).json({ success: false, error: "Failed to create file" });
+    }
+  }
+
+  async deleteFile(req: Request, res: Response) {
+    try {
+      const deleted = await projectService.deleteFile(param(req, "fileId"));
+      if (!deleted) {
+        return res.status(404).json({ success: false, error: "File not found" });
+      }
+      res.json({ success: true, message: "File deleted successfully" });
+    } catch (error) {
+      console.error("Error deleting file:", error);
+      res.status(500).json({ success: false, error: "Failed to delete file" });
+    }
+  }
 }

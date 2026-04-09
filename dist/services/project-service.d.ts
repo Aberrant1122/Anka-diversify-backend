@@ -205,5 +205,38 @@ export declare class ProjectService {
         title: string;
     }>;
     deleteTask(taskId: string): Promise<boolean>;
+    getProjectFiles(projectId: string): Promise<{
+        id: string;
+        projectId: string;
+        name: string;
+        phase: string;
+        createdAt: Date;
+        updatedAt: Date;
+        type: string;
+        url: string | null;
+        size: string | null;
+        uploadedBy: string | null;
+    }[]>;
+    createFile(data: {
+        projectId: string;
+        name: string;
+        type?: string;
+        phase?: string;
+        url?: string;
+        size?: string;
+        uploadedBy?: string;
+    }): Promise<{
+        id: string;
+        projectId: string;
+        name: string;
+        phase: string;
+        createdAt: Date;
+        updatedAt: Date;
+        type: string;
+        url: string | null;
+        size: string | null;
+        uploadedBy: string | null;
+    }>;
+    deleteFile(fileId: string): Promise<boolean>;
 }
 //# sourceMappingURL=project-service.d.ts.map

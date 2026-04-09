@@ -188,14 +188,14 @@ class AiService {
             }),
             prisma.projectRule.findMany({
                 where: { projectId },
-                orderBy: { priority: "desc", createdAt: "desc" },
+                orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
             }),
             prisma.projectTask.findMany({
                 where: {
                     projectId,
                     status: { in: ["todo", "in_progress"] },
                 },
-                orderBy: { priority: "desc", dueDate: "asc" },
+                orderBy: [{ priority: "desc" }, { dueDate: "asc" }],
                 take: 20,
             }),
             github_service_1.ProjectGitHubService.getSnapshot(projectId),
