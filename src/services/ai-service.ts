@@ -271,7 +271,7 @@ export class AiService {
           projectId,
           status: { in: ["todo", "in_progress"] },
         },
-        orderBy: { priority: "desc", dueDate: "asc" },
+        orderBy: [{ priority: "desc" }, { dueDate: "asc" }],
         take: 20,
       }),
       ProjectGitHubService.getSnapshot(projectId),
