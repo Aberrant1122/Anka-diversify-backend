@@ -216,6 +216,27 @@ export declare class ProjectService {
         userName: string;
         projectId: string;
     }): Promise<boolean>;
+    getChatMessages(projectId: string, limit?: number): Promise<{
+        id: string;
+        projectId: string;
+        userId: string;
+        createdAt: Date;
+        content: string;
+        userName: string;
+    }[]>;
+    sendChatMessage(data: {
+        projectId: string;
+        userId: string;
+        userName: string;
+        content: string;
+    }): Promise<{
+        id: string;
+        projectId: string;
+        userId: string;
+        createdAt: Date;
+        content: string;
+        userName: string;
+    }>;
     logActivity(data: {
         projectId: string;
         userId: string;

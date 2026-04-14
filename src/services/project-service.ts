@@ -222,6 +222,20 @@ export class ProjectService {
     return true;
   }
 
+  // ── Chat ────────────────────────────────────────────────────────────────────
+
+  async getChatMessages(projectId: string, limit = 100) {
+    return prisma.projectChatMessage.findMany({
+      where: { projectId },
+      orderBy: { createdAt: "asc" },
+      take: limit,
+    });
+  }
+
+  async sendChatMessage(data: { projectId: string; userId: string; userName: string; content: string }) {
+    return prisma.projectChatMessage.create({ data });
+  }
+
   // ── Activities ─────────────────────────────────────────────────────────────
 
   async logActivity(data: {

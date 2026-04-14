@@ -35,6 +35,10 @@ router.post('/:id/files/presign', projectController.presignUpload.bind(projectCo
 router.post('/:id/files/confirm', projectController.confirmUpload.bind(projectController));
 router.delete('/:id/files/:fileId', projectController.deleteFile.bind(projectController));
 
+// Project chat
+router.get('/:id/chat', projectController.getChatMessages.bind(projectController));
+router.post('/:id/chat', projectController.sendChatMessage.bind(projectController));
+
 // Project activities
 router.get('/:id/activities', projectController.getActivities.bind(projectController));
 

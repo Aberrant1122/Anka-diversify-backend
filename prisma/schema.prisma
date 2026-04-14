@@ -202,6 +202,17 @@ model ProjectFile {
   @@map("project_files")
 }
 
+model ProjectChatMessage {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  userName  String
+  content   String
+  createdAt DateTime @default(now())
+
+  @@map("project_chat_messages")
+}
+
 model ProjectRepoSnapshot {
   id            String   @id @default(cuid())
   projectId     String   @unique

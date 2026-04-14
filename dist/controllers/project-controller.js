@@ -168,6 +168,35 @@ class ProjectController {
             res.status(500).json({ success: false, error: "Failed to delete task" });
         }
     }
+    async getChatMessages(req, res) {
+        try {
+            const messages = await projectService.getChatMessages(param(req, "id"));
+            res.json({ success: true, data: messages });
+        }
+        catch (error) {
+            console.error("Error fetching chat messages:", error);
+            res.status(500).json({ success: false, error: "Failed to fetch messages" });
+        }
+    }
+    async sendChatMessage(req, res) {
+        try {
+            const { content } = req.body;
+            if (!content?.trim()) {
+                return res.status(400).json({ success: false, error: "content is required" });
+            }
+            const message = await projectService.sendChatMessage({
+                projectId: param(req, "id"),
+                userId: getUserId(req),
+                userName: getUserName(req),
+                content: content.trim(),
+            });
+            res.status(201).json({ success: true, data: message });
+        }
+        catch (error) {
+            console.error("Error sending chat message:", error);
+            res.status(500).json({ success: false, error: "Failed to send message" });
+        }
+    }
     async getActivities(req, res) {
         try {
             const activities = await projectService.getActivities(param(req, "id"));
