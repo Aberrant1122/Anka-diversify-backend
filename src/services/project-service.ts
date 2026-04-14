@@ -24,7 +24,6 @@ export class ProjectService {
   async getAllProjects(userId: string = DEMO_USER_ID) {
     await ensureUser(userId);
     return prisma.project.findMany({
-      where: { userId },
       include: {
         tasks: true,
         memorySummary: { select: { summary: true, lastUpdated: true } },
@@ -36,8 +35,8 @@ export class ProjectService {
 
   async getProjectById(id: string, userId: string = DEMO_USER_ID) {
     await ensureUser(userId);
-    return prisma.project.findFirst({
-      where: { id, userId },
+    return prisma.project.findUnique({
+      where: { id },
       include: {
         tasks: true,
         memorySummary: true,
@@ -91,7 +90,7 @@ export class ProjectService {
     },
     userId: string = DEMO_USER_ID,
   ) {
-    const project = await prisma.project.findFirst({ where: { id, userId } });
+    const project = await prisma.project.findUnique({ where: { id } });
     if (!project) return null;
 
     return prisma.project.update({
@@ -110,7 +109,7 @@ export class ProjectService {
   }
 
   async deleteProject(id: string, userId: string = DEMO_USER_ID) {
-    const project = await prisma.project.findFirst({ where: { id, userId } });
+    const project = await prisma.project.findUnique({ where: { id } });
     if (!project) return false;
 
     await prisma.project.delete({ where: { id } });
