@@ -9,6 +9,7 @@ import aiRoutes from "./routes/ai-routes";
 import authRoutes from "./routes/auth-routes";
 import adminRoutes from "./routes/admin-routes";
 import projectRoutes from "./routes/project-routes";
+import inviteRoutes from "./routes/invite-routes";
 import { authenticateToken } from "./middleware/auth";
 
 dotenv.config();
@@ -55,6 +56,7 @@ app.use("/api/ai", aiRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/projects", projectRoutes);
+app.use("/api/invites", inviteRoutes);
 
 // Error handler
 app.use(errorHandler);
