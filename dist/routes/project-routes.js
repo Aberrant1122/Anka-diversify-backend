@@ -27,6 +27,10 @@ router.post('/:id/files', projectController.createFile.bind(projectController));
 router.post('/:id/files/presign', projectController.presignUpload.bind(projectController));
 router.post('/:id/files/confirm', projectController.confirmUpload.bind(projectController));
 router.delete('/:id/files/:fileId', projectController.deleteFile.bind(projectController));
+// Project members
+router.get('/:id/members', projectController.getProjectMembers.bind(projectController));
+router.post('/:id/members', projectController.addProjectMember.bind(projectController));
+router.delete('/:id/members/:userId', projectController.removeProjectMember.bind(projectController));
 // Project chat
 router.get('/:id/chat', projectController.getChatMessages.bind(projectController));
 router.post('/:id/chat', projectController.sendChatMessage.bind(projectController));

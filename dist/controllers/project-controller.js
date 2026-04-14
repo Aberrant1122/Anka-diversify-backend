@@ -168,6 +168,44 @@ class ProjectController {
             res.status(500).json({ success: false, error: "Failed to delete task" });
         }
     }
+    async getProjectMembers(req, res) {
+        try {
+            const members = await projectService.getProjectMembers(param(req, "id"));
+            res.json({ success: true, data: members });
+        }
+        catch (error) {
+            console.error("Error fetching members:", error);
+            res.status(500).json({ success: false, error: "Failed to fetch members" });
+        }
+    }
+    async addProjectMember(req, res) {
+        try {
+            const { userId } = req.body;
+            if (!userId)
+                return res.status(400).json({ success: false, error: "userId required" });
+            const member = await projectService.addProjectMember(param(req, "id"), userId);
+            res.status(201).json({ success: true, data: member });
+        }
+        catch (error) {
+            if (error?.code === "P2002") {
+                return res.status(409).json({ success: false, error: "User is already a member" });
+            }
+            console.error("Error adding member:", error);
+            res.status(500).json({ success: false, error: "Failed to add member" });
+        }
+    }
+    async removeProjectMember(req, res) {
+        try {
+            const removed = await projectService.removeProjectMember(param(req, "id"), param(req, "userId"));
+            if (!removed)
+                return res.status(404).json({ success: false, error: "Member not found" });
+            res.json({ success: true, message: "Member removed" });
+        }
+        catch (error) {
+            console.error("Error removing member:", error);
+            res.status(500).json({ success: false, error: "Failed to remove member" });
+        }
+    }
     async getChatMessages(req, res) {
         try {
             const messages = await projectService.getChatMessages(param(req, "id"));

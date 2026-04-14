@@ -10,6 +10,9 @@ export declare class ProjectController {
     createTask(req: Request, res: Response): Promise<void>;
     updateTask(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
     deleteTask(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+    getProjectMembers(req: Request, res: Response): Promise<void>;
+    addProjectMember(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+    removeProjectMember(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
     getChatMessages(req: Request, res: Response): Promise<void>;
     sendChatMessage(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
     getActivities(req: Request, res: Response): Promise<void>;

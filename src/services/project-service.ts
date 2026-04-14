@@ -28,6 +28,7 @@ export class ProjectService {
         tasks: true,
         memorySummary: { select: { summary: true, lastUpdated: true } },
         repoSnapshot: { select: { githubUrl: true, repoName: true, lastSyncedAt: true } },
+        members: { include: { user: { select: { id: true, name: true, email: true, role: true, department: true, status: true } } } },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -43,6 +44,7 @@ export class ProjectService {
         repoSnapshot: true,
         decisions: { orderBy: { madeAt: "desc" }, take: 10 },
         rules: { orderBy: { createdAt: "desc" } },
+        members: { include: { user: { select: { id: true, name: true, email: true, role: true, department: true, status: true } } } },
       },
     });
   }
@@ -218,6 +220,34 @@ export class ProjectService {
         entityName: task.title,
       });
     }
+    return true;
+  }
+
+  // ── Members ─────────────────────────────────────────────────────────────────
+
+  async getProjectMembers(projectId: string) {
+    const members = await prisma.projectMember.findMany({
+      where: { projectId },
+      include: { user: { select: { id: true, name: true, email: true, role: true, department: true, status: true } } },
+      orderBy: { joinedAt: "asc" },
+    });
+    return members.map((m) => ({ ...m.user, joinedAt: m.joinedAt }));
+  }
+
+  async addProjectMember(projectId: string, userId: string) {
+    await ensureUser(userId);
+    return prisma.projectMember.create({
+      data: { projectId, userId },
+      include: { user: { select: { id: true, name: true, email: true, role: true, department: true, status: true } } },
+    });
+  }
+
+  async removeProjectMember(projectId: string, userId: string) {
+    const member = await prisma.projectMember.findUnique({
+      where: { projectId_userId: { projectId, userId } },
+    });
+    if (!member) return false;
+    await prisma.projectMember.delete({ where: { projectId_userId: { projectId, userId } } });
     return true;
   }
 

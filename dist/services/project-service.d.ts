@@ -21,6 +21,21 @@ export declare class ProjectService {
             updatedAt: Date;
             title: string;
         }[];
+        members: ({
+            user: {
+                id: string;
+                name: string | null;
+                status: string;
+                role: string;
+                email: string;
+                department: string | null;
+            };
+        } & {
+            id: string;
+            projectId: string;
+            userId: string;
+            joinedAt: Date;
+        })[];
     } & {
         priority: string;
         description: string | null;
@@ -86,6 +101,21 @@ export declare class ProjectService {
             updatedAt: Date;
             title: string;
         }[];
+        members: ({
+            user: {
+                id: string;
+                name: string | null;
+                status: string;
+                role: string;
+                email: string;
+                department: string | null;
+            };
+        } & {
+            id: string;
+            projectId: string;
+            userId: string;
+            joinedAt: Date;
+        })[];
     } & {
         priority: string;
         description: string | null;
@@ -216,6 +246,31 @@ export declare class ProjectService {
         userName: string;
         projectId: string;
     }): Promise<boolean>;
+    getProjectMembers(projectId: string): Promise<{
+        joinedAt: Date;
+        id: string;
+        name: string | null;
+        status: string;
+        role: string;
+        email: string;
+        department: string | null;
+    }[]>;
+    addProjectMember(projectId: string, userId: string): Promise<{
+        user: {
+            id: string;
+            name: string | null;
+            status: string;
+            role: string;
+            email: string;
+            department: string | null;
+        };
+    } & {
+        id: string;
+        projectId: string;
+        userId: string;
+        joinedAt: Date;
+    }>;
+    removeProjectMember(projectId: string, userId: string): Promise<boolean>;
     getChatMessages(projectId: string, limit?: number): Promise<{
         id: string;
         projectId: string;
