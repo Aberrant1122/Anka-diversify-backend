@@ -125,16 +125,19 @@ export class ProjectService {
     });
   }
 
-  async createTask(data: {
-    project_id: string;
-    title: string;
-    description?: string;
-    status?: string;
-    priority?: string;
-    phase?: string;
-    due_date?: string;
-  }) {
-    return prisma.projectTask.create({
+  async createTask(
+    data: {
+      project_id: string;
+      title: string;
+      description?: string;
+      status?: string;
+      priority?: string;
+      phase?: string;
+      due_date?: string;
+    },
+    actor?: { userId: string; userName: string },
+  ) {
+    const task = await prisma.projectTask.create({
       data: {
         projectId: data.project_id,
         title: data.title,
@@ -145,17 +148,33 @@ export class ProjectService {
         dueDate: data.due_date ? new Date(data.due_date) : undefined,
       },
     });
+    if (actor) {
+      await this.logActivity({
+        projectId: data.project_id,
+        userId: actor.userId,
+        userName: actor.userName,
+        action: "created_task",
+        entityType: "task",
+        entityId: task.id,
+        entityName: task.title,
+      });
+    }
+    return task;
   }
 
-  async updateTask(taskId: string, data: {
-    title?: string;
-    description?: string;
-    status?: string;
-    priority?: string;
-    phase?: string;
-    dueDate?: string;
-  }) {
-    return prisma.projectTask.update({
+  async updateTask(
+    taskId: string,
+    data: {
+      title?: string;
+      description?: string;
+      status?: string;
+      priority?: string;
+      phase?: string;
+      dueDate?: string;
+    },
+    actor?: { userId: string; userName: string; projectId: string },
+  ) {
+    const task = await prisma.projectTask.update({
       where: { id: taskId },
       data: {
         ...(data.title !== undefined && { title: data.title }),
@@ -166,14 +185,102 @@ export class ProjectService {
         ...(data.dueDate !== undefined && { dueDate: new Date(data.dueDate) }),
       },
     });
+    if (actor) {
+      const action = data.status ? "moved_task" : "updated_task";
+      await this.logActivity({
+        projectId: actor.projectId,
+        userId: actor.userId,
+        userName: actor.userName,
+        action,
+        entityType: "task",
+        entityId: task.id,
+        entityName: task.title,
+        meta: data.status ? { to: data.status } : undefined,
+      });
+    }
+    return task;
   }
 
-  async deleteTask(taskId: string) {
+  async deleteTask(
+    taskId: string,
+    actor?: { userId: string; userName: string; projectId: string },
+  ) {
     const task = await prisma.projectTask.findUnique({ where: { id: taskId } });
     if (!task) return false;
     await prisma.projectTask.delete({ where: { id: taskId } });
+    if (actor) {
+      await this.logActivity({
+        projectId: actor.projectId,
+        userId: actor.userId,
+        userName: actor.userName,
+        action: "deleted_task",
+        entityType: "task",
+        entityId: taskId,
+        entityName: task.title,
+      });
+    }
     return true;
   }
+
+  // ── Activities ─────────────────────────────────────────────────────────────
+
+  async logActivity(data: {
+    projectId: string;
+    userId: string;
+    userName: string;
+    action: string;
+    entityType: string;
+    entityId?: string;
+    entityName?: string;
+    meta?: Record<string, any>;
+  }) {
+    return prisma.projectActivity.create({ data });
+  }
+
+  async getActivities(projectId: string, limit = 50) {
+    return prisma.projectActivity.findMany({
+      where: { projectId },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+  }
+
+  // ── Comments ────────────────────────────────────────────────────────────────
+
+  async getComments(taskId: string) {
+    return prisma.taskComment.findMany({
+      where: { taskId },
+      orderBy: { createdAt: "asc" },
+    });
+  }
+
+  async createComment(data: {
+    taskId: string;
+    projectId: string;
+    userId: string;
+    userName: string;
+    content: string;
+  }) {
+    const comment = await prisma.taskComment.create({ data });
+    await this.logActivity({
+      projectId: data.projectId,
+      userId: data.userId,
+      userName: data.userName,
+      action: "added_comment",
+      entityType: "comment",
+      entityId: comment.id,
+    });
+    return comment;
+  }
+
+  async deleteComment(commentId: string) {
+    const comment = await prisma.taskComment.findUnique({ where: { id: commentId } });
+    if (!comment) return false;
+    await prisma.taskComment.delete({ where: { id: commentId } });
+    return true;
+  }
+
+  // ── Files ───────────────────────────────────────────────────────────────────
 
   async getProjectFiles(projectId: string) {
     return prisma.projectFile.findMany({

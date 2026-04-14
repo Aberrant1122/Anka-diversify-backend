@@ -173,6 +173,9 @@ export declare class ProjectService {
         priority?: string;
         phase?: string;
         due_date?: string;
+    }, actor?: {
+        userId: string;
+        userName: string;
     }): Promise<{
         priority: string;
         description: string | null;
@@ -192,6 +195,10 @@ export declare class ProjectService {
         priority?: string;
         phase?: string;
         dueDate?: string;
+    }, actor?: {
+        userId: string;
+        userName: string;
+        projectId: string;
     }): Promise<{
         priority: string;
         description: string | null;
@@ -204,7 +211,69 @@ export declare class ProjectService {
         updatedAt: Date;
         title: string;
     }>;
-    deleteTask(taskId: string): Promise<boolean>;
+    deleteTask(taskId: string, actor?: {
+        userId: string;
+        userName: string;
+        projectId: string;
+    }): Promise<boolean>;
+    logActivity(data: {
+        projectId: string;
+        userId: string;
+        userName: string;
+        action: string;
+        entityType: string;
+        entityId?: string;
+        entityName?: string;
+        meta?: Record<string, any>;
+    }): Promise<{
+        id: string;
+        projectId: string;
+        userId: string;
+        createdAt: Date;
+        userName: string;
+        action: string;
+        entityType: string;
+        entityId: string | null;
+        entityName: string | null;
+        meta: import("@prisma/client/runtime/library").JsonValue | null;
+    }>;
+    getActivities(projectId: string, limit?: number): Promise<{
+        id: string;
+        projectId: string;
+        userId: string;
+        createdAt: Date;
+        userName: string;
+        action: string;
+        entityType: string;
+        entityId: string | null;
+        entityName: string | null;
+        meta: import("@prisma/client/runtime/library").JsonValue | null;
+    }[]>;
+    getComments(taskId: string): Promise<{
+        id: string;
+        projectId: string;
+        userId: string;
+        createdAt: Date;
+        content: string;
+        userName: string;
+        taskId: string;
+    }[]>;
+    createComment(data: {
+        taskId: string;
+        projectId: string;
+        userId: string;
+        userName: string;
+        content: string;
+    }): Promise<{
+        id: string;
+        projectId: string;
+        userId: string;
+        createdAt: Date;
+        content: string;
+        userName: string;
+        taskId: string;
+    }>;
+    deleteComment(commentId: string): Promise<boolean>;
     getProjectFiles(projectId: string): Promise<{
         id: string;
         projectId: string;

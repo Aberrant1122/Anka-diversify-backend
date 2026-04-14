@@ -37,6 +37,7 @@ app.use((0, cors_1.default)({
         "Accept",
         "Authorization",
         "X-User-ID",
+        "X-User-Name",
     ],
 }));
 // Health check

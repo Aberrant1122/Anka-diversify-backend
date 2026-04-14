@@ -38,6 +38,7 @@ app.use(
       "Accept",
       "Authorization",
       "X-User-ID",
+      "X-User-Name",
     ],
   }),
 );

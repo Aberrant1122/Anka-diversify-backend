@@ -9,6 +9,9 @@ const DEMO_USER_ID = "demo-user-id";
 function getUserId(req) {
     return req.headers["x-user-id"] || DEMO_USER_ID;
 }
+function getUserName(req) {
+    return req.headers["x-user-name"] || "Unknown";
+}
 function param(req, key) {
     return req.params[key];
 }
@@ -120,6 +123,7 @@ class ProjectController {
     }
     async createTask(req, res) {
         try {
+            const actor = { userId: getUserId(req), userName: getUserName(req) };
             const task = await projectService.createTask({
                 project_id: param(req, "id"),
                 title: req.body.title,
@@ -128,7 +132,7 @@ class ProjectController {
                 priority: req.body.priority,
                 phase: req.body.phase,
                 due_date: req.body.dueDate,
-            });
+            }, actor);
             res.status(201).json({ success: true, data: task, message: "Task created successfully" });
         }
         catch (error) {
@@ -138,7 +142,8 @@ class ProjectController {
     }
     async updateTask(req, res) {
         try {
-            const task = await projectService.updateTask(param(req, "taskId"), req.body);
+            const actor = { userId: getUserId(req), userName: getUserName(req), projectId: param(req, "id") };
+            const task = await projectService.updateTask(param(req, "taskId"), req.body, actor);
             if (!task) {
                 return res.status(404).json({ success: false, error: "Task not found" });
             }
@@ -151,7 +156,8 @@ class ProjectController {
     }
     async deleteTask(req, res) {
         try {
-            const deleted = await projectService.deleteTask(param(req, "taskId"));
+            const actor = { userId: getUserId(req), userName: getUserName(req), projectId: param(req, "id") };
+            const deleted = await projectService.deleteTask(param(req, "taskId"), actor);
             if (!deleted) {
                 return res.status(404).json({ success: false, error: "Task not found" });
             }
@@ -160,6 +166,59 @@ class ProjectController {
         catch (error) {
             console.error("Error deleting task:", error);
             res.status(500).json({ success: false, error: "Failed to delete task" });
+        }
+    }
+    async getActivities(req, res) {
+        try {
+            const activities = await projectService.getActivities(param(req, "id"));
+            res.json({ success: true, data: activities, count: activities.length });
+        }
+        catch (error) {
+            console.error("Error fetching activities:", error);
+            res.status(500).json({ success: false, error: "Failed to fetch activities" });
+        }
+    }
+    async getComments(req, res) {
+        try {
+            const comments = await projectService.getComments(param(req, "taskId"));
+            res.json({ success: true, data: comments, count: comments.length });
+        }
+        catch (error) {
+            console.error("Error fetching comments:", error);
+            res.status(500).json({ success: false, error: "Failed to fetch comments" });
+        }
+    }
+    async createComment(req, res) {
+        try {
+            const { content } = req.body;
+            if (!content?.trim()) {
+                return res.status(400).json({ success: false, error: "content is required" });
+            }
+            const comment = await projectService.createComment({
+                taskId: param(req, "taskId"),
+                projectId: param(req, "id"),
+                userId: getUserId(req),
+                userName: getUserName(req),
+                content: content.trim(),
+            });
+            res.status(201).json({ success: true, data: comment });
+        }
+        catch (error) {
+            console.error("Error creating comment:", error);
+            res.status(500).json({ success: false, error: "Failed to create comment" });
+        }
+    }
+    async deleteComment(req, res) {
+        try {
+            const deleted = await projectService.deleteComment(param(req, "commentId"));
+            if (!deleted) {
+                return res.status(404).json({ success: false, error: "Comment not found" });
+            }
+            res.json({ success: true, message: "Comment deleted" });
+        }
+        catch (error) {
+            console.error("Error deleting comment:", error);
+            res.status(500).json({ success: false, error: "Failed to delete comment" });
         }
     }
     async getProjectFiles(req, res) {

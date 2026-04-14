@@ -149,9 +149,39 @@ model ProjectTask {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  comments TaskComment[]
 
   @@map("project_tasks")
+}
+
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  projectId String
+  userId    String
+  userName  String
+  content   String
+  createdAt DateTime @default(now())
+
+  task ProjectTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@map("task_comments")
+}
+
+model ProjectActivity {
+  id         String   @id @default(cuid())
+  projectId  String
+  userId     String
+  userName   String
+  action     String   // 'created_task', 'updated_task', 'deleted_task', 'moved_task', 'added_comment', 'uploaded_file'
+  entityType String   // 'task', 'file', 'comment'
+  entityId   String?
+  entityName String?
+  meta       Json?    // e.g. { from: 'todo', to: 'in_progress' }
+  createdAt  DateTime @default(now())
+
+  @@map("project_activities")
 }
 
 model ProjectFile {

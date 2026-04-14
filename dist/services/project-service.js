@@ -93,8 +93,8 @@ class ProjectService {
             orderBy: { createdAt: "desc" },
         });
     }
-    async createTask(data) {
-        return prisma.projectTask.create({
+    async createTask(data, actor) {
+        const task = await prisma.projectTask.create({
             data: {
                 projectId: data.project_id,
                 title: data.title,
@@ -105,9 +105,21 @@ class ProjectService {
                 dueDate: data.due_date ? new Date(data.due_date) : undefined,
             },
         });
+        if (actor) {
+            await this.logActivity({
+                projectId: data.project_id,
+                userId: actor.userId,
+                userName: actor.userName,
+                action: "created_task",
+                entityType: "task",
+                entityId: task.id,
+                entityName: task.title,
+            });
+        }
+        return task;
     }
-    async updateTask(taskId, data) {
-        return prisma.projectTask.update({
+    async updateTask(taskId, data, actor) {
+        const task = await prisma.projectTask.update({
             where: { id: taskId },
             data: {
                 ...(data.title !== undefined && { title: data.title }),
@@ -118,14 +130,77 @@ class ProjectService {
                 ...(data.dueDate !== undefined && { dueDate: new Date(data.dueDate) }),
             },
         });
+        if (actor) {
+            const action = data.status ? "moved_task" : "updated_task";
+            await this.logActivity({
+                projectId: actor.projectId,
+                userId: actor.userId,
+                userName: actor.userName,
+                action,
+                entityType: "task",
+                entityId: task.id,
+                entityName: task.title,
+                meta: data.status ? { to: data.status } : undefined,
+            });
+        }
+        return task;
     }
-    async deleteTask(taskId) {
+    async deleteTask(taskId, actor) {
         const task = await prisma.projectTask.findUnique({ where: { id: taskId } });
         if (!task)
             return false;
         await prisma.projectTask.delete({ where: { id: taskId } });
+        if (actor) {
+            await this.logActivity({
+                projectId: actor.projectId,
+                userId: actor.userId,
+                userName: actor.userName,
+                action: "deleted_task",
+                entityType: "task",
+                entityId: taskId,
+                entityName: task.title,
+            });
+        }
         return true;
     }
+    // ── Activities ─────────────────────────────────────────────────────────────
+    async logActivity(data) {
+        return prisma.projectActivity.create({ data });
+    }
+    async getActivities(projectId, limit = 50) {
+        return prisma.projectActivity.findMany({
+            where: { projectId },
+            orderBy: { createdAt: "desc" },
+            take: limit,
+        });
+    }
+    // ── Comments ────────────────────────────────────────────────────────────────
+    async getComments(taskId) {
+        return prisma.taskComment.findMany({
+            where: { taskId },
+            orderBy: { createdAt: "asc" },
+        });
+    }
+    async createComment(data) {
+        const comment = await prisma.taskComment.create({ data });
+        await this.logActivity({
+            projectId: data.projectId,
+            userId: data.userId,
+            userName: data.userName,
+            action: "added_comment",
+            entityType: "comment",
+            entityId: comment.id,
+        });
+        return comment;
+    }
+    async deleteComment(commentId) {
+        const comment = await prisma.taskComment.findUnique({ where: { id: commentId } });
+        if (!comment)
+            return false;
+        await prisma.taskComment.delete({ where: { id: commentId } });
+        return true;
+    }
+    // ── Files ───────────────────────────────────────────────────────────────────
     async getProjectFiles(projectId) {
         return prisma.projectFile.findMany({
             where: { projectId },

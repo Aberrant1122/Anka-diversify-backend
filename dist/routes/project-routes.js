@@ -27,5 +27,11 @@ router.post('/:id/files', projectController.createFile.bind(projectController));
 router.post('/:id/files/presign', projectController.presignUpload.bind(projectController));
 router.post('/:id/files/confirm', projectController.confirmUpload.bind(projectController));
 router.delete('/:id/files/:fileId', projectController.deleteFile.bind(projectController));
+// Project activities
+router.get('/:id/activities', projectController.getActivities.bind(projectController));
+// Task comments
+router.get('/:id/tasks/:taskId/comments', projectController.getComments.bind(projectController));
+router.post('/:id/tasks/:taskId/comments', projectController.createComment.bind(projectController));
+router.delete('/:id/tasks/:taskId/comments/:commentId', projectController.deleteComment.bind(projectController));
 exports.default = router;
 //# sourceMappingURL=project-routes.js.map
