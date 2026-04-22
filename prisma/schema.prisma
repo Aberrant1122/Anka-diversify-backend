@@ -52,6 +52,7 @@ model Project {
   priority    String   @default("medium") // 'low', 'medium', 'high', 'critical'
   status      String   @default("active") // 'active', 'on-hold', 'completed'
   githubUrl   String?
+  localPath   String?
   startDate   DateTime @default(now())
   dueDate     DateTime?
   userId      String

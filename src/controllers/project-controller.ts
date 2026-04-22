@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
@@ -44,7 +46,7 @@ export class ProjectController {
   async createProject(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      const { name, description, phase, priority, githubUrl, dueDate } = req.body;
+      const { name, description, phase, priority, githubUrl, localPath, dueDate } = req.body;
 
       const project = await projectService.createProject(
         {
@@ -53,6 +55,7 @@ export class ProjectController {
           phase,
           priority,
           githubUrl,
+          localPath,
           dueDate: dueDate || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
         },
         userId,
@@ -104,6 +107,78 @@ export class ProjectController {
     } catch (error) {
       console.error("Error deleting project:", error);
       res.status(500).json({ success: false, error: "Failed to delete project" });
+    }
+  }
+
+  // ── IDE File Read/Write ───────────────────────────────────────────────────
+
+  async getRepoFile(req: Request, res: Response) {
+    try {
+      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      if (!project?.githubUrl) {
+        return res.status(400).json({ success: false, error: "No GitHub repository connected" });
+      }
+      const filePath = req.query.path as string;
+      if (!filePath) return res.status(400).json({ success: false, error: "path query param required" });
+
+      const file = await ProjectGitHubService.getFileContent(project.githubUrl, filePath);
+      if (!file) return res.status(404).json({ success: false, error: "File not found" });
+
+      res.json({ success: true, data: { path: filePath, content: file.content, sha: file.sha } });
+    } catch (error) {
+      console.error("Error reading repo file:", error);
+      res.status(500).json({ success: false, error: "Failed to read file" });
+    }
+  }
+
+  async saveRepoFile(req: Request, res: Response) {
+    try {
+      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      if (!project?.githubUrl) {
+        return res.status(400).json({ success: false, error: "No GitHub repository connected" });
+      }
+      const { path: filePath, content, commitMessage } = req.body;
+      if (!filePath || content === undefined) {
+        return res.status(400).json({ success: false, error: "path and content required" });
+      }
+
+      const message = commitMessage || `edit: update ${filePath}`;
+      const result = await ProjectGitHubService.pushChanges(project.githubUrl, [{ path: filePath, content }], message);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error("Error saving repo file:", error);
+      res.status(500).json({ success: false, error: "Failed to save file" });
+    }
+  }
+
+  async applyLocalChanges(req: Request, res: Response) {
+    try {
+      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      if (!project?.localPath) {
+        return res.status(400).json({ success: false, error: "No local path configured for this project" });
+      }
+
+      const { changes } = req.body as { changes: { path: string; content: string }[] };
+      if (!changes?.length) {
+        return res.status(400).json({ success: false, error: "No changes provided" });
+      }
+
+      const written: string[] = [];
+      for (const change of changes) {
+        const abs = path.join(project.localPath, change.path);
+        // Prevent path traversal outside localPath
+        if (!abs.startsWith(path.resolve(project.localPath))) {
+          return res.status(400).json({ success: false, error: `Invalid path: ${change.path}` });
+        }
+        await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+        await fs.promises.writeFile(abs, change.content, "utf8");
+        written.push(change.path);
+      }
+
+      res.json({ success: true, data: { written } });
+    } catch (error) {
+      console.error("Error applying local changes:", error);
+      res.status(500).json({ success: false, error: "Failed to write local files" });
     }
   }
 

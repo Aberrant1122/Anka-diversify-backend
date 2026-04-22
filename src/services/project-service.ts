@@ -56,6 +56,7 @@ export class ProjectService {
       phase?: string;
       priority?: string;
       githubUrl?: string;
+      localPath?: string;
       startDate?: string;
       dueDate?: string;
       status?: string;
@@ -71,6 +72,7 @@ export class ProjectService {
         priority: data.priority || "medium",
         status: data.status || "active",
         githubUrl: data.githubUrl,
+        localPath: data.localPath,
         startDate: data.startDate ? new Date(data.startDate) : new Date(),
         dueDate: data.dueDate ? new Date(data.dueDate) : undefined,
         userId,
@@ -86,6 +88,7 @@ export class ProjectService {
       phase?: string;
       priority?: string;
       githubUrl?: string;
+      localPath?: string;
       status?: string;
       progress?: number;
       dueDate?: string;
@@ -103,6 +106,7 @@ export class ProjectService {
         ...(data.phase !== undefined && { phase: data.phase }),
         ...(data.priority !== undefined && { priority: data.priority }),
         ...(data.githubUrl !== undefined && { githubUrl: data.githubUrl }),
+        ...(data.localPath !== undefined && { localPath: data.localPath || null }),
         ...(data.status !== undefined && { status: data.status }),
         ...(data.progress !== undefined && { progress: data.progress }),
         ...(data.dueDate !== undefined && { dueDate: new Date(data.dueDate) }),
