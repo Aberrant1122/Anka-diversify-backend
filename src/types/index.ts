@@ -200,6 +200,20 @@ export interface ContextMetadata {
   lastUpdated: Date;
 }
 
+// Coding Agent Types
+export interface AgentFileChange {
+  path: string;
+  content: string;
+  description: string;
+}
+
+export interface AgentResponse {
+  explanation: string;
+  changes: AgentFileChange[];
+  commitMessage: string;
+  sessionId: string;
+}
+
 // Error Types
 export interface ApiError {
   code: string;

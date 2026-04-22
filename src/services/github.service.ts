@@ -36,17 +36,59 @@ function parseGithubUrl(url: string): { owner: string; repo: string } | null {
   return null;
 }
 
-async function fetchGitHub(path: string): Promise<unknown> {
+function githubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
     "User-Agent": "anka-os-backend",
   };
   const token = process.env.GITHUB_TOKEN;
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
 
-  const res = await fetch(`https://api.github.com${path}`, { headers });
+async function fetchGitHub(path: string): Promise<unknown> {
+  const res = await fetch(`https://api.github.com${path}`, { headers: githubHeaders() });
   if (!res.ok) {
     throw new Error(`GitHub API ${res.status}: ${path}`);
+  }
+  return res.json();
+}
+
+async function writeGitHub(path: string, body: unknown): Promise<unknown> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method: "PUT",
+    headers: { ...githubHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${path} — ${text}`);
+  }
+  return res.json();
+}
+
+async function postGitHub(path: string, body: unknown): Promise<unknown> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method: "POST",
+    headers: { ...githubHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${path} — ${text}`);
+  }
+  return res.json();
+}
+
+async function patchGitHub(path: string, body: unknown): Promise<unknown> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method: "PATCH",
+    headers: { ...githubHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${path} — ${text}`);
   }
   return res.json();
 }
@@ -140,6 +182,79 @@ export class ProjectGitHubService {
         lastSyncedAt: new Date(),
       },
     });
+  }
+
+  static async getFileContent(githubUrl: string, filePath: string): Promise<{ content: string; sha: string } | null> {
+    const parsed = parseGithubUrl(githubUrl);
+    if (!parsed) return null;
+    const { owner, repo } = parsed;
+    try {
+      const data = await fetchGitHub(`/repos/${owner}/${repo}/contents/${filePath}`) as any;
+      if (!data.content) return null;
+      return {
+        content: Buffer.from(data.content, "base64").toString("utf-8"),
+        sha: data.sha,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // Push multiple file changes in a single atomic commit using the Git Data API
+  static async pushChanges(
+    githubUrl: string,
+    changes: { path: string; content: string }[],
+    commitMessage: string,
+    branch?: string,
+  ): Promise<{ sha: string; url: string }> {
+    const parsed = parseGithubUrl(githubUrl);
+    if (!parsed) throw new Error("Invalid GitHub URL");
+    const { owner, repo } = parsed;
+
+    // 1. Get the latest commit SHA on the branch
+    const repoData = await fetchGitHub(`/repos/${owner}/${repo}`) as any;
+    const defaultBranch = branch || repoData.default_branch || "main";
+    const refData = await fetchGitHub(`/repos/${owner}/${repo}/git/ref/heads/${defaultBranch}`) as any;
+    const latestCommitSha: string = refData.object.sha;
+
+    // 2. Get the tree SHA from that commit
+    const commitData = await fetchGitHub(`/repos/${owner}/${repo}/git/commits/${latestCommitSha}`) as any;
+    const baseTreeSha: string = commitData.tree.sha;
+
+    // 3. Create blobs for each changed file
+    const treeItems = await Promise.all(
+      changes.map(async ({ path, content }) => {
+        const blob = await postGitHub(`/repos/${owner}/${repo}/git/blobs`, {
+          content: Buffer.from(content).toString("base64"),
+          encoding: "base64",
+        }) as any;
+        return { path, mode: "100644", type: "blob", sha: blob.sha };
+      })
+    );
+
+    // 4. Create a new tree on top of the base tree
+    const newTree = await postGitHub(`/repos/${owner}/${repo}/git/trees`, {
+      base_tree: baseTreeSha,
+      tree: treeItems,
+    }) as any;
+
+    // 5. Create the commit
+    const newCommit = await postGitHub(`/repos/${owner}/${repo}/git/commits`, {
+      message: commitMessage,
+      tree: newTree.sha,
+      parents: [latestCommitSha],
+    }) as any;
+
+    // 6. Update the branch ref
+    await patchGitHub(`/repos/${owner}/${repo}/git/refs/heads/${defaultBranch}`, {
+      sha: newCommit.sha,
+      force: false,
+    });
+
+    return {
+      sha: newCommit.sha,
+      url: `https://github.com/${owner}/${repo}/commit/${newCommit.sha}`,
+    };
   }
 
   static async getSnapshot(projectId: string): Promise<RepoSnapshot | null> {

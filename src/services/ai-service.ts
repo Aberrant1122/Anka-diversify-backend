@@ -14,6 +14,8 @@ import {
   ProjectRule,
   ProjectTask,
   User,
+  AgentResponse,
+  AgentFileChange,
 } from "../types";
 import { ProjectGitHubService } from "./github.service";
 
@@ -103,15 +105,6 @@ export class AiService {
     request: ChatRequest,
   ): Promise<ChatResponse> {
     const startTime = Date.now();
-
-    // Verify user has access to project
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
-    });
-
-    if (!project) {
-      throw new Error("Project not found or access denied");
-    }
 
     // Get or create session
     const session = await this.getOrCreateSession(
@@ -573,14 +566,93 @@ GUIDELINES:
   }
 
   async getProjectContext(projectId: string, userId: string) {
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
+    return this.buildProjectContext(projectId);
+  }
+
+  async runCodingAgent(
+    userId: string,
+    projectId: string,
+    request: ChatRequest,
+  ): Promise<AgentResponse> {
+    const session = await this.getOrCreateSession(userId, "project", projectId, request.sessionId);
+    const projectContext = await this.buildProjectContext(projectId);
+
+    await this.saveMessage(session.id, "user", request.message);
+
+    const snapshot = projectContext.repoSnapshot;
+    const repoInfo = snapshot
+      ? `
+REPOSITORY: ${snapshot.repoName} (branch: ${snapshot.defaultBranch})
+LANGUAGES: ${Object.keys(snapshot.languages).slice(0, 6).join(", ")}
+
+FILE TREE (${snapshot.fileTree.length} files):
+${snapshot.fileTree.slice(0, 200).join("\n")}
+
+KEY FILE CONTENTS:
+${snapshot.keyFiles.map((f: any) => `=== ${f.path} ===\n${f.content}`).join("\n\n")}`
+      : "No repository connected. Inform the user to connect a GitHub repo first.";
+
+    const systemPrompt = `You are a coding agent for the project "${projectContext.project.name}". You can read and edit files in the connected GitHub repository.
+
+Your job is to fulfill the user's coding request by producing exact file changes.
+
+${repoInfo}
+
+ACTIVE TASKS:
+${projectContext.activeTasks.map((t: any) => `- ${t.title} (${t.status})`).join("\n") || "None"}
+
+RULES:
+- Only change files that exist in the file tree above
+- Write complete file contents (not diffs or partials)
+- Follow the existing code style and patterns you see in the key files
+- If the repo is not connected, explain and return empty changes array
+- Be precise and make minimal changes needed
+
+You MUST respond with ONLY valid JSON in this exact shape:
+{
+  "explanation": "Clear explanation of what you're changing and why",
+  "changes": [
+    {
+      "path": "relative/path/to/file.ts",
+      "content": "complete new file content here",
+      "description": "one-line summary of what changed in this file"
+    }
+  ],
+  "commitMessage": "conventional commit message e.g. feat: add X to Y"
+}`;
+
+    const completion = await this.getOpenAI().chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: request.message },
+      ],
+      temperature: 0.2,
+      max_tokens: 4000,
+      response_format: { type: "json_object" },
     });
 
-    if (!project) {
-      throw new Error("Project not found or access denied");
+    const raw = completion.choices[0]?.message?.content || "{}";
+
+    let parsed: { explanation: string; changes: AgentFileChange[]; commitMessage: string };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = { explanation: raw, changes: [], commitMessage: "chore: AI agent changes" };
     }
 
-    return this.buildProjectContext(projectId);
+    const summary = `[Agent] ${parsed.explanation}\n\nFiles to change:\n${parsed.changes.map((c: AgentFileChange) => `- ${c.path}: ${c.description}`).join("\n")}`;
+    await this.saveMessage(session.id, "assistant", summary);
+
+    if (!session.title) {
+      await this.updateSessionTitle(session.id, request.message);
+    }
+
+    return {
+      explanation: parsed.explanation || "",
+      changes: parsed.changes || [],
+      commitMessage: parsed.commitMessage || "chore: AI agent changes",
+      sessionId: session.id,
+    };
   }
 }

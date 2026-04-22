@@ -15,4 +15,8 @@ router.get('/projects/:projectId/sessions', aiController.getProjectSessions.bind
 router.get('/projects/:projectId/sessions/:sessionId/messages', aiController.getProjectSessionMessages.bind(aiController));
 router.get('/projects/:projectId/context', aiController.getProjectContext.bind(aiController));
 
+// Coding Agent Routes
+router.post('/projects/:projectId/agent/run', aiController.runAgent.bind(aiController));
+router.post('/projects/:projectId/agent/push', aiController.pushAgentChanges.bind(aiController));
+
 export default router;
