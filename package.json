@@ -21,6 +21,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1028.0",
     "@prisma/client": "^5.22.0",
     "@types/sqlite3": "^3.1.11",
+    "@types/ws": "^8.18.1",
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
@@ -29,9 +30,11 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
+    "node-pty": "^1.1.0",
     "openai": "^6.33.0",
     "prisma": "^5.22.0",
-    "sqlite3": "^6.0.1"
+    "sqlite3": "^6.0.1",
+    "ws": "^8.20.0"
   },
   "prisma": {
     "seed": "ts-node --project tsconfig.seed.json prisma/seed.ts"
