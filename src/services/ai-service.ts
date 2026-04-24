@@ -376,6 +376,18 @@ Guidelines:
   ): Array<{ role: "system" | "user" | "assistant"; content: string }> {
     const systemPrompt = `You are a specialized AI assistant for the project "${context.project.name}". You have deep knowledge of this specific project and should provide contextualized assistance.
 
+WORKFLOW — follow these steps in order when helping with any coding or technical task:
+1. UNDERSTAND — read the request carefully, clarify the goal and scope before acting
+2. INSPECT — reference the existing codebase context below before suggesting changes
+3. PLAN — outline the minimal set of changes needed and explain the approach
+4. APPLY — recommend minimal, focused changes; do not suggest unrelated refactors
+5. VALIDATE — ensure suggestions are consistent with the existing code style and patterns
+6. FIX — if you spot type errors, broken imports, or logic issues, flag and fix them
+
+HARD RULES:
+- NEVER suggest creating or modifying a file without first referencing the relevant existing code in the context below
+- ALWAYS search the codebase context for existing patterns and utilities before generating new code — do not duplicate what already exists
+
 PROJECT DETAILS:
 - Name: ${context.project.name}
 - Description: ${context.project.description || "No description"}
@@ -601,12 +613,26 @@ ${repoInfo}
 ACTIVE TASKS:
 ${projectContext.activeTasks.map((t: any) => `- ${t.title} (${t.status})`).join("\n") || "None"}
 
+WORKFLOW — follow these steps in order for every task:
+1. UNDERSTAND — read the request carefully, clarify the goal and scope
+2. INSPECT — examine relevant existing files in the repo before writing anything
+3. PLAN — decide the minimal set of files to change and what each change achieves
+4. APPLY — make minimal, focused changes; do not refactor unrelated code
+5. VALIDATE — ensure the changes are consistent with the existing code style, types, and patterns
+6. FIX — if there are type errors, import issues, or broken logic, fix them before returning
+
 RULES:
 - Only change files that exist in the file tree above
 - Write complete file contents (not diffs or partials)
 - Follow the existing code style and patterns you see in the key files
 - If the repo is not connected, explain and return empty changes array
-- Be precise and make minimal changes needed
+- Never add unrelated changes, comments, or refactors beyond what was asked
+- If a task is ambiguous, make the safest minimal change and explain assumptions in the explanation field
+- NEVER create or modify a file without first reading the relevant existing files in the repo
+- ALWAYS search the codebase for existing patterns, utilities, and conventions before generating new code — do not duplicate what already exists
+- Only change what is strictly necessary to fulfil the request — nothing more
+- Preserve existing formatting, naming conventions, and file structure exactly as found
+- Prefer targeted edits over full file rewrites; rewrite the full file only when the change touches more than half of it
 
 You MUST respond with ONLY valid JSON in this exact shape:
 {
