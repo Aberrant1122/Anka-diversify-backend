@@ -633,6 +633,65 @@ RULES:
 - Only change what is strictly necessary to fulfil the request — nothing more
 - Preserve existing formatting, naming conventions, and file structure exactly as found
 - Prefer targeted edits over full file rewrites; rewrite the full file only when the change touches more than half of it
+- VALIDATION — after every set of changes:
+  - Always run a build or typecheck (e.g. tsc --noEmit, npm run build) to verify the changes compile
+  - Run tests if a test suite exists (e.g. npm test, jest, vitest) — never skip this step
+  - If build or test errors occur: read the full error log, identify the root cause, and fix it automatically before returning the result
+  - Never return changes that are known to be broken — all changes must pass validation before being proposed
+- UI CONSISTENCY (apply to every frontend change):
+  A. DESIGN SYSTEM — use only the established design system, never invent new patterns:
+    - Font: Geist (sans) / Geist Mono (mono) — set via --font-sans / --font-mono CSS vars
+    - Border radius: use rounded-md (default --radius: 0.5rem) or rounded-lg — never arbitrary values
+    - Spacing: Tailwind default scale only — no arbitrary values like p-[13px]
+    - All colors via semantic Tailwind tokens — NEVER hardcode hex/rgb values:
+      · bg-background / text-foreground (page surfaces)
+      · bg-card / text-card-foreground (cards)
+      · bg-primary / text-primary-foreground (actions)
+      · bg-secondary / text-secondary-foreground (subtle areas)
+      · bg-muted / text-muted-foreground (disabled, hints)
+      · bg-accent / text-accent-foreground (highlights)
+      · bg-destructive / text-destructive-foreground (errors/delete)
+      · text-success, text-warning (status indicators)
+      · bg-sidebar / bg-sidebar-accent (sidebar surfaces)
+  B. COMPONENT REUSE — before creating any UI element:
+    - Check /components/ui/ first — it has: Button, Card, Badge, Avatar, Dialog, Input, Textarea, Select, Tabs, Table, Tooltip, Popover, DropdownMenu, Sheet, Separator, Progress, Skeleton, Spinner, ScrollArea, Switch, Checkbox, Label, Form, Accordion, Alert, Command, and more
+    - NEVER create a new component if one already exists in /components/ui/
+    - NEVER duplicate layout or pattern already used in an existing page — extend it instead
+    - NEVER introduce new UI libraries (no Chakra, MUI, Radix direct imports, Ant Design, etc.) — shadcn/ui components are already wired
+  C. STYLE CONSTRAINTS:
+    - No inline styles (style prop) — use Tailwind classes only
+    - No hardcoded colors — always use semantic tokens above
+    - No new CSS files or custom class definitions unless absolutely unavoidable
+    - Maintain responsiveness: use sm/md/lg/xl breakpoints consistent with existing pages
+    - Keep accessibility: always include aria-label on icon-only buttons, htmlFor on labels, role where needed
+  D. CONTEXT TO REFERENCE for UI work — always read these before writing frontend code:
+    - The file being changed + its direct imports
+    - /components/ui/button.tsx and /components/ui/card.tsx (baseline patterns)
+    - The nearest existing page that has similar layout to what's being built
+    - app/globals.css (for CSS variables and tokens)
+  E. ANTI-PATTERNS — never do these:
+    - No inline style prop with color values
+    - No arbitrary color values in className (e.g. text-[#abc])
+    - No new icon libraries — use lucide-react (already installed)
+    - No div used as a button — use the Button component
+    - No layout built from scratch if an existing page already has the same structure
+- CONTEXT SELECTION (critical — do not ignore):
+  - Never load the entire codebase into context — it exceeds limits and degrades quality
+  - Select only the files directly relevant to the task:
+    1. The file being changed (highest priority — always include)
+    2. Files it directly imports or that import it
+    3. Related components or modules that share the same feature area
+    4. Type definition files if types are involved
+  - Exclude: test fixtures, lock files, generated files, unrelated pages, config files not touched by the task
+  - If uncertain which files are relevant, start with the current file and its imports only — expand only if needed
+  - Keep total context under 20 files; if more are needed, summarize rather than include in full
+- TOOL BOUNDARIES:
+  - ALLOWED: read any file, write or create source files, run safe commands (npm install, npm run build, npm run lint, tsc --noEmit, git status, git diff)
+  - RESTRICTED — never do any of the following:
+    - Delete, move, or rename core files (package.json, tsconfig, schema.prisma, config files, CI files)
+    - Run destructive shell commands (rm -rf, git reset --hard, git push --force, DROP TABLE, truncate, kill)
+    - Modify environment files (.env, .env.local) or secrets
+    - Install packages without listing them in the explanation first
 
 You MUST respond with ONLY valid JSON in this exact shape:
 {
