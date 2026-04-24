@@ -1,5 +1,11 @@
+import fs from "fs";
+import path from "path";
+import { exec } from "child_process";
+import { promisify } from "util";
 import OpenAI from "openai";
 import { PrismaClient } from "@prisma/client";
+
+const execAsync = promisify(exec);
 import {
   ChatRequest,
   ChatResponse,
@@ -581,163 +587,251 @@ GUIDELINES:
     return this.buildProjectContext(projectId);
   }
 
-  async runCodingAgent(
-    userId: string,
-    projectId: string,
-    request: ChatRequest,
-  ): Promise<AgentResponse> {
-    const session = await this.getOrCreateSession(userId, "project", projectId, request.sessionId);
-    const projectContext = await this.buildProjectContext(projectId);
+  // ── Agent Pipeline ────────────────────────────────────────────────────────
 
-    await this.saveMessage(session.id, "user", request.message);
-
-    const snapshot = projectContext.repoSnapshot;
+  private buildAgentSystemPrompt(projectContext: any, snapshot: any): string {
     const repoInfo = snapshot
-      ? `
-REPOSITORY: ${snapshot.repoName} (branch: ${snapshot.defaultBranch})
-LANGUAGES: ${Object.keys(snapshot.languages).slice(0, 6).join(", ")}
+      ? `REPOSITORY: ${snapshot.repoName} (branch: ${snapshot.defaultBranch})
+FILE TREE:
+${snapshot.fileTree.slice(0, 200).join("\n")}`
+      : "No repository connected. Return empty changes array and explain.";
 
-FILE TREE (${snapshot.fileTree.length} files):
-${snapshot.fileTree.slice(0, 200).join("\n")}
-
-KEY FILE CONTENTS:
-${snapshot.keyFiles.map((f: any) => `=== ${f.path} ===\n${f.content}`).join("\n\n")}`
-      : "No repository connected. Inform the user to connect a GitHub repo first.";
-
-    const systemPrompt = `You are a coding agent for the project "${projectContext.project.name}". You can read and edit files in the connected GitHub repository.
-
-Your job is to fulfill the user's coding request by producing exact file changes.
+    return `You are a coding agent for "${projectContext.project.name}". Produce exact file changes for the user's request.
 
 ${repoInfo}
 
 ACTIVE TASKS:
 ${projectContext.activeTasks.map((t: any) => `- ${t.title} (${t.status})`).join("\n") || "None"}
 
-WORKFLOW — follow these steps in order for every task:
-1. UNDERSTAND — read the request carefully, clarify the goal and scope
-2. INSPECT — examine relevant existing files in the repo before writing anything
-3. PLAN — decide the minimal set of files to change and what each change achieves
-4. APPLY — make minimal, focused changes; do not refactor unrelated code
-5. VALIDATE — ensure the changes are consistent with the existing code style, types, and patterns
-6. FIX — if there are type errors, import issues, or broken logic, fix them before returning
-
 RULES:
 - Only change files that exist in the file tree above
 - Write complete file contents (not diffs or partials)
-- Follow the existing code style and patterns you see in the key files
-- If the repo is not connected, explain and return empty changes array
-- Never add unrelated changes, comments, or refactors beyond what was asked
-- If a task is ambiguous, make the safest minimal change and explain assumptions in the explanation field
-- NEVER create or modify a file without first reading the relevant existing files in the repo
-- ALWAYS search the codebase for existing patterns, utilities, and conventions before generating new code — do not duplicate what already exists
-- Only change what is strictly necessary to fulfil the request — nothing more
-- Preserve existing formatting, naming conventions, and file structure exactly as found
-- Prefer targeted edits over full file rewrites; rewrite the full file only when the change touches more than half of it
-- VALIDATION — after every set of changes:
-  - Always run a build or typecheck (e.g. tsc --noEmit, npm run build) to verify the changes compile
-  - Run tests if a test suite exists (e.g. npm test, jest, vitest) — never skip this step
-  - If build or test errors occur: read the full error log, identify the root cause, and fix it automatically before returning the result
-  - Never return changes that are known to be broken — all changes must pass validation before being proposed
-- UI CONSISTENCY (apply to every frontend change):
-  A. DESIGN SYSTEM — use only the established design system, never invent new patterns:
-    - Font: Geist (sans) / Geist Mono (mono) — set via --font-sans / --font-mono CSS vars
-    - Border radius: use rounded-md (default --radius: 0.5rem) or rounded-lg — never arbitrary values
-    - Spacing: Tailwind default scale only — no arbitrary values like p-[13px]
-    - All colors via semantic Tailwind tokens — NEVER hardcode hex/rgb values:
-      · bg-background / text-foreground (page surfaces)
-      · bg-card / text-card-foreground (cards)
-      · bg-primary / text-primary-foreground (actions)
-      · bg-secondary / text-secondary-foreground (subtle areas)
-      · bg-muted / text-muted-foreground (disabled, hints)
-      · bg-accent / text-accent-foreground (highlights)
-      · bg-destructive / text-destructive-foreground (errors/delete)
-      · text-success, text-warning (status indicators)
-      · bg-sidebar / bg-sidebar-accent (sidebar surfaces)
-  B. COMPONENT REUSE — before creating any UI element:
-    - Check /components/ui/ first — it has: Button, Card, Badge, Avatar, Dialog, Input, Textarea, Select, Tabs, Table, Tooltip, Popover, DropdownMenu, Sheet, Separator, Progress, Skeleton, Spinner, ScrollArea, Switch, Checkbox, Label, Form, Accordion, Alert, Command, and more
-    - NEVER create a new component if one already exists in /components/ui/
-    - NEVER duplicate layout or pattern already used in an existing page — extend it instead
-    - NEVER introduce new UI libraries (no Chakra, MUI, Radix direct imports, Ant Design, etc.) — shadcn/ui components are already wired
-  C. STYLE CONSTRAINTS:
-    - No inline styles (style prop) — use Tailwind classes only
-    - No hardcoded colors — always use semantic tokens above
-    - No new CSS files or custom class definitions unless absolutely unavoidable
-    - Maintain responsiveness: use sm/md/lg/xl breakpoints consistent with existing pages
-    - Keep accessibility: always include aria-label on icon-only buttons, htmlFor on labels, role where needed
-  D. CONTEXT TO REFERENCE for UI work — always read these before writing frontend code:
-    - The file being changed + its direct imports
-    - /components/ui/button.tsx and /components/ui/card.tsx (baseline patterns)
-    - The nearest existing page that has similar layout to what's being built
-    - app/globals.css (for CSS variables and tokens)
-  E. ANTI-PATTERNS — never do these:
-    - No inline style prop with color values
-    - No arbitrary color values in className (e.g. text-[#abc])
-    - No new icon libraries — use lucide-react (already installed)
-    - No div used as a button — use the Button component
-    - No layout built from scratch if an existing page already has the same structure
-- CONTEXT SELECTION (critical — do not ignore):
-  - Never load the entire codebase into context — it exceeds limits and degrades quality
-  - Select only the files directly relevant to the task:
-    1. The file being changed (highest priority — always include)
-    2. Files it directly imports or that import it
-    3. Related components or modules that share the same feature area
-    4. Type definition files if types are involved
-  - Exclude: test fixtures, lock files, generated files, unrelated pages, config files not touched by the task
-  - If uncertain which files are relevant, start with the current file and its imports only — expand only if needed
-  - Keep total context under 20 files; if more are needed, summarize rather than include in full
-- TOOL BOUNDARIES:
-  - ALLOWED: read any file, write or create source files, run safe commands (npm install, npm run build, npm run lint, tsc --noEmit, git status, git diff)
-  - RESTRICTED — never do any of the following:
-    - Delete, move, or rename core files (package.json, tsconfig, schema.prisma, config files, CI files)
-    - Run destructive shell commands (rm -rf, git reset --hard, git push --force, DROP TABLE, truncate, kill)
-    - Modify environment files (.env, .env.local) or secrets
-    - Install packages without listing them in the explanation first
+- Follow existing code style and patterns exactly
+- Only change what is strictly necessary — nothing more
+- Preserve formatting, naming, and file structure
+- NEVER create or modify a file without reading it first
+- ALWAYS reuse existing components from /components/ui/
+- No inline styles, no hardcoded colors, no new UI libraries
+- Use semantic Tailwind tokens: bg-background, bg-card, bg-primary, bg-muted, text-foreground, etc.
+- TOOL BOUNDARIES: no rm -rf, no git push --force, no .env edits, no deleting core files
 
-You MUST respond with ONLY valid JSON in this exact shape:
+You MUST respond with ONLY valid JSON:
 {
-  "explanation": "Clear explanation of what you're changing and why",
-  "changes": [
-    {
-      "path": "relative/path/to/file.ts",
-      "content": "complete new file content here",
-      "description": "one-line summary of what changed in this file"
-    }
-  ],
-  "commitMessage": "conventional commit message e.g. feat: add X to Y"
+  "explanation": "what you changed and why",
+  "changes": [{ "path": "relative/path", "content": "complete file content", "description": "one-line summary" }],
+  "commitMessage": "feat: description"
 }`;
+  }
+
+  private async planTask(
+    message: string,
+    snapshot: any,
+  ): Promise<{ approach: string; filesToRead: string[]; validationCommands: string[] }> {
+    const fileTree = snapshot?.fileTree?.slice(0, 300).join("\n") || "No repo connected";
+
+    const completion = await this.getOpenAI().chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "system",
+          content: `You are a coding task planner. Given a user request and file tree, identify:
+1. The minimal approach to fulfil the request
+2. Only the specific files that need to be read (max 10): the file to change, its imports, related types
+3. Validation commands to run after changes
+
+FILE TREE:
+${fileTree}
+
+Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "path2"], "validationCommands": ["tsc --noEmit"] }`,
+        },
+        { role: "user", content: message },
+      ],
+      temperature: 0.1,
+      max_tokens: 600,
+      response_format: { type: "json_object" },
+    });
+
+    try {
+      return JSON.parse(completion.choices[0]?.message?.content || "{}");
+    } catch {
+      return { approach: "", filesToRead: [], validationCommands: ["tsc --noEmit"] };
+    }
+  }
+
+  private async buildFileContext(
+    filesToRead: string[],
+    snapshot: any,
+    githubUrl: string,
+  ): Promise<Record<string, string>> {
+    const context: Record<string, string> = {};
+
+    // Pull from already-fetched key files first
+    for (const keyFile of snapshot?.keyFiles || []) {
+      if (filesToRead.some((f) => f === keyFile.path)) {
+        context[keyFile.path] = keyFile.content;
+      }
+    }
+
+    // Fetch remaining files directly from GitHub
+    for (const filePath of filesToRead.slice(0, 10)) {
+      if (!context[filePath] && githubUrl) {
+        const file = await ProjectGitHubService.getFileContent(githubUrl, filePath).catch(() => null);
+        if (file) context[filePath] = file.content;
+      }
+    }
+
+    return context;
+  }
+
+  private async executeChanges(
+    message: string,
+    approach: string,
+    fileContext: Record<string, string>,
+    systemPrompt: string,
+    previousErrors: string | null,
+  ): Promise<{ explanation: string; changes: AgentFileChange[]; commitMessage: string }> {
+    const fileContents = Object.entries(fileContext)
+      .map(([p, c]) => `=== ${p} ===\n${c}`)
+      .join("\n\n");
+
+    const userMessage = previousErrors
+      ? `${message}\n\nAPPROACH: ${approach}\n\nRELEVANT FILES:\n${fileContents}\n\nPREVIOUS ATTEMPT ERRORS — fix these:\n${previousErrors}`
+      : `${message}\n\nAPPROACH: ${approach}\n\nRELEVANT FILES:\n${fileContents}`;
 
     const completion = await this.getOpenAI().chat.completions.create({
       model: "gpt-4o",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: request.message },
+        { role: "user", content: userMessage },
       ],
       temperature: 0.2,
-      max_tokens: 4000,
+      max_tokens: 8000,
       response_format: { type: "json_object" },
     });
 
-    const raw = completion.choices[0]?.message?.content || "{}";
-
-    let parsed: { explanation: string; changes: AgentFileChange[]; commitMessage: string };
     try {
-      parsed = JSON.parse(raw);
+      return JSON.parse(completion.choices[0]?.message?.content || "{}");
     } catch {
-      parsed = { explanation: raw, changes: [], commitMessage: "chore: AI agent changes" };
+      return { explanation: "Failed to parse response", changes: [], commitMessage: "chore: agent changes" };
+    }
+  }
+
+  private async validateWithShell(
+    changes: AgentFileChange[],
+    localPath: string,
+    commands: string[],
+  ): Promise<{ success: boolean; errors: string }> {
+    // Write changes to disk
+    for (const change of changes) {
+      const abs = path.join(localPath, change.path);
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+      await fs.promises.writeFile(abs, change.content, "utf8");
     }
 
-    const summary = `[Agent] ${parsed.explanation}\n\nFiles to change:\n${parsed.changes.map((c: AgentFileChange) => `- ${c.path}: ${c.description}`).join("\n")}`;
+    const errors: string[] = [];
+    for (const cmd of commands.slice(0, 2)) {
+      try {
+        const { stdout, stderr } = await execAsync(cmd, { cwd: localPath, timeout: 30000 });
+        const out = stdout + stderr;
+        if (/error TS|Error:|✖|FAILED/i.test(out)) errors.push(`${cmd}:\n${out.slice(0, 2000)}`);
+      } catch (err: any) {
+        errors.push(`${cmd}:\n${(err.stdout || "") + (err.stderr || "") || err.message}`.slice(0, 2000));
+      }
+    }
+
+    return errors.length === 0 ? { success: true, errors: "" } : { success: false, errors: errors.join("\n\n") };
+  }
+
+  private async selfReviewChanges(changes: AgentFileChange[]): Promise<{ success: boolean; errors: string }> {
+    if (!changes.length) return { success: true, errors: "" };
+
+    const changesText = changes.map((c) => `=== ${c.path} ===\n${c.content}`).join("\n\n");
+
+    const completion = await this.getOpenAI().chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "system",
+          content: `Review these code changes for TypeScript errors, missing imports, undefined variables, and broken logic. Be strict.
+Respond with ONLY valid JSON: { "hasErrors": boolean, "errors": "description or empty string" }`,
+        },
+        { role: "user", content: changesText },
+      ],
+      temperature: 0,
+      max_tokens: 800,
+      response_format: { type: "json_object" },
+    });
+
+    try {
+      const result = JSON.parse(completion.choices[0]?.message?.content || "{}");
+      return { success: !result.hasErrors, errors: result.errors || "" };
+    } catch {
+      return { success: true, errors: "" };
+    }
+  }
+
+  async runCodingAgent(
+    userId: string,
+    projectId: string,
+    request: ChatRequest,
+  ): Promise<AgentResponse> {
+    const MAX_ITERATIONS = 3;
+
+    const session = await this.getOrCreateSession(userId, "project", projectId, request.sessionId);
+    const projectContext = await this.buildProjectContext(projectId);
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { localPath: true, githubUrl: true },
+    });
+
+    await this.saveMessage(session.id, "user", request.message);
+
+    const snapshot = projectContext.repoSnapshot;
+    const githubUrl = project?.githubUrl || "";
+
+    // ── Stage 1: Planner ──────────────────────────────────────────────────
+    const plan = await this.planTask(request.message, snapshot);
+
+    // ── Stage 2: Context Builder ──────────────────────────────────────────
+    const fileContext = await this.buildFileContext(plan.filesToRead || [], snapshot, githubUrl);
+    const systemPrompt = this.buildAgentSystemPrompt(projectContext, snapshot);
+
+    // ── Stages 3–5: Executor → Validator loop ─────────────────────────────
+    let changes: AgentFileChange[] = [];
+    let explanation = "";
+    let commitMessage = "chore: agent changes";
+    let previousErrors: string | null = null;
+
+    for (let i = 0; i < MAX_ITERATIONS; i++) {
+      const result = await this.executeChanges(
+        request.message,
+        plan.approach || "",
+        fileContext,
+        systemPrompt,
+        previousErrors,
+      );
+
+      changes = result.changes || [];
+      explanation = result.explanation || "";
+      commitMessage = result.commitMessage || "chore: agent changes";
+
+      if (!changes.length) break;
+
+      const validation = project?.localPath
+        ? await this.validateWithShell(changes, project.localPath, plan.validationCommands || ["tsc --noEmit"])
+        : await this.selfReviewChanges(changes);
+
+      if (validation.success) break;
+
+      previousErrors = validation.errors;
+      explanation += `\n\n[Auto-fix attempt ${i + 1}] Errors found — retrying...`;
+    }
+
+    const summary = `[Agent] ${explanation}\n\nFiles changed:\n${changes.map((c) => `- ${c.path}: ${c.description}`).join("\n")}`;
     await this.saveMessage(session.id, "assistant", summary);
 
-    if (!session.title) {
-      await this.updateSessionTitle(session.id, request.message);
-    }
+    if (!session.title) await this.updateSessionTitle(session.id, request.message);
 
-    return {
-      explanation: parsed.explanation || "",
-      changes: parsed.changes || [],
-      commitMessage: parsed.commitMessage || "chore: AI agent changes",
-      sessionId: session.id,
-    };
+    return { explanation, changes, commitMessage, sessionId: session.id };
   }
 }
