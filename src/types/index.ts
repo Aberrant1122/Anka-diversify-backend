@@ -106,9 +106,17 @@ export interface ChatRequest {
   context?: Record<string, any>;
 }
 
+export interface ProposedTask {
+  title: string;
+  description?: string;
+  priority: "low" | "medium" | "high";
+  phase?: string;
+}
+
 export interface ChatResponse {
   message: string;
   sessionId: string;
+  proposedTasks?: ProposedTask[];
   contextMeta?: {
     projectContext?: ProjectContext;
     generalContext?: GeneralContext;

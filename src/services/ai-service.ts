@@ -9,6 +9,7 @@ const execAsync = promisify(exec);
 import {
   ChatRequest,
   ChatResponse,
+  ProposedTask,
   ProjectContext,
   GeneralContext,
   ChatCompletionRequest,
@@ -110,9 +111,6 @@ export class AiService {
     projectId: string,
     request: ChatRequest,
   ): Promise<ChatResponse> {
-    const startTime = Date.now();
-
-    // Get or create session
     const session = await this.getOrCreateSession(
       userId,
       "project",
@@ -120,31 +118,69 @@ export class AiService {
       request.sessionId,
     );
 
-    // Build project context
     const projectContext = await this.buildProjectContext(projectId);
-
-    // Save user message
     await this.saveMessage(session.id, "user", request.message);
-
-    // Build prompt
     const messages = this.buildProjectPrompt(request.message, projectContext);
 
-    // Get AI response
     const completion = await this.getOpenAI().chat.completions.create({
-      model: "gpt-4",
+      model: "gpt-4o",
       messages,
       temperature: 0.7,
       max_tokens: 2000,
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "propose_tasks",
+            description:
+              "When the user discusses requirements, features, or bugs, or explicitly asks to create tasks, call this to propose actionable Kanban tasks. Do NOT call this for general questions or status updates.",
+            parameters: {
+              type: "object",
+              properties: {
+                tasks: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      title:       { type: "string", description: "Short, action-oriented task title" },
+                      description: { type: "string", description: "Details and acceptance criteria" },
+                      priority:    { type: "string", enum: ["low", "medium", "high"] },
+                      phase:       { type: "string", description: "Project phase this belongs to" },
+                    },
+                    required: ["title", "priority"],
+                  },
+                },
+              },
+              required: ["tasks"],
+            },
+          },
+        },
+      ],
+      tool_choice: "auto",
     });
 
-    const aiResponse =
-      completion.choices[0]?.message?.content ||
-      "I apologize, but I could not generate a response.";
+    let aiResponse = completion.choices[0]?.message?.content ?? "";
+    let proposedTasks: ProposedTask[] | undefined;
 
-    // Save AI response
+    const toolCalls = completion.choices[0]?.message?.tool_calls;
+    if (toolCalls?.length) {
+      for (const call of toolCalls) {
+        if (call.type === "function" && call.function.name === "propose_tasks") {
+          try {
+            const args = JSON.parse(call.function.arguments);
+            proposedTasks = args.tasks as ProposedTask[];
+            if (!aiResponse) {
+              aiResponse = `I've identified **${proposedTasks.length} task${proposedTasks.length !== 1 ? "s" : ""}** from our discussion. Review and confirm which ones to add to the Kanban board.`;
+            }
+          } catch {}
+        }
+      }
+    }
+
+    if (!aiResponse) aiResponse = "I apologize, but I could not generate a response.";
+
     await this.saveMessage(session.id, "assistant", aiResponse);
 
-    // Update session title if first message
     if (!session.title) {
       await this.updateSessionTitle(session.id, request.message);
     }
@@ -152,6 +188,7 @@ export class AiService {
     return {
       message: aiResponse,
       sessionId: session.id,
+      proposedTasks,
       contextMeta: {
         projectContext,
         messageCount: await this.getMessageCount(session.id),
