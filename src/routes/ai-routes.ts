@@ -18,6 +18,10 @@ router.get('/projects/:projectId/context', aiController.getProjectContext.bind(a
 // Project Health
 router.get('/projects/:projectId/health', aiController.getProjectHealth.bind(aiController));
 
+// Pull Request Review
+router.get('/projects/:projectId/prs', aiController.listPullRequests.bind(aiController));
+router.post('/projects/:projectId/prs/:prNumber/review', aiController.reviewPullRequest.bind(aiController));
+
 // Coding Agent Routes
 router.post('/projects/:projectId/agent/run', aiController.runAgent.bind(aiController));
 router.post('/projects/:projectId/agent/push', aiController.pushAgentChanges.bind(aiController));

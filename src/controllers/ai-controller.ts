@@ -296,4 +296,32 @@ export class AiController {
       });
     }
   }
+
+  async listPullRequests(req: Request, res: Response) {
+    try {
+      const { projectId } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+      const project = await prisma.project.findUnique({ where: { id: projectId } });
+      if (!project?.githubUrl) return res.status(400).json({ error: "No GitHub repository connected" });
+      const { ProjectGitHubService } = await import("../services/github.service");
+      const prs = await ProjectGitHubService.listPullRequests(project.githubUrl);
+      res.json({ pullRequests: prs });
+    } catch (error) {
+      console.error("List PRs error:", error);
+      res.status(500).json({ error: "Failed to fetch pull requests", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
+  async reviewPullRequest(req: Request, res: Response) {
+    try {
+      const { projectId, prNumber } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+      const num = Array.isArray(prNumber) ? prNumber[0] : prNumber;
+      const review = await aiService.reviewPullRequest(projectId, parseInt(num, 10));
+      res.json(review);
+    } catch (error) {
+      console.error("PR review error:", error);
+      res.status(500).json({ error: "Failed to review pull request", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
 }

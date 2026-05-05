@@ -134,6 +134,32 @@ export interface ProjectHealth {
   };
 }
 
+export interface PullRequest {
+  number: number;
+  title: string;
+  author: string;
+  state: "open" | "closed" | "merged";
+  createdAt: string;
+  updatedAt: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  url: string;
+  draft: boolean;
+  body?: string;
+  labels: string[];
+  baseBranch: string;
+  headBranch: string;
+}
+
+export interface PRReview {
+  summary: string;
+  risks: string[];
+  suggestions: string[];
+  verdict: "approve" | "request_changes" | "needs_discussion";
+  qualityScore: number;
+}
+
 export interface ChatResponse {
   message: string;
   sessionId: string;

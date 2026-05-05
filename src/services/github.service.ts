@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import type { PullRequest } from "../types";
 
 const prisma = new PrismaClient();
 
@@ -255,6 +256,45 @@ export class ProjectGitHubService {
       sha: newCommit.sha,
       url: `https://github.com/${owner}/${repo}/commit/${newCommit.sha}`,
     };
+  }
+
+  static async listPullRequests(githubUrl: string): Promise<PullRequest[]> {
+    const parsed = parseGithubUrl(githubUrl);
+    if (!parsed) throw new Error("Invalid GitHub URL");
+    const { owner, repo } = parsed;
+
+    const data = await fetchGitHub(`/repos/${owner}/${repo}/pulls?state=open&per_page=20`) as any[];
+    return data.map((pr: any) => ({
+      number: pr.number,
+      title: pr.title,
+      author: pr.user?.login ?? "unknown",
+      state: pr.merged_at ? "merged" : pr.state,
+      createdAt: pr.created_at,
+      updatedAt: pr.updated_at,
+      additions: pr.additions ?? 0,
+      deletions: pr.deletions ?? 0,
+      changedFiles: pr.changed_files ?? 0,
+      url: pr.html_url,
+      draft: pr.draft ?? false,
+      body: pr.body ?? undefined,
+      labels: pr.labels?.map((l: any) => l.name) ?? [],
+      baseBranch: pr.base?.ref ?? "main",
+      headBranch: pr.head?.ref ?? "",
+    }));
+  }
+
+  static async getPullRequestDiff(githubUrl: string, prNumber: number): Promise<string> {
+    const parsed = parseGithubUrl(githubUrl);
+    if (!parsed) throw new Error("Invalid GitHub URL");
+    const { owner, repo } = parsed;
+
+    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
+      headers: { ...githubHeaders(), Accept: "application/vnd.github.v3.diff" },
+    });
+    if (!res.ok) throw new Error(`GitHub API ${res.status}: failed to fetch PR diff`);
+    const diff = await res.text();
+    // Truncate to avoid token limits — keep first 8000 chars
+    return diff.length > 8000 ? diff.slice(0, 8000) + "\n\n[diff truncated]" : diff;
   }
 
   static async getSnapshot(projectId: string): Promise<RepoSnapshot | null> {
