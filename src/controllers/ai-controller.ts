@@ -281,4 +281,19 @@ export class AiController {
       });
     }
   }
+
+  async getProjectHealth(req: Request, res: Response) {
+    try {
+      const { projectId } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+      const health = await aiService.getProjectHealth(projectId);
+      res.json(health);
+    } catch (error) {
+      console.error("Project health error:", error);
+      res.status(500).json({
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
 }

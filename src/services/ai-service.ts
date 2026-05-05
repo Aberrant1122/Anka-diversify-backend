@@ -10,6 +10,8 @@ import {
   ChatRequest,
   ChatResponse,
   ProposedTask,
+  EpicProposal,
+  ProjectHealth,
   ProjectContext,
   GeneralContext,
   ChatCompletionRequest,
@@ -133,7 +135,7 @@ export class AiService {
           function: {
             name: "propose_tasks",
             description:
-              "When the user discusses requirements, features, or bugs, or explicitly asks to create tasks, call this to propose actionable Kanban tasks. Do NOT call this for general questions or status updates.",
+              "When the user discusses small requirements, bugs, or asks to create a few tasks, call this to propose actionable Kanban tasks. Use generate_epic instead when the user describes a full feature or large piece of work.",
             parameters: {
               type: "object",
               properties: {
@@ -146,6 +148,7 @@ export class AiService {
                       description: { type: "string", description: "Details and acceptance criteria" },
                       priority:    { type: "string", enum: ["low", "medium", "high"] },
                       phase:       { type: "string", description: "Project phase this belongs to" },
+                      userStory:   { type: "string", description: "Optional: As a [user], I want [goal] so that [benefit]" },
                     },
                     required: ["title", "priority"],
                   },
@@ -155,25 +158,62 @@ export class AiService {
             },
           },
         },
+        {
+          type: "function",
+          function: {
+            name: "generate_epic",
+            description:
+              "When the user describes a full feature, module, or large piece of work, break it into a named epic with multiple tasks covering the full scope. Include user stories and acceptance criteria.",
+            parameters: {
+              type: "object",
+              properties: {
+                title:       { type: "string", description: "Epic name (short, feature-level)" },
+                description: { type: "string", description: "What this epic delivers and why" },
+                tasks: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      title:               { type: "string" },
+                      description:         { type: "string", description: "Acceptance criteria and technical notes" },
+                      priority:            { type: "string", enum: ["low", "medium", "high"] },
+                      phase:               { type: "string" },
+                      userStory:           { type: "string", description: "As a [user], I want [goal] so that [benefit]" },
+                    },
+                    required: ["title", "priority"],
+                  },
+                },
+              },
+              required: ["title", "description", "tasks"],
+            },
+          },
+        },
       ],
       tool_choice: "auto",
     });
 
     let aiResponse = completion.choices[0]?.message?.content ?? "";
     let proposedTasks: ProposedTask[] | undefined;
+    let proposedEpic: EpicProposal | undefined;
 
     const toolCalls = completion.choices[0]?.message?.tool_calls;
     if (toolCalls?.length) {
       for (const call of toolCalls) {
-        if (call.type === "function" && call.function.name === "propose_tasks") {
-          try {
-            const args = JSON.parse(call.function.arguments);
+        if (call.type !== "function") continue;
+        try {
+          const args = JSON.parse(call.function.arguments);
+          if (call.function.name === "propose_tasks") {
             proposedTasks = args.tasks as ProposedTask[];
             if (!aiResponse) {
               aiResponse = `I've identified **${proposedTasks.length} task${proposedTasks.length !== 1 ? "s" : ""}** from our discussion. Review and confirm which ones to add to the Kanban board.`;
             }
-          } catch {}
-        }
+          } else if (call.function.name === "generate_epic") {
+            proposedEpic = args as EpicProposal;
+            if (!aiResponse) {
+              aiResponse = `I've broken down **${proposedEpic.title}** into ${proposedEpic.tasks.length} tasks. Review the epic and add it to the Kanban board.`;
+            }
+          }
+        } catch {}
       }
     }
 
@@ -189,11 +229,78 @@ export class AiService {
       message: aiResponse,
       sessionId: session.id,
       proposedTasks,
+      proposedEpic,
       contextMeta: {
         projectContext,
         messageCount: await this.getMessageCount(session.id),
         lastUpdated: new Date(),
       },
+    };
+  }
+
+  async getProjectHealth(projectId: string): Promise<ProjectHealth> {
+    const now = new Date();
+
+    const [tasks, recentActivity] = await Promise.all([
+      prisma.projectTask.findMany({ where: { projectId } }),
+      prisma.projectActivity.findMany({
+        where: { projectId },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+      }),
+    ]);
+
+    const totalTasks = tasks.length;
+    const completedTasks = tasks.filter((t: any) => t.status === "done").length;
+    const inProgressTasks = tasks.filter((t: any) => t.status === "in_progress").length;
+    const overdueTasks = tasks.filter(
+      (t: any) => t.dueDate && new Date(t.dueDate) < now && t.status !== "done"
+    ).length;
+    const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+
+    const daysSinceActivity = recentActivity[0]
+      ? Math.floor((now.getTime() - new Date(recentActivity[0].createdAt).getTime()) / 86400000)
+      : 999;
+
+    const flags: string[] = [];
+    const recommendations: string[] = [];
+    let score = 100;
+
+    if (overdueTasks > 0) {
+      score -= Math.min(overdueTasks * 8, 30);
+      flags.push(`${overdueTasks} overdue task${overdueTasks > 1 ? "s" : ""}`);
+      recommendations.push("Review and reschedule overdue tasks or mark them as blocked.");
+    }
+    if (completionRate < 20 && totalTasks > 5) {
+      score -= 15;
+      flags.push("Low completion rate");
+      recommendations.push("Break large tasks into smaller ones to improve velocity.");
+    }
+    if (inProgressTasks > 5) {
+      score -= 10;
+      flags.push(`${inProgressTasks} tasks in progress simultaneously`);
+      recommendations.push("Limit work-in-progress to 2-3 tasks per person to reduce context switching.");
+    }
+    if (daysSinceActivity > 7) {
+      score -= 15;
+      flags.push(`No activity in ${daysSinceActivity} days`);
+      recommendations.push("Schedule a team sync to unblock progress.");
+    }
+    if (totalTasks === 0) {
+      score = 50;
+      flags.push("No tasks created yet");
+      recommendations.push("Use the AI assistant to break down your project into actionable tasks.");
+    }
+
+    score = Math.max(0, Math.min(100, score));
+    const status: ProjectHealth["status"] = score >= 70 ? "healthy" : score >= 40 ? "warning" : "critical";
+
+    return {
+      score,
+      status,
+      flags,
+      recommendations,
+      stats: { totalTasks, completedTasks, overdueTasks, inProgressTasks, completionRate },
     };
   }
 

@@ -111,12 +111,34 @@ export interface ProposedTask {
   description?: string;
   priority: "low" | "medium" | "high";
   phase?: string;
+  userStory?: string;
+}
+
+export interface EpicProposal {
+  title: string;
+  description: string;
+  tasks: ProposedTask[];
+}
+
+export interface ProjectHealth {
+  score: number;
+  status: "healthy" | "warning" | "critical";
+  flags: string[];
+  recommendations: string[];
+  stats: {
+    totalTasks: number;
+    completedTasks: number;
+    overdueTasks: number;
+    inProgressTasks: number;
+    completionRate: number;
+  };
 }
 
 export interface ChatResponse {
   message: string;
   sessionId: string;
   proposedTasks?: ProposedTask[];
+  proposedEpic?: EpicProposal;
   contextMeta?: {
     projectContext?: ProjectContext;
     generalContext?: GeneralContext;
