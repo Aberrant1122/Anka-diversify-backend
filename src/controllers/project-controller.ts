@@ -4,6 +4,9 @@ import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
 import { generatePresignedUrl, deleteFromS3, detectType } from "../services/upload.service";
+import { notificationService } from "../services/notification-service";
+import { PrismaClient } from "@prisma/client";
+const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
 const DEMO_USER_ID = "demo-user-id";
@@ -355,13 +358,33 @@ export class ProjectController {
       if (!content?.trim()) {
         return res.status(400).json({ success: false, error: "content is required" });
       }
+      const taskId = param(req, "taskId");
+      const projectId = param(req, "id");
+      const userId = getUserId(req);
+      const userName = getUserName(req);
       const comment = await projectService.createComment({
-        taskId: param(req, "taskId"),
-        projectId: param(req, "id"),
-        userId: getUserId(req),
-        userName: getUserName(req),
+        taskId,
+        projectId,
+        userId,
+        userName,
         content: content.trim(),
       });
+
+      // Fire-and-forget @mention notifications
+      if (content.includes("@")) {
+        Promise.all([
+          prisma.projectTask.findUnique({ where: { id: taskId }, select: { title: true } }),
+          prisma.project.findUnique({ where: { id: projectId }, select: { name: true } }),
+        ]).then(([task, project]) =>
+          notificationService.handleMentions(content.trim(), userId, userName, {
+            taskTitle: task?.title || "a task",
+            projectName: project?.name || "a project",
+            taskId,
+            projectId,
+          })
+        ).catch(() => {});
+      }
+
       res.status(201).json({ success: true, data: comment });
     } catch (error) {
       console.error("Error creating comment:", error);

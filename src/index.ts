@@ -16,6 +16,7 @@ import authRoutes from "./routes/auth-routes";
 import adminRoutes from "./routes/admin-routes";
 import projectRoutes from "./routes/project-routes";
 import inviteRoutes from "./routes/invite-routes";
+import notificationRoutes from "./routes/notification-routes";
 
 dotenv.config({ override: true });
 
@@ -63,6 +64,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/projects", projectRoutes);
 app.use("/api/invites", inviteRoutes);
+app.use("/api/notifications", notificationRoutes);
 
 // Error handler
 app.use(errorHandler);
