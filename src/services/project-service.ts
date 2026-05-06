@@ -124,10 +124,21 @@ export class ProjectService {
 
   async getProjectTasks(projectId: string, userId: string = DEMO_USER_ID) {
     await ensureUser(userId);
-    return prisma.projectTask.findMany({
+    const tasks = await prisma.projectTask.findMany({
       where: { projectId },
       orderBy: { createdAt: "desc" },
+      include: {
+        blocking: { select: { blockedTaskId: true } },
+        blockedBy: { select: { blockingTaskId: true } },
+      },
     });
+    return tasks.map((t) => ({
+      ...t,
+      blockingIds: t.blocking.map((d) => d.blockedTaskId),
+      blockedByIds: t.blockedBy.map((d) => d.blockingTaskId),
+      blocking: undefined,
+      blockedBy: undefined,
+    }));
   }
 
   async createTask(

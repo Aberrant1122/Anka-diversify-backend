@@ -488,5 +488,42 @@ export class ProjectController {
       res.status(500).json({ success: false, error: "Failed to delete file" });
     }
   }
+
+  async addDependency(req: Request, res: Response) {
+    try {
+      const blockedTaskId = param(req, "taskId");
+      const { blockingTaskId } = req.body;
+      if (!blockingTaskId) {
+        return res.status(400).json({ success: false, error: "blockingTaskId is required" });
+      }
+      if (blockingTaskId === blockedTaskId) {
+        return res.status(400).json({ success: false, error: "A task cannot block itself" });
+      }
+      await prisma.taskDependency.upsert({
+        where: { blockingTaskId_blockedTaskId: { blockingTaskId, blockedTaskId } },
+        update: {},
+        create: { blockingTaskId, blockedTaskId, projectId: param(req, "id") },
+      });
+      res.status(201).json({ success: true });
+    } catch (error) {
+      console.error("Error adding dependency:", error);
+      res.status(500).json({ success: false, error: "Failed to add dependency" });
+    }
+  }
+
+  async removeDependency(req: Request, res: Response) {
+    try {
+      await prisma.taskDependency.deleteMany({
+        where: {
+          blockingTaskId: param(req, "blockingTaskId"),
+          blockedTaskId: param(req, "taskId"),
+        },
+      });
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error removing dependency:", error);
+      res.status(500).json({ success: false, error: "Failed to remove dependency" });
+    }
+  }
 }
 

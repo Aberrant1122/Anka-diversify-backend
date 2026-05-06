@@ -60,6 +60,10 @@ router.get('/:id/tasks/:taskId/comments', projectController.getComments.bind(pro
 router.post('/:id/tasks/:taskId/comments', projectController.createComment.bind(projectController));
 router.delete('/:id/tasks/:taskId/comments/:commentId', projectController.deleteComment.bind(projectController));
 
+// Task dependencies
+router.post('/:id/tasks/:taskId/dependencies', projectController.addDependency.bind(projectController));
+router.delete('/:id/tasks/:taskId/dependencies/:blockingTaskId', projectController.removeDependency.bind(projectController));
+
 // Sprints
 router.use('/:projectId/sprints', sprintRoutes);
 

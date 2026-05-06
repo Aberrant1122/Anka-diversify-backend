@@ -166,9 +166,11 @@ model ProjectTask {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  comments TaskComment[]
-  sprints  SprintTask[]
+  project      Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  comments     TaskComment[]
+  sprints      SprintTask[]
+  blocking     TaskDependency[] @relation("Blocking")
+  blockedBy    TaskDependency[] @relation("BlockedBy")
 
   @@map("project_tasks")
 }
@@ -229,6 +231,20 @@ model ProjectChatMessage {
   createdAt DateTime @default(now())
 
   @@map("project_chat_messages")
+}
+
+model TaskDependency {
+  id             String   @id @default(cuid())
+  blockingTaskId String
+  blockedTaskId  String
+  projectId      String
+  createdAt      DateTime @default(now())
+
+  blockingTask ProjectTask @relation("Blocking", fields: [blockingTaskId], references: [id], onDelete: Cascade)
+  blockedTask  ProjectTask @relation("BlockedBy", fields: [blockedTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([blockingTaskId, blockedTaskId])
+  @@map("task_dependencies")
 }
 
 model Notification {
