@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { ProjectController } from '../controllers/project-controller';
+import sprintRoutes from './sprint-routes';
 
 const router = Router();
 const projectController = new ProjectController();
@@ -58,5 +59,8 @@ router.get('/:id/activities', projectController.getActivities.bind(projectContro
 router.get('/:id/tasks/:taskId/comments', projectController.getComments.bind(projectController));
 router.post('/:id/tasks/:taskId/comments', projectController.createComment.bind(projectController));
 router.delete('/:id/tasks/:taskId/comments/:commentId', projectController.deleteComment.bind(projectController));
+
+// Sprints
+router.use('/:projectId/sprints', sprintRoutes);
 
 export default router;

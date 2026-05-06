@@ -68,6 +68,7 @@ model Project {
   tasks          ProjectTask[]
   files          ProjectFile[]
   members        ProjectMember[]
+  sprints        Sprint[]
 
   @@map("projects")
 }
@@ -167,6 +168,7 @@ model ProjectTask {
 
   project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
   comments TaskComment[]
+  sprints  SprintTask[]
 
   @@map("project_tasks")
 }
@@ -244,4 +246,34 @@ model ProjectRepoSnapshot {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@map("project_repo_snapshots")
+}
+
+model Sprint {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  goal      String?
+  startDate DateTime
+  endDate   DateTime
+  status    String   @default("planning") // planning, active, completed
+  velocity  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   SprintTask[]
+
+  @@map("sprints")
+}
+
+model SprintTask {
+  id       String @id @default(cuid())
+  sprintId String
+  taskId   String
+
+  sprint Sprint      @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  task   ProjectTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([sprintId, taskId])
+  @@map("sprint_tasks")
 }
