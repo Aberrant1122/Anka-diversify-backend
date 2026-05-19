@@ -22,6 +22,10 @@ router.get('/projects/:projectId/health', aiController.getProjectHealth.bind(aiC
 router.get('/projects/:projectId/prs', aiController.listPullRequests.bind(aiController));
 router.post('/projects/:projectId/prs/:prNumber/review', aiController.reviewPullRequest.bind(aiController));
 
+// Sprint Planner
+router.get('/projects/:projectId/sprints/:sprintId/suggest', aiController.suggestSprintTasks.bind(aiController));
+router.post('/projects/:projectId/sprints/generate', aiController.generateSprint.bind(aiController));
+
 // Coding Agent Routes
 router.post('/projects/:projectId/agent/run', aiController.runAgent.bind(aiController));
 router.post('/projects/:projectId/agent/push', aiController.pushAgentChanges.bind(aiController));

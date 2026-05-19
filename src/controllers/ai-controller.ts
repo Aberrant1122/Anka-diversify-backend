@@ -312,6 +312,34 @@ export class AiController {
     }
   }
 
+  async suggestSprintTasks(req: Request, res: Response) {
+    try {
+      const { projectId, sprintId } = req.params;
+      if (Array.isArray(projectId) || Array.isArray(sprintId))
+        return res.status(400).json({ error: "Invalid params" });
+      const capacity = Number(req.query.capacity) || 10;
+      const suggestions = await aiService.suggestSprintTasks(projectId, sprintId, capacity);
+      res.json({ suggestions });
+    } catch (error) {
+      console.error("Sprint suggest error:", error);
+      res.status(500).json({ error: "Failed to suggest tasks", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
+  async generateSprint(req: Request, res: Response) {
+    try {
+      const { projectId } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+      const { prompt } = req.body;
+      if (!prompt) return res.status(400).json({ error: "prompt is required" });
+      const result = await aiService.generateSprint(projectId, prompt);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error("Generate sprint error:", error);
+      res.status(500).json({ error: "Failed to generate sprint", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
   async reviewPullRequest(req: Request, res: Response) {
     try {
       const { projectId, prNumber } = req.params;

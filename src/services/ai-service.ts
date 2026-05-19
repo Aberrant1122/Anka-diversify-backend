@@ -305,6 +305,120 @@ export class AiService {
     };
   }
 
+  async suggestSprintTasks(
+    projectId: string,
+    sprintId: string,
+    capacity: number = 10,
+  ): Promise<{ taskId: string; title: string; reason: string; priority: string }[]> {
+    const openai = this.getOpenAI();
+    const [sprint, allTasks] = await Promise.all([
+      prisma.sprint.findUnique({
+        where: { id: sprintId },
+        include: { tasks: { select: { taskId: true } } },
+      }),
+      prisma.projectTask.findMany({
+        where: { projectId, status: { in: ["todo", "in_progress"] } },
+      }),
+    ]);
+
+    if (!sprint) throw new Error("Sprint not found");
+
+    const alreadyInSprint = new Set(sprint.tasks.map((t) => t.taskId));
+    const candidateTasks = allTasks.filter((t) => !alreadyInSprint.has(t.id));
+    if (!candidateTasks.length) return [];
+
+    const now = new Date();
+    const taskSummary = candidateTasks.map((t) => ({
+      id: t.id,
+      title: t.title,
+      priority: t.priority,
+      status: t.status,
+      dueDate: t.dueDate ? t.dueDate.toISOString().split("T")[0] : null,
+      overdue: t.dueDate ? t.dueDate < now : false,
+    }));
+
+    const prompt = `You are a sprint planner. Given a sprint from ${sprint.startDate.toISOString().split("T")[0]} to ${sprint.endDate.toISOString().split("T")[0]}, suggest the best ${capacity} tasks to include.
+
+Tasks to choose from:
+${JSON.stringify(taskSummary, null, 2)}
+
+Return a JSON array of up to ${capacity} objects: { taskId, title, reason, priority }
+Sort by importance. Prefer: overdue tasks, high priority, tasks due before sprint end.`;
+
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o",
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const parsed = JSON.parse(res.choices[0].message.content || "{}");
+    return Array.isArray(parsed.tasks) ? parsed.tasks : [];
+  }
+
+  async generateSprint(
+    projectId: string,
+    userPrompt: string,
+  ): Promise<{
+    name: string;
+    goal: string;
+    startDate: string;
+    endDate: string;
+    suggestedTasks: { taskId: string; title: string; reason: string; priority: string }[];
+  }> {
+    const openai = this.getOpenAI();
+    const [project, allTasks] = await Promise.all([
+      prisma.project.findUnique({ where: { id: projectId } }),
+      prisma.projectTask.findMany({
+        where: { projectId, status: { in: ["todo", "in_progress"] } },
+      }),
+    ]);
+
+    const now = new Date();
+    const taskSummary = allTasks.map((t) => ({
+      id: t.id,
+      title: t.title,
+      priority: t.priority,
+      status: t.status,
+      dueDate: t.dueDate ? t.dueDate.toISOString().split("T")[0] : null,
+      overdue: t.dueDate ? t.dueDate < now : false,
+    }));
+
+    const todayStr = now.toISOString().split("T")[0];
+    const prompt = `You are a sprint planner for a project called "${project?.name}".
+Today is ${todayStr}.
+
+The user wants to create a sprint: "${userPrompt}"
+
+Available tasks (not yet in a sprint):
+${JSON.stringify(taskSummary, null, 2)}
+
+Return a JSON object with exactly these fields:
+{
+  "name": "sprint name (e.g. Sprint 1 — Auth & Onboarding)",
+  "goal": "one-sentence sprint goal",
+  "startDate": "YYYY-MM-DD (today or later)",
+  "endDate": "YYYY-MM-DD (typically 2 weeks after start)",
+  "suggestedTasks": [{ "taskId", "title", "reason", "priority" }]
+}
+
+Pick the most relevant tasks based on the user's prompt. Prefer high priority and overdue tasks. Include up to 10 tasks.`;
+
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o",
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const parsed = JSON.parse(res.choices[0].message.content || "{}");
+    return {
+      name: parsed.name || "New Sprint",
+      goal: parsed.goal || "",
+      startDate: parsed.startDate || todayStr,
+      endDate: parsed.endDate || "",
+      suggestedTasks: Array.isArray(parsed.suggestedTasks) ? parsed.suggestedTasks : [],
+    };
+  }
+
   async reviewPullRequest(projectId: string, prNumber: number): Promise<PRReview> {
     const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project?.githubUrl) throw new Error("No GitHub repository connected to this project");
