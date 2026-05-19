@@ -21,6 +21,7 @@ router.get('/projects/:projectId/health', aiController.getProjectHealth.bind(aiC
 // Pull Request Review
 router.get('/projects/:projectId/prs', aiController.listPullRequests.bind(aiController));
 router.post('/projects/:projectId/prs/:prNumber/review', aiController.reviewPullRequest.bind(aiController));
+router.post('/projects/:projectId/prs/:prNumber/describe', aiController.generatePRDescription.bind(aiController));
 
 // Sprint Planner
 router.get('/projects/:projectId/sprints/:sprintId/suggest', aiController.suggestSprintTasks.bind(aiController));

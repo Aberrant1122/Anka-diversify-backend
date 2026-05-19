@@ -472,6 +472,46 @@ Be specific and reference actual code from the diff. Keep each risk/suggestion u
     }
   }
 
+  async generatePRDescription(projectId: string, prNumber: number): Promise<{ title: string; description: string }> {
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
+    if (!project?.githubUrl) throw new Error("No GitHub repository connected to this project");
+
+    const [diff, prs] = await Promise.all([
+      ProjectGitHubService.getPullRequestDiff(project.githubUrl, prNumber),
+      ProjectGitHubService.listPullRequests(project.githubUrl),
+    ]);
+
+    const pr = prs.find((p) => p.number === prNumber);
+    const prMeta = pr
+      ? `Branch: ${pr.headBranch} → ${pr.baseBranch}\nChanged files: ${pr.changedFiles}, +${pr.additions} -${pr.deletions} lines`
+      : `PR #${prNumber}`;
+
+    const completion = await this.getOpenAI().chat.completions.create({
+      model: "gpt-4o",
+      temperature: 0.4,
+      max_tokens: 800,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a senior engineer writing a GitHub pull request description. Based on the diff, produce a clear, professional PR description.
+Return JSON: { "title": "concise PR title under 72 chars", "description": "markdown body with ## Summary, ## Changes, ## Testing sections" }`,
+        },
+        {
+          role: "user",
+          content: `${prMeta}\n\n--- DIFF ---\n${diff.slice(0, 8000)}`,
+        },
+      ],
+    });
+
+    const raw = completion.choices[0]?.message?.content ?? "{}";
+    try {
+      return JSON.parse(raw) as { title: string; description: string };
+    } catch {
+      return { title: pr?.title || `PR #${prNumber}`, description: "Could not generate description." };
+    }
+  }
+
   private async buildGeneralContext(
     userId: string,
     sessionId: string,

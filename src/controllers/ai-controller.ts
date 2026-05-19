@@ -326,6 +326,19 @@ export class AiController {
     }
   }
 
+  async generatePRDescription(req: Request, res: Response) {
+    try {
+      const { projectId, prNumber } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+      const num = Array.isArray(prNumber) ? prNumber[0] : prNumber;
+      const result = await aiService.generatePRDescription(projectId, parseInt(num, 10));
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error("Generate PR description error:", error);
+      res.status(500).json({ error: "Failed to generate PR description", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
   async generateSprint(req: Request, res: Response) {
     try {
       const { projectId } = req.params;
