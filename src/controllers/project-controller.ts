@@ -525,5 +525,61 @@ export class ProjectController {
       res.status(500).json({ success: false, error: "Failed to remove dependency" });
     }
   }
+
+  // ── Checklist ────────────────────────────────────────────────────────────────
+
+  async getChecklist(req: Request, res: Response) {
+    try {
+      const items = await prisma.taskChecklistItem.findMany({
+        where: { taskId: param(req, "taskId") },
+        orderBy: { position: "asc" },
+      });
+      res.json({ success: true, data: items });
+    } catch (error) {
+      res.status(500).json({ success: false, error: "Failed to get checklist" });
+    }
+  }
+
+  async addChecklistItem(req: Request, res: Response) {
+    try {
+      const { text } = req.body;
+      if (!text) return res.status(400).json({ success: false, error: "text required" });
+      const count = await prisma.taskChecklistItem.count({ where: { taskId: param(req, "taskId") } });
+      const item = await prisma.taskChecklistItem.create({
+        data: {
+          taskId: param(req, "taskId"),
+          projectId: param(req, "id"),
+          text,
+          position: count,
+        },
+      });
+      res.json({ success: true, data: item });
+    } catch (error) {
+      res.status(500).json({ success: false, error: "Failed to add checklist item" });
+    }
+  }
+
+  async updateChecklistItem(req: Request, res: Response) {
+    try {
+      const itemId = param(req, "itemId");
+      const { checked, text } = req.body;
+      const item = await prisma.taskChecklistItem.update({
+        where: { id: itemId },
+        data: { ...(checked !== undefined ? { checked } : {}), ...(text !== undefined ? { text } : {}) },
+      });
+      res.json({ success: true, data: item });
+    } catch (error) {
+      res.status(500).json({ success: false, error: "Failed to update checklist item" });
+    }
+  }
+
+  async deleteChecklistItem(req: Request, res: Response) {
+    try {
+      await prisma.taskChecklistItem.delete({ where: { id: param(req, "itemId") } });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ success: false, error: "Failed to delete checklist item" });
+    }
+  }
 }
 

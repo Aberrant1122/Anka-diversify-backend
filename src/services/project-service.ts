@@ -130,14 +130,17 @@ export class ProjectService {
       include: {
         blocking: { select: { blockedTaskId: true } },
         blockedBy: { select: { blockingTaskId: true } },
+        _count: { select: { comments: true } },
       },
     });
     return tasks.map((t) => ({
       ...t,
       blockingIds: t.blocking.map((d) => d.blockedTaskId),
       blockedByIds: t.blockedBy.map((d) => d.blockingTaskId),
+      commentCount: t._count.comments,
       blocking: undefined,
       blockedBy: undefined,
+      _count: undefined,
     }));
   }
 

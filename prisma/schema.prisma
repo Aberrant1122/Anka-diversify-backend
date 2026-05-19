@@ -171,6 +171,7 @@ model ProjectTask {
   sprints      SprintTask[]
   blocking     TaskDependency[] @relation("Blocking")
   blockedBy    TaskDependency[] @relation("BlockedBy")
+  checklistItems TaskChecklistItem[]
 
   @@map("project_tasks")
 }
@@ -296,6 +297,20 @@ model Sprint {
   tasks   SprintTask[]
 
   @@map("sprints")
+}
+
+model TaskChecklistItem {
+  id        String   @id @default(cuid())
+  taskId    String
+  projectId String
+  text      String
+  checked   Boolean  @default(false)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  task ProjectTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@map("task_checklist_items")
 }
 
 model SprintTask {

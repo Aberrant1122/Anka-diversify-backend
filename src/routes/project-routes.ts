@@ -64,6 +64,12 @@ router.delete('/:id/tasks/:taskId/comments/:commentId', projectController.delete
 router.post('/:id/tasks/:taskId/dependencies', projectController.addDependency.bind(projectController));
 router.delete('/:id/tasks/:taskId/dependencies/:blockingTaskId', projectController.removeDependency.bind(projectController));
 
+// Task checklist
+router.get('/:id/tasks/:taskId/checklist', projectController.getChecklist.bind(projectController));
+router.post('/:id/tasks/:taskId/checklist', projectController.addChecklistItem.bind(projectController));
+router.patch('/:id/tasks/:taskId/checklist/:itemId', projectController.updateChecklistItem.bind(projectController));
+router.delete('/:id/tasks/:taskId/checklist/:itemId', projectController.deleteChecklistItem.bind(projectController));
+
 // Sprints
 router.use('/:projectId/sprints', sprintRoutes);
 
