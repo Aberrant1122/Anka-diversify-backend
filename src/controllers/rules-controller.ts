@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../services/database';
+import { runRule, RuleType } from '../services/rule-engine';
 
 function param(req: Request, key: string): string {
   return req.params[key] as string;
@@ -24,7 +25,7 @@ export class RulesController {
 
   async create(req: Request, res: Response) {
     try {
-      const { name, description, category, conditions, actions } = req.body;
+      const { name, description, category, conditions, actions, ruleType } = req.body;
       if (!name || !category) {
         return res.status(400).json({ message: 'name and category are required' });
       }
@@ -36,8 +37,13 @@ export class RulesController {
           conditions: (conditions ?? []) as Prisma.InputJsonValue,
           actions: (actions ?? []) as Prisma.InputJsonValue,
           createdBy: headerStr(req, 'Admin'),
+          ruleType: ruleType || null,
         },
       });
+      // Retroactive: if created enabled with a known type, run it immediately
+      if (rule.enabled && rule.ruleType) {
+        runRule(rule.ruleType as RuleType).catch(console.error);
+      }
       res.status(201).json({ data: rule });
     } catch (error) {
       console.error('Create rule error:', error);
@@ -49,6 +55,10 @@ export class RulesController {
     try {
       const id = param(req, 'id');
       const body = req.body as Record<string, unknown>;
+
+      // Fetch current state to detect enabled toggle
+      const before = await prisma.orgRule.findUnique({ where: { id } });
+
       const data: Prisma.OrgRuleUpdateInput = {};
       if (body.name !== undefined) data.name = String(body.name);
       if (body.description !== undefined) data.description = String(body.description);
@@ -56,7 +66,17 @@ export class RulesController {
       if (body.enabled !== undefined) data.enabled = Boolean(body.enabled);
       if (body.conditions !== undefined) data.conditions = body.conditions as Prisma.InputJsonValue;
       if (body.actions !== undefined) data.actions = body.actions as Prisma.InputJsonValue;
+      if (body.ruleType !== undefined) data.ruleType = body.ruleType ? String(body.ruleType) : null;
+
       const rule = await prisma.orgRule.update({ where: { id }, data });
+
+      // Retroactive: rule was just switched on — run it against existing data immediately
+      const wasOff = before && !before.enabled;
+      const isNowOn = rule.enabled;
+      if (wasOff && isNowOn && rule.ruleType) {
+        runRule(rule.ruleType as RuleType).catch(console.error);
+      }
+
       res.json({ data: rule });
     } catch (error) {
       console.error('Update rule error:', error);
@@ -88,11 +108,28 @@ export class RulesController {
           conditions: (source.conditions ?? []) as Prisma.InputJsonValue,
           actions: (source.actions ?? []) as Prisma.InputJsonValue,
           createdBy: headerStr(req, source.createdBy),
+          ruleType: source.ruleType,
         },
       });
       res.status(201).json({ data: copy });
     } catch (error) {
       console.error('Duplicate rule error:', error);
+      res.status(500).json({ message: 'Internal server error' });
+    }
+  }
+
+  // Manual / on-demand run
+  async run(req: Request, res: Response) {
+    try {
+      const id = param(req, 'id');
+      const rule = await prisma.orgRule.findUniqueOrThrow({ where: { id } });
+      if (!rule.ruleType) {
+        return res.status(400).json({ message: 'This rule has no enforcement type — it is policy-only' });
+      }
+      const result = await runRule(rule.ruleType as RuleType);
+      res.json({ data: result });
+    } catch (error) {
+      console.error('Run rule error:', error);
       res.status(500).json({ message: 'Internal server error' });
     }
   }

@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { checkSprintAutoCloseForTask } from "./rule-engine";
 
 const prisma = new PrismaClient();
 
@@ -216,6 +217,10 @@ export class ProjectService {
         entityName: task.title,
         meta: data.status ? { to: data.status } : undefined,
       });
+    }
+    // Fire rule engine check when a task is marked done
+    if (data.status === "done") {
+      checkSprintAutoCloseForTask(task.id).catch(console.error);
     }
     return task;
   }

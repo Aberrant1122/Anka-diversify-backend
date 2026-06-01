@@ -334,6 +334,7 @@ model OrgRule {
   conditions  Json     @default("[]")
   actions     Json     @default("[]")
   createdBy   String   @default("Admin")
+  ruleType    String?  // null = policy only; 'sprint_auto_close' | 'overdue_escalation'
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
