@@ -324,3 +324,18 @@ model SprintTask {
   @@unique([sprintId, taskId])
   @@map("sprint_tasks")
 }
+
+model OrgRule {
+  id          String   @id @default(cuid())
+  name        String
+  description String
+  category    String   @default("workflow") // security, workflow, access, notification
+  enabled     Boolean  @default(true)
+  conditions  Json     @default("[]")
+  actions     Json     @default("[]")
+  createdBy   String   @default("Admin")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("org_rules")
+}

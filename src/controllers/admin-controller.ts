@@ -1,9 +1,66 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../services/database';
-import { User } from '../types';
+
 
 export class AdminController {
+  async getDashboardStats(_req: Request, res: Response) {
+    try {
+      const [totalUsers, projects, recentTasks, completedTaskCount, users] = await Promise.all([
+        prisma.user.count(),
+        prisma.project.findMany({
+          where: { status: { not: 'completed' } },
+          include: {
+            members: { include: { user: { select: { id: true, name: true, email: true, role: true } } } },
+          },
+          orderBy: { createdAt: 'desc' },
+        }),
+        prisma.projectTask.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+          include: {
+            project: { select: { id: true, name: true } },
+          },
+        }),
+        prisma.projectTask.count({ where: { status: 'done' } }),
+        prisma.user.findMany({
+          select: { id: true, name: true, email: true, role: true, status: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+        }),
+      ]);
+
+      res.json({
+        data: {
+          totalUsers,
+          activeProjects: projects.length,
+          completedTasks: completedTaskCount,
+          projects: projects.map((p) => ({
+            id: p.id,
+            name: p.name,
+            phase: p.phase,
+            status: p.status,
+            progress: p.progress,
+            githubUrl: p.githubUrl,
+            memberCount: p.members.length,
+          })),
+          recentTasks: recentTasks.map((t) => ({
+            id: t.id,
+            title: t.title,
+            status: t.status,
+            priority: t.priority,
+            dueDate: t.dueDate,
+            projectId: t.projectId,
+            projectName: t.project?.name,
+          })),
+          users,
+        },
+      });
+    } catch (error) {
+      console.error('Admin stats error:', error);
+      res.status(500).json({ message: 'Internal server error' });
+    }
+  }
+
   async inviteUser(req: Request, res: Response) {
     try {
       const { email, name } = req.body;
