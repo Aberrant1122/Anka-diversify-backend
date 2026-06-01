@@ -43,7 +43,7 @@ function githubHeaders(): Record<string, string> {
     "User-Agent": "anka-os-backend",
   };
   const token = process.env.GITHUB_TOKEN;
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (token) headers["Authorization"] = `token ${token}`;
   return headers;
 }
 
