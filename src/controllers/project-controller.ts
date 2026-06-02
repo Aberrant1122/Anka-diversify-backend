@@ -602,6 +602,29 @@ export class ProjectController {
     }
   }
 
+  // ── S3 Configuration Check ──────────────────────────────────────────────────
+
+  async checkS3Config(req: Request, res: Response) {
+    try {
+      const config = {
+        hasAccessKey: !!process.env.AWS_ACCESS_KEY_ID,
+        hasSecretKey: !!process.env.AWS_SECRET_ACCESS_KEY,
+        region: process.env.AWS_REGION || "not set",
+        bucket: process.env.AWS_S3_BUCKET_NAME || "not set",
+        accessKeyLength: process.env.AWS_ACCESS_KEY_ID?.length || 0,
+        isConfigured: !!(
+          process.env.AWS_ACCESS_KEY_ID &&
+          process.env.AWS_SECRET_ACCESS_KEY &&
+          process.env.AWS_S3_BUCKET_NAME
+        ),
+      };
+      res.json({ success: true, data: config });
+    } catch (error) {
+      console.error("Error checking S3 config:", error);
+      res.status(500).json({ success: false, error: "Failed to check S3 config" });
+    }
+  }
+
   // ── Global Documents ────────────────────────────────────────────────────────
 
   async getAllDocuments(req: Request, res: Response) {
