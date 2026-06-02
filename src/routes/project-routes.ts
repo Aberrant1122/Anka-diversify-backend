@@ -5,6 +5,9 @@ import sprintRoutes from './sprint-routes';
 const router = Router();
 const projectController = new ProjectController();
 
+// Get all documents across all projects
+router.get('/documents/all', projectController.getAllDocuments.bind(projectController));
+
 // Get all projects
 router.get('/', projectController.getProjects.bind(projectController));
 
@@ -42,6 +45,7 @@ router.post('/:id/files', projectController.createFile.bind(projectController));
 router.post('/:id/files/presign', projectController.presignUpload.bind(projectController));
 router.post('/:id/files/confirm', projectController.confirmUpload.bind(projectController));
 router.delete('/:id/files/:fileId', projectController.deleteFile.bind(projectController));
+router.get('/:id/files/:fileId/download', projectController.getFileDownloadUrl.bind(projectController));
 
 // Project members
 router.get('/:id/members', projectController.getProjectMembers.bind(projectController));

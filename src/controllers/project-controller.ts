@@ -4,6 +4,7 @@ import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
 import { generatePresignedUrl, deleteFromS3, detectType } from "../services/upload.service";
+import { S3Service } from "../services/s3.service";
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
@@ -489,6 +490,25 @@ export class ProjectController {
     }
   }
 
+  // Generate presigned download URL for a file
+  async getFileDownloadUrl(req: Request, res: Response) {
+    try {
+      const fileId = param(req, "fileId");
+      const file = await prisma.projectFile.findUnique({ where: { id: fileId } });
+      if (!file) {
+        return res.status(404).json({ success: false, error: "File not found" });
+      }
+      if (!file.s3Key) {
+        return res.status(400).json({ success: false, error: "File has no S3 key" });
+      }
+      const downloadUrl = await S3Service.getPresignedUrl(file.s3Key, 3600);
+      res.json({ success: true, data: { downloadUrl, filename: file.name, url: downloadUrl } });
+    } catch (error) {
+      console.error("Error generating download URL:", error);
+      res.status(500).json({ success: false, error: "Failed to generate download URL" });
+    }
+  }
+
   async addDependency(req: Request, res: Response) {
     try {
       const blockedTaskId = param(req, "taskId");
@@ -579,6 +599,46 @@ export class ProjectController {
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ success: false, error: "Failed to delete checklist item" });
+    }
+  }
+
+  // ── Global Documents ────────────────────────────────────────────────────────
+
+  async getAllDocuments(req: Request, res: Response) {
+    try {
+      const userId = getUserId(req);
+      // Get all files from projects where user is owner or member
+      const files = await prisma.projectFile.findMany({
+        where: {
+          project: {
+            OR: [
+              { userId },
+              { members: { some: { userId } } },
+            ],
+          },
+        },
+        include: {
+          project: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+      
+      res.json({ 
+        success: true, 
+        data: files.map(f => ({
+          ...f,
+          projectName: f.project.name,
+        })),
+        count: files.length 
+      });
+    } catch (error) {
+      console.error("Error fetching all documents:", error);
+      res.status(500).json({ success: false, error: "Failed to fetch documents" });
     }
   }
 }

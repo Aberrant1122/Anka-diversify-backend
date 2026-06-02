@@ -10,7 +10,8 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "setup-s3": "npx ts-node scripts/setup-s3.ts"
   },
   "keywords": [],
   "author": "",
