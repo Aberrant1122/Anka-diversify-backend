@@ -27,6 +27,9 @@ export class AiController {
       res.json(response);
     } catch (error) {
       console.error("General chat error:", error);
+      if (error instanceof Error && error.stack) {
+        console.error("Stack:", error.stack.split('\n').slice(0, 6).join('\n'));
+      }
       res.status(500).json({
         error: "Internal server error",
         message: error instanceof Error ? error.message : "Unknown error",
