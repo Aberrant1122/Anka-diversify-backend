@@ -7,7 +7,7 @@ const validateS3Config = () => {
   const missing = [];
   if (!process.env.AWS_ACCESS_KEY_ID) missing.push("AWS_ACCESS_KEY_ID");
   if (!process.env.AWS_SECRET_ACCESS_KEY) missing.push("AWS_SECRET_ACCESS_KEY");
-  if (!process.env.AWS_S3_BUCKET_NAME) missing.push("AWS_S3_BUCKET_NAME");
+  if (!process.env.AWS_S3_BUCKET) missing.push("AWS_S3_BUCKET");
   
   if (missing.length > 0) {
     console.error(`⚠️  Missing S3 environment variables: ${missing.join(", ")}`);
@@ -28,7 +28,7 @@ const s3 = new S3Client({
   },
 });
 
-const BUCKET = process.env.AWS_S3_BUCKET_NAME || "anka-os-documents";
+const BUCKET = process.env.AWS_S3_BUCKET || "anka-os-documents";
 
 export function detectType(mimetype: string): string {
   if (mimetype.startsWith("image/")) return "image";
