@@ -160,11 +160,17 @@ export interface PRReview {
   qualityScore: number;
 }
 
+export interface AIAction {
+  type: 'project_created' | 'document_saved';
+  data: Record<string, unknown>;
+}
+
 export interface ChatResponse {
   message: string;
   sessionId: string;
   proposedTasks?: ProposedTask[];
   proposedEpic?: EpicProposal;
+  actions?: AIAction[];
   contextMeta?: {
     projectContext?: ProjectContext;
     generalContext?: GeneralContext;

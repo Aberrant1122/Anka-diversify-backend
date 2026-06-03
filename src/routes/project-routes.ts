@@ -59,6 +59,11 @@ router.post('/:id/chat', projectController.sendChatMessage.bind(projectControlle
 // Project activities
 router.get('/:id/activities', projectController.getActivities.bind(projectController));
 
+// Project documents (AI-generated)
+router.get('/:id/documents', projectController.getProjectDocuments.bind(projectController));
+router.post('/:id/documents', projectController.createProjectDocument.bind(projectController));
+router.delete('/:id/documents/:docId', projectController.deleteProjectDocument.bind(projectController));
+
 // Task comments
 router.get('/:id/tasks/:taskId/comments', projectController.getComments.bind(projectController));
 router.post('/:id/tasks/:taskId/comments', projectController.createComment.bind(projectController));

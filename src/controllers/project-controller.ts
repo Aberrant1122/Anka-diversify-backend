@@ -625,6 +625,50 @@ export class ProjectController {
     }
   }
 
+  // ── Project Documents (AI-generated) ────────────────────────────────────────
+
+  async getProjectDocuments(req: Request, res: Response) {
+    try {
+      const docs = await prisma.projectDocument.findMany({
+        where: { projectId: param(req, "id") },
+        orderBy: { createdAt: "desc" },
+      });
+      res.json({ success: true, data: docs });
+    } catch (error) {
+      console.error("Error fetching project documents:", error);
+      res.status(500).json({ success: false, error: "Failed to fetch documents" });
+    }
+  }
+
+  async createProjectDocument(req: Request, res: Response) {
+    try {
+      const { title, content, type } = req.body;
+      const doc = await prisma.projectDocument.create({
+        data: {
+          projectId: param(req, "id"),
+          title,
+          content,
+          type: type || "note",
+          createdBy: getUserName(req),
+        },
+      });
+      res.status(201).json({ success: true, data: doc });
+    } catch (error) {
+      console.error("Error creating project document:", error);
+      res.status(500).json({ success: false, error: "Failed to create document" });
+    }
+  }
+
+  async deleteProjectDocument(req: Request, res: Response) {
+    try {
+      await prisma.projectDocument.delete({ where: { id: param(req, "docId") } });
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting project document:", error);
+      res.status(500).json({ success: false, error: "Failed to delete document" });
+    }
+  }
+
   // ── Global Documents ────────────────────────────────────────────────────────
 
   async getAllDocuments(req: Request, res: Response) {

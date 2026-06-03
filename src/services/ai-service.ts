@@ -59,48 +59,150 @@ export class AiService {
     userId: string,
     request: ChatRequest,
   ): Promise<ChatResponse> {
-    const startTime = Date.now();
-
-    // Get or create session
-    const session = await this.getOrCreateSession(
-      userId,
-      "general",
-      undefined,
-      request.sessionId,
-    );
-
-    // Build general context
+    const session = await this.getOrCreateSession(userId, "general", undefined, request.sessionId);
     const generalContext = await this.buildGeneralContext(userId, session.id);
-
-    // Save user message
     await this.saveMessage(session.id, "user", request.message);
-
-    // Build prompt
     const messages = this.buildGeneralPrompt(request.message, generalContext);
 
-    // Get AI response
     const completion = await this.getOpenAI().chat.completions.create({
-      model: "gpt-4",
+      model: "gpt-4o",
       messages,
       temperature: 0.7,
-      max_tokens: 2000,
+      max_tokens: 3000,
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "create_project",
+            description: "Create a new project in the workspace when the user asks to create, start, or set up a project.",
+            parameters: {
+              type: "object",
+              properties: {
+                name:        { type: "string", description: "Project name" },
+                description: { type: "string", description: "Brief project description" },
+                phase:       { type: "string", enum: ["product-modeling", "development", "marketing"], description: "Starting phase" },
+                priority:    { type: "string", enum: ["low", "medium", "high", "critical"], description: "Project priority" },
+              },
+              required: ["name"],
+            },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "save_document",
+            description: "Generate and save a document (requirements, technical documentation, or notes) for an existing project. Use this when the user asks to write, generate, or create documentation or requirements for a project.",
+            parameters: {
+              type: "object",
+              properties: {
+                projectId:   { type: "string", description: "ID of the project this document belongs to" },
+                projectName: { type: "string", description: "Project name (used if projectId is unknown)" },
+                title:       { type: "string", description: "Document title" },
+                content:     { type: "string", description: "Full document content in markdown" },
+                type:        { type: "string", enum: ["requirements", "documentation", "note"], description: "Document type" },
+              },
+              required: ["title", "content", "type"],
+            },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "list_projects",
+            description: "Fetch the list of existing projects so you can reference them when saving documents or providing context.",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      tool_choice: "auto",
     });
 
-    const aiResponse =
-      completion.choices[0]?.message?.content ||
-      "I apologize, but I could not generate a response.";
+    let aiResponse = completion.choices[0]?.message?.content ?? "";
+    const actions: import('../types').AIAction[] = [];
+    const toolCalls = completion.choices[0]?.message?.tool_calls;
 
-    // Save AI response
-    await this.saveMessage(session.id, "assistant", aiResponse);
+    if (toolCalls?.length) {
+      for (const call of toolCalls) {
+        if (call.type !== "function") continue;
+        try {
+          const args = JSON.parse(call.function.arguments);
 
-    // Update session title if first message
-    if (!session.title) {
-      await this.updateSessionTitle(session.id, request.message);
+          if (call.function.name === "create_project") {
+            const project = await prisma.project.create({
+              data: {
+                name: args.name,
+                description: args.description || "",
+                phase: args.phase || "product-modeling",
+                priority: args.priority || "medium",
+                status: "active",
+                progress: 0,
+                startDate: new Date(),
+                dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                userId,
+              },
+            });
+            actions.push({ type: "project_created", data: { id: project.id, name: project.name, phase: project.phase, description: project.description } });
+            if (!aiResponse) aiResponse = `I've created the project **${project.name}**. You can now open it and start adding tasks, requirements, and documentation.`;
+          }
+
+          if (call.function.name === "list_projects") {
+            const projects = await prisma.project.findMany({
+              select: { id: true, name: true, description: true, phase: true },
+              orderBy: { createdAt: "desc" },
+              take: 20,
+            });
+            // Inject into conversation context as a follow-up tool result (fire second pass if needed)
+            // For simplicity, attach as context in the response message
+            if (!aiResponse) {
+              aiResponse = `Here are your current projects:\n\n${projects.map((p) => `- **${p.name}** (${p.phase || "no phase"}) — ${p.description || "no description"}`).join("\n")}`;
+            }
+          }
+
+          if (call.function.name === "save_document") {
+            let projectId = args.projectId;
+            // Resolve project by name if no ID given
+            if (!projectId && args.projectName) {
+              const found = await prisma.project.findFirst({
+                where: { name: { contains: args.projectName, mode: "insensitive" } },
+                select: { id: true, name: true },
+              });
+              if (found) projectId = found.id;
+            }
+            if (!projectId) {
+              if (!aiResponse) aiResponse = `I generated the document but couldn't find the project to attach it to. Please specify the project name.`;
+              continue;
+            }
+            const doc = await prisma.projectDocument.create({
+              data: {
+                projectId,
+                title: args.title,
+                content: args.content,
+                type: args.type,
+                createdBy: "AI Assistant",
+              },
+              include: { project: { select: { name: true } } },
+            });
+            actions.push({
+              type: "document_saved",
+              data: { id: doc.id, title: doc.title, type: doc.type, projectId: doc.projectId, projectName: (doc as any).project?.name },
+            });
+            if (!aiResponse) aiResponse = `I've generated and saved the **${doc.title}** document for project **${(doc as any).project?.name}**.`;
+          }
+        } catch (err) {
+          console.error("Tool call error:", err);
+        }
+      }
     }
+
+    if (!aiResponse) aiResponse = "I apologize, but I could not generate a response.";
+
+    await this.saveMessage(session.id, "assistant", aiResponse);
+    if (!session.title) await this.updateSessionTitle(session.id, request.message);
 
     return {
       message: aiResponse,
       sessionId: session.id,
+      actions: actions.length ? actions : undefined,
       contextMeta: {
         generalContext,
         messageCount: await this.getMessageCount(session.id),
