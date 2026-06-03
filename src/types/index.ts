@@ -161,7 +161,7 @@ export interface PRReview {
 }
 
 export interface AIAction {
-  type: 'project_created' | 'document_saved';
+  type: 'project_created' | 'document_proposed' | 'document_saved';
   data: Record<string, unknown>;
 }
 

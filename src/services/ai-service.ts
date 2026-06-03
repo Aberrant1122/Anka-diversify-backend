@@ -79,8 +79,8 @@ export class AiService {
       {
         type: "function",
         function: {
-          name: "save_document",
-          description: "Generate full markdown content and save it as a document on an existing project. Use for requirements, technical docs, specs, or notes. Generate rich content — do not ask the user to provide it.",
+          name: "propose_document",
+          description: "Generate a full document (requirements, technical docs, specs, notes) and propose it to the user for review before saving. ALWAYS use this instead of saving directly — the user must confirm first. Generate rich, detailed markdown content.",
           parameters: {
             type: "object",
             properties: {
@@ -98,7 +98,7 @@ export class AiService {
         type: "function",
         function: {
           name: "list_projects",
-          description: "Return the list of all projects with their IDs and names. Call this before save_document when you need to look up a project ID by name.",
+          description: "Return the list of all projects with their IDs and names. Call this before propose_document when you need to look up a project ID by name.",
           parameters: { type: "object", properties: {} },
         },
       },
@@ -178,27 +178,27 @@ export class AiService {
             toolResult = JSON.stringify(projects);
           }
 
-          else if (call.function.name === "save_document") {
+          else if (call.function.name === "propose_document") {
             let projectId = args.projectId;
-            if (!projectId && args.projectName) {
+            let projectName = args.projectName;
+            if (!projectId && projectName) {
               const found = await prisma.project.findFirst({
-                where: { name: { contains: args.projectName, mode: "insensitive" } },
+                where: { name: { contains: projectName, mode: "insensitive" } },
                 select: { id: true, name: true },
               });
-              if (found) projectId = found.id;
+              if (found) { projectId = found.id; projectName = found.name; }
+            } else if (projectId && !projectName) {
+              const found = await prisma.project.findUnique({ where: { id: projectId }, select: { name: true } });
+              if (found) projectName = found.name;
             }
             if (!projectId) {
-              toolResult = JSON.stringify({ error: "Project not found. Please call list_projects first to get the correct project ID." });
+              toolResult = JSON.stringify({ error: "Project not found. Call list_projects to get the correct project ID." });
             } else {
-              const doc = await prisma.projectDocument.create({
-                data: { projectId, title: args.title, content: args.content, type: args.type, createdBy: "AI Assistant" },
-                include: { project: { select: { name: true } } },
-              });
               actions.push({
-                type: "document_saved",
-                data: { id: doc.id, title: doc.title, type: doc.type, projectId: doc.projectId, projectName: (doc as any).project?.name },
+                type: "document_proposed",
+                data: { title: args.title, content: args.content, type: args.type, projectId, projectName: projectName ?? "Unknown project" },
               });
-              toolResult = JSON.stringify({ success: true, documentId: doc.id, title: doc.title, projectName: (doc as any).project?.name });
+              toolResult = JSON.stringify({ success: true, status: "proposed", message: "Document proposed to the user for review. Waiting for confirmation." });
             }
           }
         } catch (err) {
@@ -883,7 +883,7 @@ Return JSON: { "title": "concise PR title under 72 chars", "description": "markd
 
 ## Tools you have (use them proactively):
 - **create_project** — call this whenever the user asks to create, start, set up, or launch a project. Do not instruct them to do it manually.
-- **save_document** — call this whenever the user asks to write, generate, or create requirements, documentation, specs, or notes for a project. Generate the full content and save it.
+- **propose_document** — call this whenever the user asks to write, generate, or create requirements, documentation, specs, or notes for a project. Generate the full content and propose it — the user will confirm before it is saved. Never save without proposing first.
 - **list_projects** — call this to look up existing projects before saving documents or when the user asks what projects exist.
 
 ## Rules:
