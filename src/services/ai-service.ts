@@ -3,6 +3,8 @@ import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import OpenAI from "openai";
+import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
 import { PrismaClient } from "@prisma/client";
 
 const execAsync = promisify(exec);
@@ -111,7 +113,11 @@ export class AiService {
     const generalContext = await this.buildGeneralContext(userId, session.id);
     await this.saveMessage(session.id, "user", request.message);
 
-    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = this.buildGeneralPrompt(request.message, generalContext);
+    const docText = await this.extractDocumentText(
+      (request.context?.documents as { name: string; mimeType: string; dataUrl: string }[]) ?? [],
+    );
+    const effectiveMessage = request.message + docText;
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = this.buildGeneralPrompt(effectiveMessage, generalContext);
     this.injectImages(messages, request.context?.images as { name: string; dataUrl: string }[] | undefined);
     const actions: import('../types').AIAction[] = [];
     let aiResponse = "";
@@ -235,7 +241,10 @@ export class AiService {
 
     const projectContext = await this.buildProjectContext(projectId);
     await this.saveMessage(session.id, "user", request.message);
-    const messages = this.buildProjectPrompt(request.message, projectContext);
+    const docText = await this.extractDocumentText(
+      (request.context?.documents as { name: string; mimeType: string; dataUrl: string }[]) ?? [],
+    );
+    const messages = this.buildProjectPrompt(request.message + docText, projectContext);
     this.injectImages(messages, request.context?.images as { name: string; dataUrl: string }[] | undefined);
 
     const completion = await this.getOpenAI().chat.completions.create({
@@ -809,6 +818,40 @@ Return JSON: { "title": "concise PR title under 72 chars", "description": "markd
           }
         : undefined,
     };
+  }
+
+  private async extractDocumentText(
+    docs: { name: string; mimeType: string; dataUrl: string }[],
+  ): Promise<string> {
+    if (!docs.length) return "";
+    const MAX_CHARS = 30000;
+    const parts: string[] = [];
+
+    for (const doc of docs) {
+      try {
+        const base64 = doc.dataUrl.includes(",") ? doc.dataUrl.split(",")[1] : doc.dataUrl;
+        const buffer = Buffer.from(base64, "base64");
+        const ext = doc.name.split(".").pop()?.toLowerCase() ?? "";
+        let text = "";
+
+        if (ext === "pdf") {
+          const result = await pdfParse(buffer, { max: 50 }); // cap at 50 pages
+          text = result.text;
+        } else if (ext === "docx" || ext === "doc") {
+          const result = await mammoth.extractRawText({ buffer });
+          text = result.value;
+        }
+
+        if (text.trim()) {
+          const snippet = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) + "\n... (truncated)" : text;
+          parts.push(`\n\n---\n**Attached document: ${doc.name}**\n\`\`\`\n${snippet}\n\`\`\``);
+        }
+      } catch (err) {
+        console.error(`Failed to extract text from ${doc.name}:`, err);
+        parts.push(`\n\n---\n**Attached document: ${doc.name}** (could not extract text)`);
+      }
+    }
+    return parts.join("");
   }
 
   private injectImages(
