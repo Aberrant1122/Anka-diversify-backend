@@ -18,6 +18,7 @@ import projectRoutes from "./routes/project-routes";
 import inviteRoutes from "./routes/invite-routes";
 import notificationRoutes from "./routes/notification-routes";
 import rulesRoutes from "./routes/rules-routes";
+import departmentsRoutes from "./routes/departments-routes";
 
 dotenv.config({ override: true });
 
@@ -67,6 +68,7 @@ app.use("/api/projects", projectRoutes);
 app.use("/api/invites", inviteRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/admin/rules", rulesRoutes);
+app.use("/api/admin/departments", departmentsRoutes);
 
 // Error handler
 app.use(errorHandler);

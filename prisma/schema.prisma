@@ -22,6 +22,7 @@ model User {
   projectMembers   ProjectMember[]
   aiChatSessions   AiChatSession[]
   invitesSent      UserInvite[]    @relation("InvitedBy")
+  headOf           Department[]
 
   @@map("users")
 }
@@ -323,6 +324,19 @@ model SprintTask {
 
   @@unique([sprintId, taskId])
   @@map("sprint_tasks")
+}
+
+model Department {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String   @default("")
+  headUserId  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  head User? @relation(fields: [headUserId], references: [id], onDelete: SetNull)
+
+  @@map("departments")
 }
 
 model OrgRule {
