@@ -112,6 +112,7 @@ export class AiService {
     await this.saveMessage(session.id, "user", request.message);
 
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = this.buildGeneralPrompt(request.message, generalContext);
+    this.injectImages(messages, request.context?.images as { name: string; dataUrl: string }[] | undefined);
     const actions: import('../types').AIAction[] = [];
     let aiResponse = "";
 
@@ -235,6 +236,7 @@ export class AiService {
     const projectContext = await this.buildProjectContext(projectId);
     await this.saveMessage(session.id, "user", request.message);
     const messages = this.buildProjectPrompt(request.message, projectContext);
+    this.injectImages(messages, request.context?.images as { name: string; dataUrl: string }[] | undefined);
 
     const completion = await this.getOpenAI().chat.completions.create({
       model: "gpt-4o",
@@ -806,6 +808,27 @@ Return JSON: { "title": "concise PR title under 72 chars", "description": "markd
             })),
           }
         : undefined,
+    };
+  }
+
+  private injectImages(
+    messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+    images: { name: string; dataUrl: string }[] | undefined,
+  ) {
+    if (!images?.length) return;
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) { if (messages[i].role === "user") { lastUserIdx = i; break; } }
+    if (lastUserIdx < 0) return;
+    const existing = messages[lastUserIdx] as { role: "user"; content: string };
+    messages[lastUserIdx] = {
+      role: "user",
+      content: [
+        { type: "text", text: existing.content },
+        ...images.map((img) => ({
+          type: "image_url" as const,
+          image_url: { url: img.dataUrl },
+        })),
+      ],
     };
   }
 
