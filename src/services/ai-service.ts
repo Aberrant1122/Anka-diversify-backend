@@ -55,6 +55,54 @@ export class AiService {
     return AiService.instance;
   }
 
+  private get agentTools(): OpenAI.Chat.Completions.ChatCompletionTool[] {
+    return [
+      {
+        type: "function",
+        function: {
+          name: "create_project",
+          description: "Create a new project in the workspace. Call this whenever the user asks to create, start, set up, or launch a project. Do NOT tell them to do it manually.",
+          parameters: {
+            type: "object",
+            properties: {
+              name:        { type: "string", description: "Project name" },
+              description: { type: "string", description: "Brief project description" },
+              phase:       { type: "string", enum: ["product-modeling", "development", "marketing"], description: "Starting phase" },
+              priority:    { type: "string", enum: ["low", "medium", "high", "critical"], description: "Project priority" },
+            },
+            required: ["name"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "save_document",
+          description: "Generate full markdown content and save it as a document on an existing project. Use for requirements, technical docs, specs, or notes. Generate rich content — do not ask the user to provide it.",
+          parameters: {
+            type: "object",
+            properties: {
+              projectId:   { type: "string", description: "ID of the project (use if known)" },
+              projectName: { type: "string", description: "Project name to look up (if ID unknown)" },
+              title:       { type: "string", description: "Document title" },
+              content:     { type: "string", description: "Full document content in markdown" },
+              type:        { type: "string", enum: ["requirements", "documentation", "note"], description: "Document type" },
+            },
+            required: ["title", "content", "type"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_projects",
+          description: "Return the list of all projects with their IDs and names. Call this before save_document when you need to look up a project ID by name.",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ];
+  }
+
   async processGeneralChat(
     userId: string,
     request: ChatRequest,
@@ -62,68 +110,37 @@ export class AiService {
     const session = await this.getOrCreateSession(userId, "general", undefined, request.sessionId);
     const generalContext = await this.buildGeneralContext(userId, session.id);
     await this.saveMessage(session.id, "user", request.message);
-    const messages = this.buildGeneralPrompt(request.message, generalContext);
 
-    const completion = await this.getOpenAI().chat.completions.create({
-      model: "gpt-4o",
-      messages,
-      temperature: 0.7,
-      max_tokens: 3000,
-      tools: [
-        {
-          type: "function",
-          function: {
-            name: "create_project",
-            description: "Create a new project in the workspace when the user asks to create, start, or set up a project.",
-            parameters: {
-              type: "object",
-              properties: {
-                name:        { type: "string", description: "Project name" },
-                description: { type: "string", description: "Brief project description" },
-                phase:       { type: "string", enum: ["product-modeling", "development", "marketing"], description: "Starting phase" },
-                priority:    { type: "string", enum: ["low", "medium", "high", "critical"], description: "Project priority" },
-              },
-              required: ["name"],
-            },
-          },
-        },
-        {
-          type: "function",
-          function: {
-            name: "save_document",
-            description: "Generate and save a document (requirements, technical documentation, or notes) for an existing project. Use this when the user asks to write, generate, or create documentation or requirements for a project.",
-            parameters: {
-              type: "object",
-              properties: {
-                projectId:   { type: "string", description: "ID of the project this document belongs to" },
-                projectName: { type: "string", description: "Project name (used if projectId is unknown)" },
-                title:       { type: "string", description: "Document title" },
-                content:     { type: "string", description: "Full document content in markdown" },
-                type:        { type: "string", enum: ["requirements", "documentation", "note"], description: "Document type" },
-              },
-              required: ["title", "content", "type"],
-            },
-          },
-        },
-        {
-          type: "function",
-          function: {
-            name: "list_projects",
-            description: "Fetch the list of existing projects so you can reference them when saving documents or providing context.",
-            parameters: { type: "object", properties: {} },
-          },
-        },
-      ],
-      tool_choice: "auto",
-    });
-
-    let aiResponse = completion.choices[0]?.message?.content ?? "";
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = this.buildGeneralPrompt(request.message, generalContext);
     const actions: import('../types').AIAction[] = [];
-    const toolCalls = completion.choices[0]?.message?.tool_calls;
+    let aiResponse = "";
 
-    if (toolCalls?.length) {
-      for (const call of toolCalls) {
+    // Agentic loop — up to 5 rounds to handle multi-step tool chains (e.g. list_projects → save_document)
+    for (let round = 0; round < 5; round++) {
+      const completion = await this.getOpenAI().chat.completions.create({
+        model: "gpt-4o",
+        messages,
+        temperature: 0.7,
+        max_tokens: 4000,
+        tools: this.agentTools,
+        tool_choice: "auto",
+      });
+
+      const choice = completion.choices[0];
+      const assistantMsg = choice.message;
+      messages.push(assistantMsg);
+
+      // No tool calls — final text response
+      if (!assistantMsg.tool_calls?.length) {
+        aiResponse = assistantMsg.content ?? "";
+        break;
+      }
+
+      // Execute each tool call and collect results
+      for (const call of assistantMsg.tool_calls) {
         if (call.type !== "function") continue;
+        let toolResult = "";
+
         try {
           const args = JSON.parse(call.function.arguments);
 
@@ -142,25 +159,20 @@ export class AiService {
               },
             });
             actions.push({ type: "project_created", data: { id: project.id, name: project.name, phase: project.phase, description: project.description } });
-            if (!aiResponse) aiResponse = `I've created the project **${project.name}**. You can now open it and start adding tasks, requirements, and documentation.`;
+            toolResult = JSON.stringify({ success: true, projectId: project.id, projectName: project.name });
           }
 
-          if (call.function.name === "list_projects") {
+          else if (call.function.name === "list_projects") {
             const projects = await prisma.project.findMany({
               select: { id: true, name: true, description: true, phase: true },
               orderBy: { createdAt: "desc" },
               take: 20,
             });
-            // Inject into conversation context as a follow-up tool result (fire second pass if needed)
-            // For simplicity, attach as context in the response message
-            if (!aiResponse) {
-              aiResponse = `Here are your current projects:\n\n${projects.map((p) => `- **${p.name}** (${p.phase || "no phase"}) — ${p.description || "no description"}`).join("\n")}`;
-            }
+            toolResult = JSON.stringify(projects);
           }
 
-          if (call.function.name === "save_document") {
+          else if (call.function.name === "save_document") {
             let projectId = args.projectId;
-            // Resolve project by name if no ID given
             if (!projectId && args.projectName) {
               const found = await prisma.project.findFirst({
                 where: { name: { contains: args.projectName, mode: "insensitive" } },
@@ -169,32 +181,29 @@ export class AiService {
               if (found) projectId = found.id;
             }
             if (!projectId) {
-              if (!aiResponse) aiResponse = `I generated the document but couldn't find the project to attach it to. Please specify the project name.`;
-              continue;
+              toolResult = JSON.stringify({ error: "Project not found. Please call list_projects first to get the correct project ID." });
+            } else {
+              const doc = await prisma.projectDocument.create({
+                data: { projectId, title: args.title, content: args.content, type: args.type, createdBy: "AI Assistant" },
+                include: { project: { select: { name: true } } },
+              });
+              actions.push({
+                type: "document_saved",
+                data: { id: doc.id, title: doc.title, type: doc.type, projectId: doc.projectId, projectName: (doc as any).project?.name },
+              });
+              toolResult = JSON.stringify({ success: true, documentId: doc.id, title: doc.title, projectName: (doc as any).project?.name });
             }
-            const doc = await prisma.projectDocument.create({
-              data: {
-                projectId,
-                title: args.title,
-                content: args.content,
-                type: args.type,
-                createdBy: "AI Assistant",
-              },
-              include: { project: { select: { name: true } } },
-            });
-            actions.push({
-              type: "document_saved",
-              data: { id: doc.id, title: doc.title, type: doc.type, projectId: doc.projectId, projectName: (doc as any).project?.name },
-            });
-            if (!aiResponse) aiResponse = `I've generated and saved the **${doc.title}** document for project **${(doc as any).project?.name}**.`;
           }
         } catch (err) {
           console.error("Tool call error:", err);
+          toolResult = JSON.stringify({ error: String(err) });
         }
+
+        messages.push({ role: "tool", tool_call_id: call.id, content: toolResult });
       }
     }
 
-    if (!aiResponse) aiResponse = "I apologize, but I could not generate a response.";
+    if (!aiResponse) aiResponse = "Done.";
 
     await this.saveMessage(session.id, "assistant", aiResponse);
     if (!session.title) await this.updateSessionTitle(session.id, request.message);
@@ -804,25 +813,30 @@ Return JSON: { "title": "concise PR title under 72 chars", "description": "markd
     userMessage: string,
     context: GeneralContext,
   ): Array<{ role: "system" | "user" | "assistant"; content: string }> {
-    const systemPrompt = `You are a helpful AI assistant for a project management workspace. You help users with general questions, workspace overview, and cross-project insights.
+    const systemPrompt = `You are an agentic AI assistant embedded in a project management workspace. You can take real actions on behalf of the user — you are NOT limited to giving instructions.
 
-Current Context:
+## Tools you have (use them proactively):
+- **create_project** — call this whenever the user asks to create, start, set up, or launch a project. Do not instruct them to do it manually.
+- **save_document** — call this whenever the user asks to write, generate, or create requirements, documentation, specs, or notes for a project. Generate the full content and save it.
+- **list_projects** — call this to look up existing projects before saving documents or when the user asks what projects exist.
+
+## Rules:
+1. NEVER tell the user to navigate somewhere manually if you have a tool to do the task directly.
+2. When creating a project, pick sensible defaults for phase/priority if not specified.
+3. When saving a document, generate rich, detailed markdown content — don't ask the user to provide it.
+4. After using a tool, confirm what was done in 1-2 sentences. No need for lengthy explanations.
+5. Always call list_projects first if you need to find a project by name before saving a document.
+
+## Workspace context:
 - User: ${context.workspaceInfo?.user.name || context.workspaceInfo?.user.email || "Unknown"}
 - Total Projects: ${context.workspaceInfo?.totalProjects || 0}
 - Active Projects: ${context.workspaceInfo?.activeProjects || 0}
 
-Recent conversation history:
+Recent conversation:
 ${context.recentMessages
   .slice(-5)
   .map((msg) => `${msg.role}: ${msg.content}`)
-  .join("\n")}
-
-Guidelines:
-- Be helpful and conversational
-- Provide workspace-level insights when relevant
-- Help users navigate between projects
-- Suggest project management best practices
-- Keep responses focused and actionable`;
+  .join("\n")}`;
 
     return [
       { role: "system", content: systemPrompt },
