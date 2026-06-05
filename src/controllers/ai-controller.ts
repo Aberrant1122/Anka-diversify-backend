@@ -3,6 +3,7 @@ import { AiService } from "../services/ai-service";
 import { ProjectGitHubService } from "../services/github.service";
 import { ChatRequest } from "../types";
 import { PrismaClient } from "@prisma/client";
+import { decrypt } from "../utils/encryption";
 
 const prisma = new PrismaClient();
 
@@ -268,13 +269,18 @@ export class AiController {
         return res.status(400).json({ error: "No changes provided" });
       }
 
-      // Get the project's GitHub URL
+      // Get the project and decrypt the GitHub token
       const project = await prisma.project.findUnique({ where: { id: projectId } });
       if (!project?.githubUrl) {
         return res.status(400).json({ error: "No GitHub repository connected to this project" });
       }
 
-      const result = await ProjectGitHubService.pushChanges(project.githubUrl, changes, commitMessage);
+      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+      if (!token) {
+        return res.status(400).json({ error: "No GitHub token configured for this project. Please add your GitHub token in the project settings." });
+      }
+
+      const result = await ProjectGitHubService.pushChanges(project.githubUrl, changes, commitMessage, token);
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Agent push error:", error);
@@ -306,8 +312,8 @@ export class AiController {
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
       const project = await prisma.project.findUnique({ where: { id: projectId } });
       if (!project?.githubUrl) return res.status(400).json({ error: "No GitHub repository connected" });
-      const { ProjectGitHubService } = await import("../services/github.service");
-      const prs = await ProjectGitHubService.listPullRequests(project.githubUrl);
+      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+      const prs = await ProjectGitHubService.listPullRequests(project.githubUrl, token);
       res.json({ pullRequests: prs });
     } catch (error) {
       console.error("List PRs error:", error);
