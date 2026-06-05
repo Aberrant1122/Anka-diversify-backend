@@ -7,6 +7,7 @@ import { generatePresignedUrl, deleteFromS3, detectType } from "../services/uplo
 import { S3Service } from "../services/s3.service";
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
+import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
 const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
@@ -50,7 +51,36 @@ export class ProjectController {
   async createProject(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      const { name, description, phase, priority, githubUrl, localPath, dueDate } = req.body;
+      const { name, description, phase, priority, githubUrl, githubToken, localPath, dueDate } = req.body;
+
+      // Validate required fields
+      if (!name) {
+        return res.status(400).json({ success: false, error: "Project name is required" });
+      }
+
+      // If GitHub URL is provided, token is required
+      if (githubUrl && !githubToken) {
+        return res.status(400).json({ 
+          success: false, 
+          error: "GitHub token is required when providing a GitHub URL" 
+        });
+      }
+
+      // Validate and encrypt GitHub token if provided
+      let encryptedToken: string | undefined;
+      if (githubToken) {
+        // Validate token with GitHub API
+        const validation = await validateToken(githubToken);
+        if (!validation.valid) {
+          return res.status(400).json({ 
+            success: false, 
+            error: validation.error || "Invalid GitHub token" 
+          });
+        }
+
+        // Encrypt the token before storing
+        encryptedToken = encrypt(githubToken);
+      }
 
       const project = await projectService.createProject(
         {
@@ -59,6 +89,7 @@ export class ProjectController {
           phase,
           priority,
           githubUrl,
+          githubToken: encryptedToken,
           localPath,
           dueDate: dueDate || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
         },
@@ -66,13 +97,20 @@ export class ProjectController {
       );
 
       // Kick off GitHub context sync in background (don't block the response)
-      if (githubUrl) {
-        ProjectGitHubService.buildProjectContext(project.id, githubUrl).catch((err) =>
+      if (githubUrl && githubToken) {
+        ProjectGitHubService.buildProjectContext(project.id, githubUrl, githubToken).catch((err) =>
           console.error("GitHub sync failed for project", project.id, err),
         );
       }
 
-      res.status(201).json({ success: true, data: project, message: "Project created successfully" });
+      // Don't return the encrypted token in response
+      const { githubToken: _, ...projectWithoutToken } = project;
+
+      res.status(201).json({ 
+        success: true, 
+        data: projectWithoutToken, 
+        message: "Project created successfully" 
+      });
     } catch (error) {
       console.error("Error creating project:", error);
       res.status(500).json({ success: false, error: "Failed to create project" });
@@ -89,15 +127,95 @@ export class ProjectController {
       }
 
       if (req.body.githubUrl) {
-        ProjectGitHubService.buildProjectContext(project.id, req.body.githubUrl).catch((err) =>
+        // Get the decrypted token for syncing
+        const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+        
+        ProjectGitHubService.buildProjectContext(project.id, req.body.githubUrl, token).catch((err) =>
           console.error("GitHub sync failed for project", project.id, err),
         );
       }
 
-      res.json({ success: true, data: project, message: "Project updated successfully" });
+      // Don't return the encrypted token in response
+      const { githubToken: _, ...projectWithoutToken } = project;
+
+      res.json({ success: true, data: projectWithoutToken, message: "Project updated successfully" });
     } catch (error) {
       console.error("Error updating project:", error);
       res.status(500).json({ success: false, error: "Failed to update project" });
+    }
+  }
+
+  async updateProjectGitHubToken(req: Request, res: Response) {
+    try {
+      const userId = getUserId(req);
+      const { githubToken } = req.body;
+
+      if (!githubToken) {
+        return res.status(400).json({ success: false, error: "GitHub token is required" });
+      }
+
+      // Validate token with GitHub API
+      const validation = await validateToken(githubToken);
+      if (!validation.valid) {
+        return res.status(400).json({ 
+          success: false, 
+          error: validation.error || "Invalid GitHub token" 
+        });
+      }
+
+      // Encrypt and save
+      const encryptedToken = encrypt(githubToken);
+      await projectService.updateProjectGitHubToken(param(req, "id"), encryptedToken, userId);
+
+      res.json({ 
+        success: true, 
+        message: "GitHub token updated successfully",
+        data: { username: validation.username, scopes: validation.scopes }
+      });
+    } catch (error: any) {
+      console.error("Error updating GitHub token:", error);
+      res.status(error.message === 'Unauthorized to update this project' ? 403 : 500)
+        .json({ success: false, error: error.message || "Failed to update GitHub token" });
+    }
+  }
+
+  async validateGitHubToken(req: Request, res: Response) {
+    try {
+      const { githubToken } = req.body;
+
+      if (!githubToken) {
+        return res.status(400).json({ success: false, error: "GitHub token is required" });
+      }
+
+      const validation = await validateToken(githubToken);
+
+      console.log('Token validation result:', { 
+        valid: validation.valid, 
+        username: validation.username,
+        error: validation.error 
+      });
+
+      if (validation.valid) {
+        res.json({ 
+          success: true, 
+          data: { 
+            valid: true, 
+            username: validation.username,
+            scopes: validation.scopes 
+          } 
+        });
+      } else {
+        res.status(400).json({ 
+          success: false, 
+          error: validation.error || "Invalid GitHub token" 
+        });
+      }
+    } catch (error: any) {
+      console.error("Error validating GitHub token:", error);
+      res.status(500).json({ 
+        success: false, 
+        error: error?.message || "Failed to validate GitHub token" 
+      });
     }
   }
 
@@ -125,7 +243,10 @@ export class ProjectController {
       const filePath = req.query.path as string;
       if (!filePath) return res.status(400).json({ success: false, error: "path query param required" });
 
-      const file = await ProjectGitHubService.getFileContent(project.githubUrl, filePath);
+      // Decrypt the GitHub token
+      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+
+      const file = await ProjectGitHubService.getFileContent(project.githubUrl, filePath, token);
       if (!file) return res.status(404).json({ success: false, error: "File not found" });
 
       res.json({ success: true, data: { path: filePath, content: file.content, sha: file.sha } });
@@ -146,8 +267,11 @@ export class ProjectController {
         return res.status(400).json({ success: false, error: "path and content required" });
       }
 
+      // Decrypt the GitHub token
+      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+
       const message = commitMessage || `edit: update ${filePath}`;
-      const result = await ProjectGitHubService.pushChanges(project.githubUrl, [{ path: filePath, content }], message);
+      const result = await ProjectGitHubService.pushChanges(project.githubUrl, [{ path: filePath, content }], message, token);
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Error saving repo file:", error);
@@ -200,7 +324,10 @@ export class ProjectController {
         return res.status(400).json({ success: false, error: "No GitHub URL provided" });
       }
 
-      await ProjectGitHubService.buildProjectContext(project.id, githubUrl);
+      // Decrypt the GitHub token
+      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+
+      await ProjectGitHubService.buildProjectContext(project.id, githubUrl, token);
       res.json({ success: true, message: "GitHub context synced successfully" });
     } catch (error) {
       console.error("Error syncing GitHub context:", error);
