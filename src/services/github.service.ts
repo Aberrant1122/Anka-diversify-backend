@@ -37,28 +37,29 @@ function parseGithubUrl(url: string): { owner: string; repo: string } | null {
   return null;
 }
 
-function githubHeaders(): Record<string, string> {
+function githubHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
     "User-Agent": "anka-os-backend",
   };
-  const token = process.env.GITHUB_TOKEN;
-  if (token) headers["Authorization"] = `token ${token}`;
+  // Use provided token (from project) or fall back to global token
+  const authToken = token || process.env.GITHUB_TOKEN;
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
   return headers;
 }
 
-async function fetchGitHub(path: string): Promise<unknown> {
-  const res = await fetch(`https://api.github.com${path}`, { headers: githubHeaders() });
+async function fetchGitHub(path: string, token?: string): Promise<unknown> {
+  const res = await fetch(`https://api.github.com${path}`, { headers: githubHeaders(token) });
   if (!res.ok) {
     throw new Error(`GitHub API ${res.status}: ${path}`);
   }
   return res.json();
 }
 
-async function writeGitHub(path: string, body: unknown): Promise<unknown> {
+async function writeGitHub(path: string, body: unknown, token?: string): Promise<unknown> {
   const res = await fetch(`https://api.github.com${path}`, {
     method: "PUT",
-    headers: { ...githubHeaders(), "Content-Type": "application/json" },
+    headers: { ...githubHeaders(token), "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -68,10 +69,10 @@ async function writeGitHub(path: string, body: unknown): Promise<unknown> {
   return res.json();
 }
 
-async function postGitHub(path: string, body: unknown): Promise<unknown> {
+async function postGitHub(path: string, body: unknown, token?: string): Promise<unknown> {
   const res = await fetch(`https://api.github.com${path}`, {
     method: "POST",
-    headers: { ...githubHeaders(), "Content-Type": "application/json" },
+    headers: { ...githubHeaders(token), "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -81,10 +82,10 @@ async function postGitHub(path: string, body: unknown): Promise<unknown> {
   return res.json();
 }
 
-async function patchGitHub(path: string, body: unknown): Promise<unknown> {
+async function patchGitHub(path: string, body: unknown, token?: string): Promise<unknown> {
   const res = await fetch(`https://api.github.com${path}`, {
     method: "PATCH",
-    headers: { ...githubHeaders(), "Content-Type": "application/json" },
+    headers: { ...githubHeaders(token), "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -101,18 +102,18 @@ function shouldSkip(filePath: string): boolean {
   return false;
 }
 
-export async function fetchRepoSnapshot(githubUrl: string): Promise<RepoSnapshot> {
+export async function fetchRepoSnapshot(githubUrl: string, token?: string): Promise<RepoSnapshot> {
   const parsed = parseGithubUrl(githubUrl);
   if (!parsed) throw new Error("Invalid GitHub URL");
 
   const { owner, repo } = parsed;
 
-  const repoData = await fetchGitHub(`/repos/${owner}/${repo}`) as any;
+  const repoData = await fetchGitHub(`/repos/${owner}/${repo}`, token) as any;
   const defaultBranch: string = repoData.default_branch || "main";
 
   const [languages, treeDataFetched] = await Promise.all([
-    fetchGitHub(`/repos/${owner}/${repo}/languages`) as Promise<Record<string, number>>,
-    fetchGitHub(`/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`) as Promise<any>,
+    fetchGitHub(`/repos/${owner}/${repo}/languages`, token) as Promise<Record<string, number>>,
+    fetchGitHub(`/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, token) as Promise<any>,
   ]);
 
   const allFiles: string[] = ((treeDataFetched.tree as any[]) || [])
@@ -133,6 +134,7 @@ export async function fetchRepoSnapshot(githubUrl: string): Promise<RepoSnapshot
     try {
       const fileData = await fetchGitHub(
         `/repos/${owner}/${repo}/contents/${filePath}?ref=${defaultBranch}`,
+        token
       ) as any;
       if (fileData.content) {
         const content = Buffer.from(fileData.content, "base64")
@@ -157,8 +159,8 @@ export async function fetchRepoSnapshot(githubUrl: string): Promise<RepoSnapshot
 }
 
 export class ProjectGitHubService {
-  static async buildProjectContext(projectId: string, githubUrl: string): Promise<void> {
-    const snapshot = await fetchRepoSnapshot(githubUrl);
+  static async buildProjectContext(projectId: string, githubUrl: string, token?: string): Promise<void> {
+    const snapshot = await fetchRepoSnapshot(githubUrl, token);
 
     await prisma.projectRepoSnapshot.upsert({
       where: { projectId },
@@ -185,12 +187,12 @@ export class ProjectGitHubService {
     });
   }
 
-  static async getFileContent(githubUrl: string, filePath: string): Promise<{ content: string; sha: string } | null> {
+  static async getFileContent(githubUrl: string, filePath: string, token?: string): Promise<{ content: string; sha: string } | null> {
     const parsed = parseGithubUrl(githubUrl);
     if (!parsed) return null;
     const { owner, repo } = parsed;
     try {
-      const data = await fetchGitHub(`/repos/${owner}/${repo}/contents/${filePath}`) as any;
+      const data = await fetchGitHub(`/repos/${owner}/${repo}/contents/${filePath}`, token) as any;
       if (!data.content) return null;
       return {
         content: Buffer.from(data.content, "base64").toString("utf-8"),
@@ -206,6 +208,7 @@ export class ProjectGitHubService {
     githubUrl: string,
     changes: { path: string; content: string }[],
     commitMessage: string,
+    token?: string,
     branch?: string,
   ): Promise<{ sha: string; url: string }> {
     const parsed = parseGithubUrl(githubUrl);
@@ -213,13 +216,13 @@ export class ProjectGitHubService {
     const { owner, repo } = parsed;
 
     // 1. Get the latest commit SHA on the branch
-    const repoData = await fetchGitHub(`/repos/${owner}/${repo}`) as any;
+    const repoData = await fetchGitHub(`/repos/${owner}/${repo}`, token) as any;
     const defaultBranch = branch || repoData.default_branch || "main";
-    const refData = await fetchGitHub(`/repos/${owner}/${repo}/git/ref/heads/${defaultBranch}`) as any;
+    const refData = await fetchGitHub(`/repos/${owner}/${repo}/git/ref/heads/${defaultBranch}`, token) as any;
     const latestCommitSha: string = refData.object.sha;
 
     // 2. Get the tree SHA from that commit
-    const commitData = await fetchGitHub(`/repos/${owner}/${repo}/git/commits/${latestCommitSha}`) as any;
+    const commitData = await fetchGitHub(`/repos/${owner}/${repo}/git/commits/${latestCommitSha}`, token) as any;
     const baseTreeSha: string = commitData.tree.sha;
 
     // 3. Create blobs for each changed file
@@ -228,7 +231,7 @@ export class ProjectGitHubService {
         const blob = await postGitHub(`/repos/${owner}/${repo}/git/blobs`, {
           content: Buffer.from(content).toString("base64"),
           encoding: "base64",
-        }) as any;
+        }, token) as any;
         return { path, mode: "100644", type: "blob", sha: blob.sha };
       })
     );
@@ -237,20 +240,20 @@ export class ProjectGitHubService {
     const newTree = await postGitHub(`/repos/${owner}/${repo}/git/trees`, {
       base_tree: baseTreeSha,
       tree: treeItems,
-    }) as any;
+    }, token) as any;
 
     // 5. Create the commit
     const newCommit = await postGitHub(`/repos/${owner}/${repo}/git/commits`, {
       message: commitMessage,
       tree: newTree.sha,
       parents: [latestCommitSha],
-    }) as any;
+    }, token) as any;
 
     // 6. Update the branch ref
     await patchGitHub(`/repos/${owner}/${repo}/git/refs/heads/${defaultBranch}`, {
       sha: newCommit.sha,
       force: false,
-    });
+    }, token);
 
     return {
       sha: newCommit.sha,
@@ -258,12 +261,12 @@ export class ProjectGitHubService {
     };
   }
 
-  static async listPullRequests(githubUrl: string): Promise<PullRequest[]> {
+  static async listPullRequests(githubUrl: string, token?: string): Promise<PullRequest[]> {
     const parsed = parseGithubUrl(githubUrl);
     if (!parsed) throw new Error("Invalid GitHub URL");
     const { owner, repo } = parsed;
 
-    const data = await fetchGitHub(`/repos/${owner}/${repo}/pulls?state=open&per_page=20`) as any[];
+    const data = await fetchGitHub(`/repos/${owner}/${repo}/pulls?state=open&per_page=20`, token) as any[];
     return data.map((pr: any) => ({
       number: pr.number,
       title: pr.title,
@@ -283,13 +286,13 @@ export class ProjectGitHubService {
     }));
   }
 
-  static async getPullRequestDiff(githubUrl: string, prNumber: number): Promise<string> {
+  static async getPullRequestDiff(githubUrl: string, prNumber: number, token?: string): Promise<string> {
     const parsed = parseGithubUrl(githubUrl);
     if (!parsed) throw new Error("Invalid GitHub URL");
     const { owner, repo } = parsed;
 
     const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
-      headers: { ...githubHeaders(), Accept: "application/vnd.github.v3.diff" },
+      headers: { ...githubHeaders(token), Accept: "application/vnd.github.v3.diff" },
     });
     if (!res.ok) throw new Error(`GitHub API ${res.status}: failed to fetch PR diff`);
     const diff = await res.text();

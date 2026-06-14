@@ -30,6 +30,7 @@ import {
   AgentFileChange,
 } from "../types";
 import { ProjectGitHubService } from "./github.service";
+import { decrypt } from "../utils/encryption";
 
 const prisma = new PrismaClient();
 
@@ -545,9 +546,11 @@ Pick the most relevant tasks based on the user's prompt. Prefer high priority an
     const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project?.githubUrl) throw new Error("No GitHub repository connected to this project");
 
+    const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+
     const [diff, prs] = await Promise.all([
-      ProjectGitHubService.getPullRequestDiff(project.githubUrl, prNumber),
-      ProjectGitHubService.listPullRequests(project.githubUrl),
+      ProjectGitHubService.getPullRequestDiff(project.githubUrl, prNumber, token),
+      ProjectGitHubService.listPullRequests(project.githubUrl, token),
     ]);
 
     const pr = prs.find((p) => p.number === prNumber);
@@ -598,9 +601,11 @@ Be specific and reference actual code from the diff. Keep each risk/suggestion u
     const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project?.githubUrl) throw new Error("No GitHub repository connected to this project");
 
+    const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+
     const [diff, prs] = await Promise.all([
-      ProjectGitHubService.getPullRequestDiff(project.githubUrl, prNumber),
-      ProjectGitHubService.listPullRequests(project.githubUrl),
+      ProjectGitHubService.getPullRequestDiff(project.githubUrl, prNumber, token),
+      ProjectGitHubService.listPullRequests(project.githubUrl, token),
     ]);
 
     const pr = prs.find((p) => p.number === prNumber);
@@ -1196,6 +1201,7 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
     filesToRead: string[],
     snapshot: any,
     githubUrl: string,
+    githubToken?: string,
   ): Promise<Record<string, string>> {
     const context: Record<string, string> = {};
 
@@ -1209,7 +1215,7 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
     // Fetch remaining files directly from GitHub
     for (const filePath of filesToRead.slice(0, 10)) {
       if (!context[filePath] && githubUrl) {
-        const file = await ProjectGitHubService.getFileContent(githubUrl, filePath).catch(() => null);
+        const file = await ProjectGitHubService.getFileContent(githubUrl, filePath, githubToken).catch(() => null);
         if (file) context[filePath] = file.content;
       }
     }
@@ -1315,19 +1321,20 @@ Respond with ONLY valid JSON: { "hasErrors": boolean, "errors": "description or 
     const projectContext = await this.buildProjectContext(projectId);
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      select: { localPath: true, githubUrl: true },
+      select: { localPath: true, githubUrl: true, githubToken: true },
     });
 
     await this.saveMessage(session.id, "user", request.message);
 
     const snapshot = projectContext.repoSnapshot;
     const githubUrl = project?.githubUrl || "";
+    const githubToken = project?.githubToken ? decrypt(project.githubToken) : undefined;
 
     // ── Stage 1: Planner ──────────────────────────────────────────────────
     const plan = await this.planTask(request.message, snapshot);
 
     // ── Stage 2: Context Builder ──────────────────────────────────────────
-    const fileContext = await this.buildFileContext(plan.filesToRead || [], snapshot, githubUrl);
+    const fileContext = await this.buildFileContext(plan.filesToRead || [], snapshot, githubUrl, githubToken);
     const systemPrompt = this.buildAgentSystemPrompt(projectContext, snapshot);
 
     // ── Stages 3–5: Executor → Validator loop ─────────────────────────────

@@ -57,6 +57,7 @@ export class ProjectService {
       phase?: string;
       priority?: string;
       githubUrl?: string;
+      githubToken?: string;
       localPath?: string;
       startDate?: string;
       dueDate?: string;
@@ -73,11 +74,36 @@ export class ProjectService {
         priority: data.priority || "medium",
         status: data.status || "active",
         githubUrl: data.githubUrl,
+        githubToken: data.githubToken, // Already encrypted by controller
         localPath: data.localPath,
         startDate: data.startDate ? new Date(data.startDate) : new Date(),
         dueDate: data.dueDate ? new Date(data.dueDate) : undefined,
         userId,
       },
+    });
+  }
+
+  async updateProjectGitHubToken(
+    projectId: string,
+    githubToken: string,
+    userId: string = DEMO_USER_ID,
+  ) {
+    // Verify project belongs to user
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+    });
+
+    if (!project) {
+      throw new Error('Project not found');
+    }
+
+    if (project.userId !== userId) {
+      throw new Error('Unauthorized to update this project');
+    }
+
+    return prisma.project.update({
+      where: { id: projectId },
+      data: { githubToken }, // Already encrypted by controller
     });
   }
 

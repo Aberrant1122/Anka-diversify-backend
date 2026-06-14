@@ -26,6 +26,12 @@ router.delete('/:id', projectController.deleteProject.bind(projectController));
 // Sync GitHub repo context for a project
 router.post('/:id/sync-github', projectController.syncGithub.bind(projectController));
 
+// Update GitHub token for a project
+router.put('/:id/github-token', projectController.updateProjectGitHubToken.bind(projectController));
+
+// Validate a GitHub token
+router.post('/validate-github-token', projectController.validateGitHubToken.bind(projectController));
+
 // IDE: read/write individual repo files
 router.get('/:id/repo/file', projectController.getRepoFile.bind(projectController));
 router.put('/:id/repo/file', projectController.saveRepoFile.bind(projectController));
