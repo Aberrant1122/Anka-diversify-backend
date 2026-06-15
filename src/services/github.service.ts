@@ -16,6 +16,26 @@ interface RepoFile {
   content: string;
 }
 
+export interface GitCommitItem {
+  sha: string;
+  shortSha: string;
+  message: string;
+  authorName: string;
+  authorLogin: string;
+  authorAvatar: string;
+  timestamp: string;
+  url: string;
+  branch: string;
+}
+
+export interface GitBranchItem {
+  name: string;
+  isDefault: boolean;
+  commitSha: string;
+  url: string;
+  protected: boolean;
+}
+
 export interface RepoSnapshot {
   repoName: string;
   defaultBranch: string;
@@ -259,6 +279,74 @@ export class ProjectGitHubService {
       sha: newCommit.sha,
       url: `https://github.com/${owner}/${repo}/commit/${newCommit.sha}`,
     };
+  }
+
+  static async listCommits(githubUrl: string, branch?: string, token?: string): Promise<GitCommitItem[]> {
+    const parsed = parseGithubUrl(githubUrl);
+    if (!parsed) throw new Error("Invalid GitHub URL");
+    const { owner, repo } = parsed;
+
+    const params = new URLSearchParams({ per_page: "30" });
+    if (branch && branch !== "all") params.set("sha", branch);
+
+    const data = await fetchGitHub(`/repos/${owner}/${repo}/commits?${params}`, token) as any[];
+    return data.map((c: any) => ({
+      sha: c.sha,
+      shortSha: c.sha.slice(0, 7),
+      message: c.commit.message.split("\n")[0],
+      authorName: c.commit.author?.name ?? c.author?.login ?? "Unknown",
+      authorLogin: c.author?.login ?? "",
+      authorAvatar: c.author?.avatar_url ?? "",
+      timestamp: c.commit.author?.date ?? c.commit.committer?.date ?? "",
+      url: c.html_url,
+      branch: branch && branch !== "all" ? branch : "",
+    }));
+  }
+
+  static async listBranches(githubUrl: string, token?: string): Promise<GitBranchItem[]> {
+    const parsed = parseGithubUrl(githubUrl);
+    if (!parsed) throw new Error("Invalid GitHub URL");
+    const { owner, repo } = parsed;
+
+    const [repoData, data] = await Promise.all([
+      fetchGitHub(`/repos/${owner}/${repo}`, token) as Promise<any>,
+      fetchGitHub(`/repos/${owner}/${repo}/branches?per_page=50`, token) as Promise<any[]>,
+    ]);
+    const defaultBranch: string = repoData.default_branch || "main";
+
+    return (data as any[]).map((b: any) => ({
+      name: b.name,
+      isDefault: b.name === defaultBranch,
+      commitSha: b.commit?.sha?.slice(0, 7) ?? "",
+      url: `https://github.com/${owner}/${repo}/tree/${b.name}`,
+      protected: b.protected ?? false,
+    }));
+  }
+
+  static async listAllPullRequests(githubUrl: string, token?: string): Promise<PullRequest[]> {
+    const parsed = parseGithubUrl(githubUrl);
+    if (!parsed) throw new Error("Invalid GitHub URL");
+    const { owner, repo } = parsed;
+
+    const data = await fetchGitHub(`/repos/${owner}/${repo}/pulls?state=all&per_page=30`, token) as any[];
+    return data.map((pr: any) => ({
+      number: pr.number,
+      title: pr.title,
+      author: pr.user?.login ?? "unknown",
+      state: pr.merged_at ? "merged" : pr.state,
+      createdAt: pr.created_at,
+      updatedAt: pr.updated_at,
+      mergedAt: pr.merged_at ?? undefined,
+      additions: pr.additions ?? 0,
+      deletions: pr.deletions ?? 0,
+      changedFiles: pr.changed_files ?? 0,
+      url: pr.html_url,
+      draft: pr.draft ?? false,
+      body: pr.body ?? undefined,
+      labels: pr.labels?.map((l: any) => l.name) ?? [],
+      baseBranch: pr.base?.ref ?? "main",
+      headBranch: pr.head?.ref ?? "",
+    }));
   }
 
   static async listPullRequests(githubUrl: string, token?: string): Promise<PullRequest[]> {

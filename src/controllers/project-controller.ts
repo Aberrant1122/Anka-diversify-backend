@@ -822,17 +822,60 @@ export class ProjectController {
         orderBy: { updatedAt: "desc" },
       });
       
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         data: files.map(f => ({
           ...f,
           projectName: f.project.name,
         })),
-        count: files.length 
+        count: files.length
       });
     } catch (error) {
       console.error("Error fetching all documents:", error);
       res.status(500).json({ success: false, error: "Failed to fetch documents" });
+    }
+  }
+
+  async getGitCommits(req: Request, res: Response) {
+    try {
+      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      if (!project?.githubUrl) {
+        return res.status(400).json({ success: false, error: "No GitHub URL configured for this project" });
+      }
+      const branch = req.query.branch as string | undefined;
+      const commits = await ProjectGitHubService.listCommits(project.githubUrl, branch);
+      res.json({ success: true, data: commits });
+    } catch (error) {
+      console.error("Error fetching git commits:", error);
+      res.status(500).json({ success: false, error: "Failed to fetch commits from GitHub" });
+    }
+  }
+
+  async getGitBranches(req: Request, res: Response) {
+    try {
+      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      if (!project?.githubUrl) {
+        return res.status(400).json({ success: false, error: "No GitHub URL configured for this project" });
+      }
+      const branches = await ProjectGitHubService.listBranches(project.githubUrl);
+      res.json({ success: true, data: branches });
+    } catch (error) {
+      console.error("Error fetching git branches:", error);
+      res.status(500).json({ success: false, error: "Failed to fetch branches from GitHub" });
+    }
+  }
+
+  async getGitPulls(req: Request, res: Response) {
+    try {
+      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      if (!project?.githubUrl) {
+        return res.status(400).json({ success: false, error: "No GitHub URL configured for this project" });
+      }
+      const pulls = await ProjectGitHubService.listAllPullRequests(project.githubUrl);
+      res.json({ success: true, data: pulls });
+    } catch (error) {
+      console.error("Error fetching pull requests:", error);
+      res.status(500).json({ success: false, error: "Failed to fetch pull requests from GitHub" });
     }
   }
 }

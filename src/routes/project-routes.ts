@@ -85,6 +85,11 @@ router.post('/:id/tasks/:taskId/checklist', projectController.addChecklistItem.b
 router.patch('/:id/tasks/:taskId/checklist/:itemId', projectController.updateChecklistItem.bind(projectController));
 router.delete('/:id/tasks/:taskId/checklist/:itemId', projectController.deleteChecklistItem.bind(projectController));
 
+// Git data (live from GitHub API)
+router.get('/:id/git/commits', projectController.getGitCommits.bind(projectController));
+router.get('/:id/git/branches', projectController.getGitBranches.bind(projectController));
+router.get('/:id/git/pulls', projectController.getGitPulls.bind(projectController));
+
 // S3 Configuration Check
 router.get('/config/s3', projectController.checkS3Config.bind(projectController));
 
