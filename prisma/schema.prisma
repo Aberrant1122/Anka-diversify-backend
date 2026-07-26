@@ -13,16 +13,16 @@ model User {
   name       String?
   password   String
   role       String   @default("user") // 'admin', 'manager', 'developer', 'designer', 'tester'
-  department String?  // 'development', 'testing', 'design', 'management', 'marketing'
+  department String? // 'development', 'testing', 'design', 'management', 'marketing'
   status     String   @default("active") // 'active', 'invited', 'inactive'
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  projects         Project[]
-  projectMembers   ProjectMember[]
-  aiChatSessions   AiChatSession[]
-  invitesSent      UserInvite[]    @relation("InvitedBy")
-  headOf           Department[]
+  projects       Project[]
+  projectMembers ProjectMember[]
+  aiChatSessions AiChatSession[]
+  invitesSent    UserInvite[]    @relation("InvitedBy")
+  headOf         Department[]
 
   @@map("users")
 }
@@ -38,30 +38,33 @@ model UserInvite {
   expiresAt   DateTime
   createdAt   DateTime  @default(now())
 
-  invitedBy   User      @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
+  invitedBy User @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
 
   @@map("user_invites")
 }
 
 model Project {
-  id          String   @id @default(cuid())
-  name        String
-  description String?
-  phase       String?
-  progress    Float    @default(0)
-  teamSize    Int      @default(1)
-  priority    String   @default("medium") // 'low', 'medium', 'high', 'critical'
-  status      String   @default("active") // 'active', 'on-hold', 'completed'
-  githubUrl   String?
-  githubToken String?  // Encrypted GitHub personal access token
-  localPath   String?
-  startDate   DateTime @default(now())
-  dueDate     DateTime?
-  userId      String
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                     String    @id @default(cuid())
+  name                   String
+  description            String?
+  phase                  String?
+  progress               Float     @default(0)
+  teamSize               Int       @default(1)
+  priority               String    @default("medium") // 'low', 'medium', 'high', 'critical'
+  status                 String    @default("active") // 'active', 'on-hold', 'completed'
+  githubUrl              String?
+  githubToken            String? // Encrypted GitHub personal access token
+  localPath              String?
+  startDate              DateTime  @default(now())
+  dueDate                DateTime?
+  userId                 String
+  currentPhase           String? // 'requirements' | 'documentation' | 'architecture' | 'implementation' | 'testing' | 'review'
+  architectureApprovedAt DateTime?
+  lastWorkflowRunId      String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
-  user           User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   aiChatSessions AiChatSession[]
   memorySummary  ProjectMemorySummary?
   repoSnapshot   ProjectRepoSnapshot?
@@ -72,6 +75,10 @@ model Project {
   documents      ProjectDocument[]
   members        ProjectMember[]
   sprints        Sprint[]
+  phaseStates    ProjectPhaseState[]
+  phaseArtifacts PhaseArtifact[]
+  phaseApprovals PhaseApproval[]
+  workflowRuns   WorkflowRun[]
 
   @@map("projects")
 }
@@ -90,13 +97,13 @@ model ProjectMember {
 }
 
 model AiChatSession {
-  id           String   @id @default(cuid())
-  type         String   // 'general' or 'project'
-  userId       String
-  projectId    String?
-  title        String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id        String   @id @default(cuid())
+  type      String // 'general' or 'project'
+  userId    String
+  projectId String?
+  title     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   project  Project?        @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -108,9 +115,9 @@ model AiChatSession {
 model AiChatMessage {
   id        String   @id @default(cuid())
   sessionId String
-  role      String   // 'user' or 'assistant'
+  role      String // 'user' or 'assistant'
   content   String
-  metadata  Json?    // Additional context metadata
+  metadata  Json? // Additional context metadata
   createdAt DateTime @default(now())
 
   session AiChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
@@ -136,12 +143,84 @@ model ProjectDecision {
   title       String
   description String
   impact      String?
+  phase       String? // phase this decision was made in, e.g. 'architecture'
+  artifactId  String? // optional link to the PhaseArtifact this decision was recorded against
   madeAt      DateTime @default(now())
   madeBy      String?
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project  Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  artifact PhaseArtifact? @relation(fields: [artifactId], references: [id], onDelete: SetNull)
 
   @@map("project_decisions")
+}
+
+// ── Phased workflow (Documentation → Architecture → Implementation → Testing) ──
+
+model ProjectPhaseState {
+  id           String    @id @default(cuid())
+  projectId    String
+  phase        String // 'requirements' | 'documentation' | 'architecture' | 'implementation' | 'testing' | 'review'
+  status       String    @default("not_started") // 'not_started' | 'in_progress' | 'awaiting_approval' | 'approved' | 'completed'
+  startedAt    DateTime?
+  completedAt  DateTime?
+  approvedById String?
+  approvedAt   DateTime?
+  notes        String?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, phase])
+  @@map("project_phase_states")
+}
+
+model PhaseArtifact {
+  id        String   @id @default(cuid())
+  projectId String
+  phase     String
+  type      String // 'requirements_doc' | 'architecture_doc' | 'decision_log' | 'diagram' | ...
+  title     String
+  content   String   @db.Text
+  version   Int      @default(1)
+  createdBy String
+  createdAt DateTime @default(now())
+  approved  Boolean  @default(false)
+
+  project   Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  decisions ProjectDecision[]
+
+  @@index([projectId, phase])
+  @@map("phase_artifacts")
+}
+
+model PhaseApproval {
+  id           String   @id @default(cuid())
+  projectId    String
+  phase        String
+  approvedById String
+  approvedAt   DateTime @default(now())
+  decision     String // 'approved' | 'changes_requested' | 'rejected'
+  comments     String?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, phase])
+  @@map("phase_approvals")
+}
+
+model WorkflowRun {
+  id           String    @id @default(cuid())
+  projectId    String
+  triggerType  String // 'manual' | 'auto_advance' | 'retry'
+  currentPhase String
+  status       String    @default("running") // 'running' | 'completed' | 'failed' | 'cancelled'
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+  modelUsage   Json?
+  costUSD      Float?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("workflow_runs")
 }
 
 model ProjectRule {
@@ -158,22 +237,22 @@ model ProjectRule {
 }
 
 model ProjectTask {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   projectId   String
   title       String
   description String?
-  status      String   @default("todo")
-  priority    String   @default("medium")
-  phase       String   @default("development")
+  status      String    @default("todo")
+  priority    String    @default("medium")
+  phase       String    @default("development")
   dueDate     DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
-  project      Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  comments     TaskComment[]
-  sprints      SprintTask[]
-  blocking     TaskDependency[] @relation("Blocking")
-  blockedBy    TaskDependency[] @relation("BlockedBy")
+  project        Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  comments       TaskComment[]
+  sprints        SprintTask[]
+  blocking       TaskDependency[]    @relation("Blocking")
+  blockedBy      TaskDependency[]    @relation("BlockedBy")
   checklistItems TaskChecklistItem[]
 
   @@map("project_tasks")
@@ -198,28 +277,28 @@ model ProjectActivity {
   projectId  String
   userId     String
   userName   String
-  action     String   // 'created_task', 'updated_task', 'deleted_task', 'moved_task', 'added_comment', 'uploaded_file'
-  entityType String   // 'task', 'file', 'comment'
+  action     String // 'created_task', 'updated_task', 'deleted_task', 'moved_task', 'added_comment', 'uploaded_file'
+  entityType String // 'task', 'file', 'comment'
   entityId   String?
   entityName String?
-  meta       Json?    // e.g. { from: 'todo', to: 'in_progress' }
+  meta       Json? // e.g. { from: 'todo', to: 'in_progress' }
   createdAt  DateTime @default(now())
 
   @@map("project_activities")
 }
 
 model ProjectFile {
-  id          String   @id @default(cuid())
-  projectId   String
-  name        String
-  type        String   @default("doc") // 'doc', 'image', 'spreadsheet', 'design', 'code', 'other'
-  phase       String   @default("development") // 'product-modeling', 'development', 'marketing'
-  url         String?
-  s3Key       String?
-  size        String?
-  uploadedBy  String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default(cuid())
+  projectId  String
+  name       String
+  type       String   @default("doc") // 'doc', 'image', 'spreadsheet', 'design', 'code', 'other'
+  phase      String   @default("development") // 'product-modeling', 'development', 'marketing'
+  url        String?
+  s3Key      String?
+  size       String?
+  uploadedBy String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -254,7 +333,7 @@ model TaskDependency {
 model Notification {
   id         String   @id @default(cuid())
   userId     String
-  type       String   // 'mention', 'comment', 'assignment', 'alert', 'system'
+  type       String // 'mention', 'comment', 'assignment', 'alert', 'system'
   title      String
   message    String
   link       String?
@@ -296,7 +375,7 @@ model Sprint {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
   tasks   SprintTask[]
 
   @@map("sprints")
@@ -329,14 +408,14 @@ model SprintTask {
 }
 
 model ProjectDocument {
-  id          String   @id @default(cuid())
-  projectId   String
-  title       String
-  content     String
-  type        String   @default("note") // requirements, documentation, note
-  createdBy   String   @default("AI Assistant")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id        String   @id @default(cuid())
+  projectId String
+  title     String
+  content   String
+  type      String   @default("note") // requirements, documentation, note
+  createdBy String   @default("AI Assistant")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -365,7 +444,7 @@ model OrgRule {
   conditions  Json     @default("[]")
   actions     Json     @default("[]")
   createdBy   String   @default("Admin")
-  ruleType    String?  // null = policy only; 'sprint_auto_close' | 'overdue_escalation'
+  ruleType    String? // null = policy only; 'sprint_auto_close' | 'overdue_escalation'
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { ProjectController } from '../controllers/project-controller';
 import sprintRoutes from './sprint-routes';
+import phaseRoutes from './phase-routes';
 
 const router = Router();
 const projectController = new ProjectController();
@@ -95,5 +96,8 @@ router.get('/config/s3', projectController.checkS3Config.bind(projectController)
 
 // Sprints
 router.use('/:projectId/sprints', sprintRoutes);
+
+// Phased workflow (requirements → documentation → architecture → implementation → testing → review)
+router.use('/:projectId/phases', phaseRoutes);
 
 export default router;

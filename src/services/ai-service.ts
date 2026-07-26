@@ -1310,6 +1310,105 @@ Respond with ONLY valid JSON: { "hasErrors": boolean, "errors": "description or 
     }
   }
 
+  // ── Phased workflow: AI-drafted phase proposals ─────────────────────────
+
+  // Simple model router — reasoning-heavy phases get the stronger model,
+  // lighter/more mechanical phases get the cheaper one. Swap for LiteLLM
+  // later if multi-provider routing becomes necessary.
+  private modelForPhase(phase: string): string {
+    switch (phase) {
+      case "requirements":
+      case "documentation":
+      case "architecture":
+        return "gpt-4o";
+      default:
+        return "gpt-4o-mini";
+    }
+  }
+
+  private estimateCostUSD(model: string, usage: { prompt_tokens?: number; completion_tokens?: number }): number {
+    const rates: Record<string, { prompt: number; completion: number }> = {
+      "gpt-4o": { prompt: 2.5 / 1_000_000, completion: 10 / 1_000_000 },
+      "gpt-4o-mini": { prompt: 0.15 / 1_000_000, completion: 0.6 / 1_000_000 },
+    };
+    const rate = rates[model] || rates["gpt-4o-mini"];
+    return (usage.prompt_tokens || 0) * rate.prompt + (usage.completion_tokens || 0) * rate.completion;
+  }
+
+  private phasePromptInstructions(phase: string): string {
+    switch (phase) {
+      case "requirements":
+        return "Parse the project brief into: user stories, acceptance criteria, and constraints.";
+      case "documentation":
+        return "Write a PRD covering: overview, API outlines, data models, edge cases, and acceptance criteria.";
+      case "architecture":
+        return "Write an architecture proposal with these sections: System Overview, Components & Responsibilities, Data Flow & APIs, Technology Decisions, Risks & Mitigations, and Recommended Diagrams (as Mermaid code fences).";
+      case "implementation":
+        return "Write an implementation plan: sequenced tasks, file/module boundaries, and validation steps.";
+      case "testing":
+        return "Write a test plan: coverage strategy, key test cases, and edge cases to validate.";
+      case "review":
+        return "Write a PR risk summary and deployment checklist for merging this work.";
+      default:
+        return "Write a proposal document for this phase.";
+    }
+  }
+
+  // Generates a draft artifact for a workflow phase, grounded in the project's
+  // accumulated context (memory summary, decisions, repo snapshot). When a
+  // previous artifact + reviewer feedback are supplied (the "Request Changes"
+  // loop), the regeneration revises that draft to address the feedback
+  // instead of starting over from scratch.
+  async generatePhaseProposal(
+    projectId: string,
+    phase: string,
+    revision?: { previousContent: string; feedback: string },
+  ): Promise<{ title: string; content: string; model: string; usage: { prompt_tokens: number; completion_tokens: number }; costUSD: number }> {
+    const projectContext = await this.buildProjectContext(projectId);
+    const model = this.modelForPhase(phase);
+
+    const revisionBlock = revision
+      ? `\nPREVIOUS DRAFT:\n${revision.previousContent}\n\nREVIEWER FEEDBACK (address this — do not ignore it):\n${revision.feedback}\n\nRevise the previous draft to address the feedback. Keep what still works; change what the feedback calls out.`
+      : "";
+
+    const systemPrompt = `You are drafting the "${phase}" phase document for project "${projectContext.project.name}".
+
+PROJECT DESCRIPTION:
+${projectContext.project.description || "No description provided."}
+
+MEMORY SUMMARY:
+${projectContext.summary?.summary || "No prior context yet."}
+
+ACTIVE TASKS:
+${projectContext.activeTasks.map((t: any) => `- ${t.title} (${t.status})`).join("\n") || "None"}
+${revisionBlock}
+
+TASK: ${this.phasePromptInstructions(phase)}
+
+Respond in clean Markdown only — no preamble, no closing remarks.`;
+
+    const completion = await this.getOpenAI().chat.completions.create({
+      model,
+      messages: [{ role: "system", content: systemPrompt }],
+      temperature: 0.4,
+      max_tokens: 2000,
+    });
+
+    const content = completion.choices[0]?.message?.content || "";
+    const usage = {
+      prompt_tokens: completion.usage?.prompt_tokens || 0,
+      completion_tokens: completion.usage?.completion_tokens || 0,
+    };
+
+    return {
+      title: `${projectContext.project.name} — ${phase.charAt(0).toUpperCase() + phase.slice(1)} Proposal`,
+      content,
+      model,
+      usage,
+      costUSD: this.estimateCostUSD(model, usage),
+    };
+  }
+
   async runCodingAgent(
     userId: string,
     projectId: string,
