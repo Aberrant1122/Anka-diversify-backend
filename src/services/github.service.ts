@@ -131,10 +131,22 @@ export async function fetchRepoSnapshot(githubUrl: string, token?: string): Prom
   const repoData = await fetchGitHub(`/repos/${owner}/${repo}`, token) as any;
   const defaultBranch: string = repoData.default_branch || "main";
 
-  const [languages, treeDataFetched] = await Promise.all([
+  const [languagesResult, treeResult] = await Promise.allSettled([
     fetchGitHub(`/repos/${owner}/${repo}/languages`, token) as Promise<Record<string, number>>,
     fetchGitHub(`/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, token) as Promise<any>,
   ]);
+
+  if (languagesResult.status === "rejected") throw languagesResult.reason;
+  const languages = languagesResult.value;
+
+  // GitHub returns 409 for the trees endpoint when the repo has no commits yet
+  // (a freshly created, empty repository) — treat that as "no files" rather than failing.
+  let treeDataFetched: any = { tree: [] };
+  if (treeResult.status === "fulfilled") {
+    treeDataFetched = treeResult.value;
+  } else if (!(treeResult.reason instanceof Error && treeResult.reason.message.includes("409"))) {
+    throw treeResult.reason;
+  }
 
   const allFiles: string[] = ((treeDataFetched.tree as any[]) || [])
     .filter((f) => f.type === "blob")
