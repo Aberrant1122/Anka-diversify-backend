@@ -3,8 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { prisma } from "../services/database";
 import { User } from "../types";
-
-const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret";
+import { JWT_SECRET } from "../config/env";
 
 export class AuthController {
   async signup(req: Request, res: Response) {

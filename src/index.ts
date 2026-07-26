@@ -1,16 +1,23 @@
+import dotenv from "dotenv";
+dotenv.config({ override: true });
+
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import compression from "compression";
-import dotenv from "dotenv";
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import * as pty from "node-pty";
 import { PrismaClient } from "@prisma/client";
 
+// Fails fast if JWT_SECRET / ENCRYPTION_KEY are missing — must run before any
+// module that signs/verifies tokens or encrypts data is imported.
+import "./config/env";
+
 const prisma = new PrismaClient();
 import { errorHandler, requestLogger } from "./middleware";
+import { authenticateToken } from "./middleware/auth";
 import aiRoutes from "./routes/ai-routes";
 import authRoutes from "./routes/auth-routes";
 import adminRoutes from "./routes/admin-routes";
@@ -19,8 +26,6 @@ import inviteRoutes from "./routes/invite-routes";
 import notificationRoutes from "./routes/notification-routes";
 import rulesRoutes from "./routes/rules-routes";
 import departmentsRoutes from "./routes/departments-routes";
-
-dotenv.config({ override: true });
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -61,14 +66,17 @@ app.get("/health", (req, res) => {
 });
 
 // API Routes
-app.use("/api/ai", aiRoutes);
+// authRoutes and inviteRoutes contain their own public endpoints (signup,
+// login, invite validate/accept) and apply authenticateToken internally
+// where needed — everything else requires a valid JWT.
+app.use("/api/ai", authenticateToken, aiRoutes);
 app.use("/api/auth", authRoutes);
-app.use("/api/admin", adminRoutes);
-app.use("/api/projects", projectRoutes);
+app.use("/api/admin", authenticateToken, adminRoutes);
+app.use("/api/projects", authenticateToken, projectRoutes);
 app.use("/api/invites", inviteRoutes);
-app.use("/api/notifications", notificationRoutes);
-app.use("/api/admin/rules", rulesRoutes);
-app.use("/api/admin/departments", departmentsRoutes);
+app.use("/api/notifications", authenticateToken, notificationRoutes);
+app.use("/api/admin/rules", authenticateToken, rulesRoutes);
+app.use("/api/admin/departments", authenticateToken, departmentsRoutes);
 
 // Error handler
 app.use(errorHandler);

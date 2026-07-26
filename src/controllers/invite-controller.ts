@@ -1,9 +1,9 @@
 import { Request, Response } from "express";
 import { InviteService } from "../services/invite.service";
 import jwt from "jsonwebtoken";
+import { JWT_SECRET } from "../config/env";
 
 const inviteService = new InviteService();
-const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 export class InviteController {

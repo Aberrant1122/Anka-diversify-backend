@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { AuthController } from '../controllers/auth-controller';
+import { authenticateToken } from '../middleware/auth';
 
 const router = Router();
 const authController = new AuthController();
@@ -11,6 +12,6 @@ router.post('/signup', authController.signup.bind(authController));
 router.post('/login', authController.login.bind(authController));
 
 // Get profile route
-router.get('/profile', authController.getProfile.bind(authController));
+router.get('/profile', authenticateToken, authController.getProfile.bind(authController));
 
 export default router;

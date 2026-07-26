@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { ENCRYPTION_KEY } from '../config/env';
 
 const ALGORITHM = 'aes-256-cbc';
 
@@ -6,13 +7,7 @@ let _key: Buffer | null = null;
 
 function getKey(): Buffer {
   if (_key) return _key;
-  const envKey = process.env.ENCRYPTION_KEY;
-  if (!envKey || envKey.length < 32) {
-    console.warn('WARNING: ENCRYPTION_KEY not set or too short. Using fallback (NOT SECURE FOR PRODUCTION)');
-  }
-  _key = envKey
-    ? Buffer.from(envKey.padEnd(32, '0').slice(0, 32))
-    : Buffer.alloc(32, 'insecure-fallback-key-change-me');
+  _key = Buffer.from(ENCRYPTION_KEY.padEnd(32, '0').slice(0, 32));
   return _key;
 }
 

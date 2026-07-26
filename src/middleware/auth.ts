@@ -1,8 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { prisma } from "../services/database";
-
-const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret";
+import { JWT_SECRET } from "../config/env";
 
 // Extend Request interface to include user
 declare global {
