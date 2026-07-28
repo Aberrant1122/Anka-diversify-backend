@@ -1036,6 +1036,30 @@ GUIDELINES:
       }
     }
 
+    // Reuse existing active session for this project if one exists
+    if (projectId) {
+      const existingProjectSession = await prisma.aiChatSession.findFirst({
+        where: {
+          userId,
+          type,
+          projectId,
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+
+      if (existingProjectSession) {
+        return {
+          id: existingProjectSession.id,
+          type: existingProjectSession.type as "general" | "project",
+          userId: existingProjectSession.userId,
+          projectId: existingProjectSession.projectId || undefined,
+          title: existingProjectSession.title || undefined,
+          createdAt: existingProjectSession.createdAt,
+          updatedAt: existingProjectSession.updatedAt,
+        };
+      }
+    }
+
     const newSession = await prisma.aiChatSession.create({
       data: {
         type,
