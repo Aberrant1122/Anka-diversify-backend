@@ -80,6 +80,19 @@ export class PhaseService {
       data: { projectId, phase, approvedById, decision: "approved", comments },
     });
 
+    // Mark the artifact that was actually approved so consumers (e.g. the
+    // coding agent) can query for approved content instead of just "latest".
+    const latestArtifact = await prisma.phaseArtifact.findFirst({
+      where: { projectId, phase },
+      orderBy: { createdAt: "desc" },
+    });
+    if (latestArtifact) {
+      await prisma.phaseArtifact.update({
+        where: { id: latestArtifact.id },
+        data: { approved: true },
+      });
+    }
+
     await prisma.projectPhaseState.upsert({
       where: { projectId_phase: { projectId, phase } },
       update: { status: "approved", completedAt: now, approvedById, approvedAt: now },
