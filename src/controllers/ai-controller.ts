@@ -362,6 +362,20 @@ export class AiController {
     }
   }
 
+  async suggestTaskOrder(req: Request, res: Response) {
+    try {
+      const { tasks } = req.body;
+      if (!Array.isArray(tasks) || tasks.length === 0) {
+        return res.status(400).json({ error: "tasks array is required" });
+      }
+      const order = await aiService.suggestTaskOrder(tasks);
+      res.json({ success: true, data: { order } });
+    } catch (error) {
+      console.error("Suggest task order error:", error);
+      res.status(500).json({ error: "Failed to suggest task order", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
   async reviewPullRequest(req: Request, res: Response) {
     try {
       const { projectId, prNumber } = req.params;

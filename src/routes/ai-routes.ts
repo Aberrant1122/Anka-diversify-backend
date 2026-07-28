@@ -30,5 +30,6 @@ router.post('/projects/:projectId/sprints/generate', aiController.generateSprint
 // Coding Agent Routes
 router.post('/projects/:projectId/agent/run', aiController.runAgent.bind(aiController));
 router.post('/projects/:projectId/agent/push', aiController.pushAgentChanges.bind(aiController));
+router.post('/projects/:projectId/tasks/suggest-order', aiController.suggestTaskOrder.bind(aiController));
 
 export default router;

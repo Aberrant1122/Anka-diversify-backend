@@ -1128,33 +1128,60 @@ GUIDELINES:
 
   // ── Agent Pipeline ────────────────────────────────────────────────────────
 
-  private buildAgentSystemPrompt(projectContext: any, snapshot: any): string {
+  private buildAgentSystemPrompt(
+    projectContext: any,
+    snapshot: any,
+    architectureDoc?: string | null,
+    memorySummary?: string | null,
+  ): string {
     const repoInfo = snapshot
       ? `REPOSITORY: ${snapshot.repoName} (branch: ${snapshot.defaultBranch})
 FILE TREE:
 ${snapshot.fileTree.slice(0, 200).join("\n")}`
       : "No repository connected. Return empty changes array and explain.";
 
+    const architectureInfo = architectureDoc
+      ? `\nAPPROVED ARCHITECTURE (follow this design — do not deviate without good reason):\n${architectureDoc}\n`
+      : "";
+
+    const memoryInfo = memorySummary
+      ? `\nPROJECT MEMORY (decisions and conventions established in prior runs — stay consistent with these):\n${memorySummary}\n`
+      : "";
+
+    // The established language/stack, inferred from what's actually in the repo —
+    // used to hard-block introducing a second, competing implementation.
+    const languages: Record<string, number> = snapshot?.languages || {};
+    const dominantLanguage = Object.entries(languages).sort(([, a], [, b]) => (b as number) - (a as number))[0]?.[0];
+
     return `You are a coding agent for "${projectContext.project.name}". Produce exact file changes for the user's request.
 
 ${repoInfo}
-
+${architectureInfo}${memoryInfo}
 ACTIVE TASKS:
-${projectContext.activeTasks.map((t: any) => `- ${t.title} (${t.status})`).join("\n") || "None"}
+${projectContext.activeTasks.map((t: any) =>
+  `- ${t.title} (${t.status}, priority: ${t.priority})${t.description ? `\n  ${t.description}` : ""}`
+).join("\n") || "None"}
 
 RULES:
-- Only change files that exist in the file tree above
+- Only change files that exist in the file tree above — if the file tree is empty, you are creating this project's first files
 - Write complete file contents (not diffs or partials)
-- Follow existing code style and patterns exactly
-- Only change what is strictly necessary — nothing more
-- Preserve formatting, naming, and file structure
-- NEVER create or modify a file without reading it first
-- ALWAYS reuse existing components from /components/ui/
-- No inline styles, no hardcoded colors, no new UI libraries
-- Use semantic Tailwind tokens: bg-background, bg-card, bg-primary, bg-muted, text-foreground, etc.
+- If the repository already has files or an approved architecture is given above: follow its existing code style, structure, and stack exactly — reuse existing components/utilities instead of duplicating them. Do not assume any specific framework, styling approach, or component library unless the file tree, architecture doc, or task description actually shows one.
+- If the repository is empty and no architecture is given: pick ONE modern, idiomatic, commonly-used stack appropriate for what the task describes, and proceed — do not ask the user to choose between basic setup options (e.g. "plain HTML/CSS or a framework?"). State the choice and why in your explanation so it's visible, not asked as a question. That choice is now locked for every future task in this project.
+${dominantLanguage ? `- This project's established language/stack is ${dominantLanguage} — ALL new files MUST use it. Never create a parallel implementation of existing functionality in a different language or file (e.g. do not add a .ts version of a file that already exists as .js, do not add plain HTML/CSS alongside an existing framework). Extend or edit the existing files instead.` : ""}
+- Only change what is strictly necessary for the current task — nothing more
+- Preserve formatting, naming, and file structure of files you edit
+- NEVER modify a file without reading it first
 - TOOL BOUNDARIES: no rm -rf, no git push --force, no .env edits, no deleting core files
 
-You MUST respond with ONLY valid JSON:
+If — and only if — the request is genuinely ambiguous about something you have no reasonable way to decide yourself (e.g. a business-logic decision only the user can make, conflicting instructions, a missing credential/config value), respond with ONLY this JSON instead of making changes:
+{
+  "needsClarification": true,
+  "question": "the specific question to ask",
+  "options": ["short option A", "short option B"]
+}
+Basic project-setup choices (language, framework, file layout, styling approach) are YOURS to make when nothing in the context above already establishes one — never ask about those. Only do this when truly blocked on something only the user could know. "options" is optional; omit it for a free-text question.
+
+Otherwise, you MUST respond with ONLY valid JSON:
 {
   "explanation": "what you changed and why",
   "changes": [{ "path": "relative/path", "content": "complete file content", "description": "one-line summary" }],
@@ -1229,7 +1256,10 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
     fileContext: Record<string, string>,
     systemPrompt: string,
     previousErrors: string | null,
-  ): Promise<{ explanation: string; changes: AgentFileChange[]; commitMessage: string }> {
+  ): Promise<
+    | { explanation: string; changes: AgentFileChange[]; commitMessage: string }
+    | { needsClarification: true; question: string; options?: string[] }
+  > {
     const fileContents = Object.entries(fileContext)
       .map(([p, c]) => `=== ${p} ===\n${c}`)
       .join("\n\n");
@@ -1359,6 +1389,42 @@ Respond with ONLY valid JSON: { "hasErrors": boolean, "errors": "description or 
   // previous artifact + reviewer feedback are supplied (the "Request Changes"
   // loop), the regeneration revises that draft to address the feedback
   // instead of starting over from scratch.
+  // Orders a set of tasks that have no explicit dependencies between them into
+  // a sensible build sequence (foundational work before things that build on
+  // it, before polish/optimization/testing) — used by the batch agent runner
+  // when tasks were created without blockedByIds set between them.
+  async suggestTaskOrder(tasks: { id: string; title: string; description?: string }[]): Promise<string[]> {
+    if (tasks.length <= 1) return tasks.map((t) => t.id);
+
+    const completion = await this.getOpenAI().chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `Order these development tasks into the most sensible build sequence — foundational/setup work first, then features built on it, then polish/optimization/testing last. Respond with ONLY valid JSON: { "order": ["taskId1", "taskId2", ...] } listing every given task ID exactly once.`,
+        },
+        {
+          role: "user",
+          content: tasks.map((t) => `- id: ${t.id}\n  title: ${t.title}${t.description ? `\n  description: ${t.description}` : ""}`).join("\n"),
+        },
+      ],
+      temperature: 0,
+      max_tokens: 500,
+      response_format: { type: "json_object" },
+    });
+
+    try {
+      const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
+      const order: string[] = Array.isArray(parsed.order) ? parsed.order : [];
+      const validIds = new Set(tasks.map((t) => t.id));
+      const filtered = order.filter((id) => validIds.has(id));
+      const missing = tasks.map((t) => t.id).filter((id) => !filtered.includes(id));
+      return [...filtered, ...missing];
+    } catch {
+      return tasks.map((t) => t.id);
+    }
+  }
+
   async generatePhaseProposal(
     projectId: string,
     phase: string,
@@ -1422,6 +1488,11 @@ Respond in clean Markdown only — no preamble, no closing remarks.`;
       where: { id: projectId },
       select: { localPath: true, githubUrl: true, githubToken: true },
     });
+    const approvedArchitecture = await prisma.phaseArtifact.findFirst({
+      where: { projectId, phase: "architecture", approved: true },
+      orderBy: { createdAt: "desc" },
+      select: { content: true },
+    });
 
     await this.saveMessage(session.id, "user", request.message);
 
@@ -1434,7 +1505,7 @@ Respond in clean Markdown only — no preamble, no closing remarks.`;
 
     // ── Stage 2: Context Builder ──────────────────────────────────────────
     const fileContext = await this.buildFileContext(plan.filesToRead || [], snapshot, githubUrl, githubToken);
-    const systemPrompt = this.buildAgentSystemPrompt(projectContext, snapshot);
+    const systemPrompt = this.buildAgentSystemPrompt(projectContext, snapshot, approvedArchitecture?.content, projectContext.summary?.summary);
 
     // ── Stages 3–5: Executor → Validator loop ─────────────────────────────
     let changes: AgentFileChange[] = [];
@@ -1450,6 +1521,19 @@ Respond in clean Markdown only — no preamble, no closing remarks.`;
         systemPrompt,
         previousErrors,
       );
+
+      if ("needsClarification" in result) {
+        await this.saveMessage(session.id, "assistant", `[Agent] ❓ ${result.question}`);
+        return {
+          explanation: "",
+          changes: [],
+          commitMessage: "",
+          sessionId: session.id,
+          needsClarification: true,
+          question: result.question,
+          options: result.options,
+        };
+      }
 
       changes = result.changes || [];
       explanation = result.explanation || "";
@@ -1472,6 +1556,28 @@ Respond in clean Markdown only — no preamble, no closing remarks.`;
 
     if (!session.title) await this.updateSessionTitle(session.id, request.message);
 
+    if (changes.length > 0) {
+      const fileList = changes.map((c) => c.path).join(", ");
+      await this.recordAgentMemory(projectId, `${commitMessage} — ${explanation.slice(0, 200)} (files: ${fileList})`);
+    }
+
     return { explanation, changes, commitMessage, sessionId: session.id };
+  }
+
+  // Appends a note to the project's persistent memory summary (bounded to the
+  // most recent entries) so later runs — including chat mode, which already
+  // reads this — stay consistent with decisions and conventions established
+  // in earlier agent runs instead of re-deciding from scratch every time.
+  private async recordAgentMemory(projectId: string, note: string): Promise<void> {
+    const existing = await prisma.projectMemorySummary.findUnique({ where: { projectId } });
+    const priorLines = existing?.summary ? existing.summary.split("\n").filter(Boolean) : [];
+    const entry = `- ${new Date().toISOString().slice(0, 10)}: ${note}`;
+    const summary = [...priorLines, entry].slice(-20).join("\n");
+
+    await prisma.projectMemorySummary.upsert({
+      where: { projectId },
+      update: { summary, lastUpdated: new Date(), version: { increment: 1 } },
+      create: { projectId, summary, version: 1 },
+    });
   }
 }

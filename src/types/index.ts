@@ -274,6 +274,11 @@ export interface AgentResponse {
   changes: AgentFileChange[];
   commitMessage: string;
   sessionId: string;
+  // Set when the agent needs clarification instead of producing changes —
+  // changes/commitMessage will be empty in that case.
+  needsClarification?: boolean;
+  question?: string;
+  options?: string[];
 }
 
 // Error Types
