@@ -247,17 +247,44 @@ export class ProjectGitHubService {
     if (!parsed) throw new Error("Invalid GitHub URL");
     const { owner, repo } = parsed;
 
-    // 1. Get the latest commit SHA on the branch
+    // 1. Get the latest commit SHA on the branch, if it exists yet.
+    // A freshly created, empty repo has no commits — GitHub returns 409 for
+    // the ref lookup in that case — so this becomes the repo's first commit.
     const repoData = await fetchGitHub(`/repos/${owner}/${repo}`, token) as any;
     const defaultBranch = branch || repoData.default_branch || "main";
-    const refData = await fetchGitHub(`/repos/${owner}/${repo}/git/ref/heads/${defaultBranch}`, token) as any;
-    const latestCommitSha: string = refData.object.sha;
 
-    // 2. Get the tree SHA from that commit
-    const commitData = await fetchGitHub(`/repos/${owner}/${repo}/git/commits/${latestCommitSha}`, token) as any;
-    const baseTreeSha: string = commitData.tree.sha;
+    let latestCommitSha: string | null = null;
+    let baseTreeSha: string | undefined;
+    try {
+      const refData = await fetchGitHub(`/repos/${owner}/${repo}/git/ref/heads/${defaultBranch}`, token) as any;
+      latestCommitSha = refData.object.sha;
+      const commitData = await fetchGitHub(`/repos/${owner}/${repo}/git/commits/${latestCommitSha}`, token) as any;
+      baseTreeSha = commitData.tree.sha;
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes("409"))) throw err;
+    }
 
-    // 3. Create blobs for each changed file
+    // The Git Data API (blobs/trees/commits) needs at least one commit to
+    // already exist — a truly empty repo has no git object database yet, so
+    // even blob creation 409s. Initialize it via the Contents API instead;
+    // the first PUT creates the branch and the repo's initial commit.
+    if (!latestCommitSha) {
+      let lastSha = "";
+      for (const { path, content } of changes) {
+        const result = await writeGitHub(`/repos/${owner}/${repo}/contents/${path}`, {
+          message: commitMessage,
+          content: Buffer.from(content).toString("base64"),
+          branch: defaultBranch,
+        }, token) as any;
+        lastSha = result.commit.sha;
+      }
+      return {
+        sha: lastSha,
+        url: `https://github.com/${owner}/${repo}/commit/${lastSha}`,
+      };
+    }
+
+    // 2. Create blobs for each changed file
     const treeItems = await Promise.all(
       changes.map(async ({ path, content }) => {
         const blob = await postGitHub(`/repos/${owner}/${repo}/git/blobs`, {
@@ -268,20 +295,20 @@ export class ProjectGitHubService {
       })
     );
 
-    // 4. Create a new tree on top of the base tree
+    // 3. Create a new tree on top of the base tree
     const newTree = await postGitHub(`/repos/${owner}/${repo}/git/trees`, {
       base_tree: baseTreeSha,
       tree: treeItems,
     }, token) as any;
 
-    // 5. Create the commit
+    // 4. Create the commit
     const newCommit = await postGitHub(`/repos/${owner}/${repo}/git/commits`, {
       message: commitMessage,
       tree: newTree.sha,
       parents: [latestCommitSha],
     }, token) as any;
 
-    // 6. Update the branch ref
+    // 5. Update the branch ref
     await patchGitHub(`/repos/${owner}/${repo}/git/refs/heads/${defaultBranch}`, {
       sha: newCommit.sha,
       force: false,
