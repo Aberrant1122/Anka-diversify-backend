@@ -14,10 +14,10 @@ const projectService = new ProjectService();
 const DEMO_USER_ID = "demo-user-id";
 
 function getUserId(req: Request): string {
-  return (req.headers["x-user-id"] as string) || DEMO_USER_ID;
+  return req.user?.id || (req.headers["x-user-id"] as string) || DEMO_USER_ID;
 }
 function getUserName(req: Request): string {
-  return (req.headers["x-user-name"] as string) || "Unknown";
+  return req.user?.name || (req.headers["x-user-name"] as string) || "Unknown";
 }
 
 function param(req: Request, key: string): string {
