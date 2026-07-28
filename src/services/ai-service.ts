@@ -1429,12 +1429,17 @@ Respond with ONLY valid JSON: { "hasErrors": boolean, "errors": "description or 
     projectId: string,
     phase: string,
     revision?: { previousContent: string; feedback: string },
+    brief?: string,
   ): Promise<{ title: string; content: string; model: string; usage: { prompt_tokens: number; completion_tokens: number }; costUSD: number }> {
     const projectContext = await this.buildProjectContext(projectId);
     const model = this.modelForPhase(phase);
 
     const revisionBlock = revision
       ? `\nPREVIOUS DRAFT:\n${revision.previousContent}\n\nREVIEWER FEEDBACK (address this — do not ignore it):\n${revision.feedback}\n\nRevise the previous draft to address the feedback. Keep what still works; change what the feedback calls out.`
+      : "";
+
+    const briefBlock = brief
+      ? `\nBRIEF FROM USER FOR THIS GENERATION (this is the most specific and important input — prioritize it over generic assumptions):\n${brief}\n`
       : "";
 
     const systemPrompt = `You are drafting the "${phase}" phase document for project "${projectContext.project.name}".
@@ -1447,11 +1452,16 @@ ${projectContext.summary?.summary || "No prior context yet."}
 
 ACTIVE TASKS:
 ${projectContext.activeTasks.map((t: any) => `- ${t.title} (${t.status})`).join("\n") || "None"}
-${revisionBlock}
+${briefBlock}${revisionBlock}
 
 TASK: ${this.phasePromptInstructions(phase)}
 
-Respond in clean Markdown only — no preamble, no closing remarks.`;
+RULES:
+- Match the proposal's scale to the ACTUAL scope implied by the project name, description, brief, and active tasks above — not a generic template. A small utility or single-feature project should get a small, proportionate proposal (e.g. one module, no backend/database/mobile app) unless the brief explicitly calls for more. Only propose infrastructure (APIs, databases, multi-platform clients, logging pipelines, etc.) that the actual scope justifies.
+- Make every technical decision definite — never present a choice as "X or Y" (e.g. "React Native or Flutter", "Python or Java"). Pick one and justify it briefly. An architecture decision that isn't actually decided is useless — it's supposed to be locked once approved.
+- Ground every section in the specific project, not boilerplate that could apply to any generic app.
+
+Respond in clean Markdown only — no preamble, no closing remarks, and do NOT wrap the entire response in a code fence (\`\`\`) — only use code fences for actual code/diagram snippets within the document (e.g. Mermaid diagrams).`;
 
     const completion = await this.getOpenAI().chat.completions.create({
       model,
@@ -1460,7 +1470,13 @@ Respond in clean Markdown only — no preamble, no closing remarks.`;
       max_tokens: 2000,
     });
 
-    const content = completion.choices[0]?.message?.content || "";
+    // Defensive: if the model wrapped the whole response in one big code
+    // fence anyway, strip it — otherwise every heading/bold marker renders as
+    // literal text instead of being parsed, since it's all one code block.
+    let content = completion.choices[0]?.message?.content || "";
+    const wholeFenceMatch = content.match(/^```[a-z]*\n([\s\S]*)\n```\s*$/);
+    if (wholeFenceMatch) content = wholeFenceMatch[1];
+
     const usage = {
       prompt_tokens: completion.usage?.prompt_tokens || 0,
       completion_tokens: completion.usage?.completion_tokens || 0,

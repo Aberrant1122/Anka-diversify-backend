@@ -106,7 +106,7 @@ export class PhaseController {
       const userId = getUserId(req);
       if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
 
-      const result = await phaseService.runAutomatedPhase(param(req, "projectId"), param(req, "phase"), userId);
+      const result = await phaseService.runAutomatedPhase(param(req, "projectId"), param(req, "phase"), userId, req.body?.brief);
       res.status(201).json({ success: true, data: result });
     } catch (error: any) {
       console.error("Error running automated phase:", error);

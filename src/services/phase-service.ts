@@ -177,7 +177,7 @@ export class PhaseService {
 
   // AI-drafts a proposal for the given phase, saves it as an artifact, and
   // logs a WorkflowRun with model usage/cost for auditability.
-  async runAutomatedPhase(projectId: string, phase: string, createdBy: string) {
+  async runAutomatedPhase(projectId: string, phase: string, createdBy: string, brief?: string) {
     const run = await prisma.workflowRun.create({
       data: { projectId, triggerType: "manual", currentPhase: phase, status: "running" },
     });
@@ -195,7 +195,7 @@ export class PhaseService {
           ? { previousContent: previousArtifact.content, feedback: latestDecision.comments }
           : undefined;
 
-      const proposal = await aiService.generatePhaseProposal(projectId, phase, revision);
+      const proposal = await aiService.generatePhaseProposal(projectId, phase, revision, brief);
 
       const artifact = await prisma.phaseArtifact.create({
         data: {
