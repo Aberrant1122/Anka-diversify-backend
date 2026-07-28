@@ -267,6 +267,15 @@ export interface AgentFileChange {
   path: string;
   content: string;
   description: string;
+  layer?: "Controller" | "Service" | "Repository" | "Schema" | "UI";
+}
+
+export interface RoadmapStep {
+  phase: number;
+  title: string;
+  layer?: "Controller" | "Service" | "Repository" | "Schema" | "UI";
+  targetFiles: string[];
+  description: string;
 }
 
 export interface AgentResponse {
@@ -274,11 +283,17 @@ export interface AgentResponse {
   changes: AgentFileChange[];
   commitMessage: string;
   sessionId: string;
-  // Set when the agent needs clarification instead of producing changes —
-  // changes/commitMessage will be empty in that case.
   needsClarification?: boolean;
   question?: string;
   options?: string[];
+  intent?: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION";
+  confidence?: number;
+  roadmap?: RoadmapStep[];
+  securityPass?: boolean;
+  critiqueScore?: number;
+  layerViolations?: string[];
+  buildVerified?: boolean;
+  buildErrors?: string;
 }
 
 // Error Types

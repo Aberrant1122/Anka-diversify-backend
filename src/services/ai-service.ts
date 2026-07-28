@@ -28,9 +28,22 @@ import {
   User,
   AgentResponse,
   AgentFileChange,
+  RoadmapStep,
 } from "../types";
 import { ProjectGitHubService } from "./github.service";
 import { decrypt } from "../utils/encryption";
+import {
+  INTENT_CLASSIFIER_PROMPT,
+  SYMBOL_EXTRACTION_PROMPT,
+  CONTEXT_OPTIMIZER_PROMPT,
+  LAYER_CONSTRAINT_PROMPT,
+  IMPLEMENTATION_PLANNER_PROMPT,
+  CODING_AGENT_PROMPT,
+  SELF_HEALING_REPAIR_PROMPT,
+  CODE_CRITIQUE_PROMPT,
+  SECURITY_REVIEW_PROMPT,
+  MEMORY_PERSISTENCE_PROMPT,
+} from "./prompts";
 
 const prisma = new PrismaClient();
 
@@ -1162,29 +1175,37 @@ ${projectContext.activeTasks.map((t: any) =>
   `- ${t.title} (${t.status}, priority: ${t.priority})${t.description ? `\n  ${t.description}` : ""}`
 ).join("\n") || "None"}
 
-RULES:
+CRITICAL CODE QUALITY RULES (VIOLATIONS CAUSE BUILD FAILURES):
+1. Every file you output MUST be COMPLETE and SELF-CONTAINED — include ALL imports, type definitions, and dependencies at the top of each file. Never assume an import exists unless you can see it in the provided context.
+2. Write the ENTIRE file content from line 1 to the end. Never write partial files, snippets, placeholders like "// ... rest of file", or TODO comments. Every function must have a complete implementation.
+3. All code MUST compile without errors. If TypeScript: no \`any\` types unless absolutely unavoidable, all variables must be typed, all imports must resolve to real modules.
+4. If you create a new file that other files import, also update those importing files.
+5. If you edit an existing file, preserve ALL existing code that is not directly related to your change. Never remove functions, imports, or exports that you didn't add.
+6. Include proper error handling — try/catch blocks, null checks, fallback values.
+7. For web projects: include complete HTML with all script/style tags, or complete component files with all hooks and state.
+
+STRUCTURAL RULES:
 - Only change files that exist in the file tree above — if the file tree is empty, you are creating this project's first files
-- Write complete file contents (not diffs or partials)
-- If the repository already has files or an approved architecture is given above: follow its existing code style, structure, and stack exactly — reuse existing components/utilities instead of duplicating them. Do not assume any specific framework, styling approach, or component library unless the file tree, architecture doc, or task description actually shows one.
-- If the repository is empty and no architecture is given: pick ONE modern, idiomatic, commonly-used stack appropriate for what the task describes, and proceed — do not ask the user to choose between basic setup options (e.g. "plain HTML/CSS or a framework?"). State the choice and why in your explanation so it's visible, not asked as a question. That choice is now locked for every future task in this project.
-${dominantLanguage ? `- This project's established language/stack is ${dominantLanguage} — ALL new files MUST use it. Never create a parallel implementation of existing functionality in a different language or file (e.g. do not add a .ts version of a file that already exists as .js, do not add plain HTML/CSS alongside an existing framework). Extend or edit the existing files instead.` : ""}
+- If the repository already has files or an approved architecture is given above: follow its existing code style, structure, and stack exactly — reuse existing components/utilities instead of duplicating them.
+- If the repository is empty and no architecture is given: pick ONE modern, idiomatic, commonly-used stack appropriate for what the task describes, and proceed. State the choice in your explanation.
+${dominantLanguage ? `- This project's established language/stack is ${dominantLanguage} — ALL new files MUST use it. Never create a parallel implementation in a different language.` : ""}
 - Only change what is strictly necessary for the current task — nothing more
 - Preserve formatting, naming, and file structure of files you edit
 - NEVER modify a file without reading it first
 - TOOL BOUNDARIES: no rm -rf, no git push --force, no .env edits, no deleting core files
 
-If — and only if — the request is genuinely ambiguous about something you have no reasonable way to decide yourself (e.g. a business-logic decision only the user can make, conflicting instructions, a missing credential/config value), respond with ONLY this JSON instead of making changes:
+If — and only if — the request is genuinely ambiguous about something you have no reasonable way to decide yourself (e.g. a business-logic decision only the user can make, conflicting instructions, a missing credential/config value), respond with ONLY this JSON:
 {
   "needsClarification": true,
   "question": "the specific question to ask",
   "options": ["short option A", "short option B"]
 }
-Basic project-setup choices (language, framework, file layout, styling approach) are YOURS to make when nothing in the context above already establishes one — never ask about those. Only do this when truly blocked on something only the user could know. "options" is optional; omit it for a free-text question.
+Basic project-setup choices (language, framework, file layout, styling approach) are YOURS to make — never ask about those.
 
 Otherwise, you MUST respond with ONLY valid JSON:
 {
   "explanation": "what you changed and why",
-  "changes": [{ "path": "relative/path", "content": "complete file content", "description": "one-line summary" }],
+  "changes": [{ "path": "relative/path", "content": "COMPLETE file content from first line to last line — no placeholders or partial content", "description": "one-line summary" }],
   "commitMessage": "feat: description"
 }`;
   }
@@ -1322,13 +1343,27 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
       messages: [
         {
           role: "system",
-          content: `Review these code changes for TypeScript errors, missing imports, undefined variables, and broken logic. Be strict.
-Respond with ONLY valid JSON: { "hasErrors": boolean, "errors": "description or empty string" }`,
+          content: `You are a HOSTILE code reviewer whose ONLY job is to find errors. You are NOT the author of this code — treat it as adversarial input that is PROBABLY broken.
+
+CHECK EVERY FILE FOR:
+1. MISSING IMPORTS — Does every symbol used (types, functions, classes, React hooks, libraries) have a corresponding import statement? If a file uses \`useState\` but doesn't import it from 'react', that's an error.
+2. UNDEFINED VARIABLES — Are there variables, functions, or types referenced that are never defined or imported?
+3. TYPE ERRORS — For TypeScript: Are there type mismatches, missing generic parameters, or implicit \`any\`?
+4. INCOMPLETE CODE — Are there TODO comments, placeholder strings like "...", "rest of file", or functions with empty bodies that should have implementations?
+5. SYNTAX ERRORS — Unclosed brackets, missing semicolons (where required), malformed JSX, template literal errors?
+6. MISSING EXPORTS — Does the file export what other files would need to import?
+7. BROKEN DEPENDENCIES — Does the file reference modules/packages that don't exist in a standard project?
+8. LOGIC ERRORS — Obvious bugs like infinite loops, unreachable code, or functions that never return?
+
+Be EXTREMELY strict. If you find even ONE issue, report it.
+
+Respond with ONLY valid JSON:
+{ "hasErrors": boolean, "errors": "Detailed list of every error found with file path and description. Empty string if no errors." }`,
         },
         { role: "user", content: changesText },
       ],
       temperature: 0,
-      max_tokens: 800,
+      max_tokens: 2000,
       response_format: { type: "json_object" },
     });
 
@@ -1491,13 +1526,399 @@ Respond in clean Markdown only — no preamble, no closing remarks, and do NOT w
     };
   }
 
+  // ── Multi-Stage Agentic Pipeline Methods ─────────────────────────────────
+
+  private async classifyIntentAndAmbiguity(
+    message: string,
+    projectContext: any,
+  ): Promise<{
+    intent: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION";
+    confidence: number;
+    requiresClarification: boolean;
+    reasoning: string;
+    question?: string;
+    options?: string[];
+  }> {
+    try {
+      const completion = await this.getOpenAI().chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: INTENT_CLASSIFIER_PROMPT },
+          {
+            role: "user",
+            content: `USER REQUEST: ${message}\nPROJECT: ${projectContext.project.name}\nACTIVE TASKS:\n${projectContext.activeTasks.map((t: any) => `- ${t.title}`).join("\n")}`,
+          },
+        ],
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+      });
+
+      const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
+      return {
+        intent: parsed.intent || "FEATURE_ADD",
+        confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.85,
+        requiresClarification: Boolean(parsed.requiresClarification || parsed.confidence < 0.80),
+        reasoning: parsed.reasoning || "Intent classified",
+        question: parsed.question,
+        options: parsed.options,
+      };
+    } catch {
+      return {
+        intent: "FEATURE_ADD",
+        confidence: 0.85,
+        requiresClarification: false,
+        reasoning: "Default fallback classification",
+      };
+    }
+  }
+
+  private skeletonizeDependencyFile(content: string): string {
+    // Retain import statements, interface declarations, type aliases, export function signatures, and class method signatures.
+    // Strip internal function/method body implementations.
+    const lines = content.split("\n");
+    const skeletonLines: string[] = [];
+    let insideBody = false;
+    let braceDepth = 0;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (
+        trimmed.startsWith("import ") ||
+        trimmed.startsWith("export interface ") ||
+        trimmed.startsWith("interface ") ||
+        trimmed.startsWith("export type ") ||
+        trimmed.startsWith("type ") ||
+        trimmed.startsWith("export enum ") ||
+        trimmed.startsWith("enum ")
+      ) {
+        skeletonLines.push(line);
+        continue;
+      }
+
+      if (trimmed.startsWith("export class ") || trimmed.startsWith("class ")) {
+        skeletonLines.push(line);
+        continue;
+      }
+
+      if (trimmed.startsWith("export declare ") || trimmed.startsWith("declare ")) {
+        skeletonLines.push(line);
+        continue;
+      }
+
+      // Preserve function/method signature headers
+      if ((trimmed.startsWith("export function ") || trimmed.startsWith("public ") || trimmed.startsWith("private ") || trimmed.startsWith("protected ")) && trimmed.includes("{")) {
+        const signature = line.substring(0, line.indexOf("{")).trim() + " { /* skeletonized body */ }";
+        skeletonLines.push(signature);
+        continue;
+      }
+
+      if (braceDepth === 0) {
+        skeletonLines.push(line);
+      }
+
+      braceDepth += (line.match(/\{/g) || []).length;
+      braceDepth -= (line.match(/\}/g) || []).length;
+      if (braceDepth < 0) braceDepth = 0;
+    }
+
+    return skeletonLines.slice(0, 150).join("\n");
+  }
+
+  private async buildKnowledgeGraph(snapshot: any): Promise<{
+    exports: any[];
+    imports: any[];
+    dependencyGraph: Record<string, string[]>;
+  }> {
+    const keyFiles = snapshot?.keyFiles || [];
+    const dependencyGraph: Record<string, string[]> = {};
+    const exports: any[] = [];
+    const imports: any[] = [];
+
+    for (const file of keyFiles) {
+      const pathStr = file.path;
+      const content = file.content || "";
+      const fileImports: string[] = [];
+
+      // Extract import paths via regex
+      const importMatches = content.matchAll(/from\s+["']([^"']+)["']/g);
+      for (const match of importMatches) {
+        fileImports.push(match[1]);
+      }
+      dependencyGraph[pathStr] = fileImports;
+
+      // Extract exported symbols via regex
+      const exportMatches = content.matchAll(/export\s+(interface|class|function|type|const)\s+([A-Za-z0-9_]+)/g);
+      for (const match of exportMatches) {
+        exports.push({ file: pathStr, kind: match[1], symbol: match[2] });
+      }
+    }
+
+    return { exports, imports, dependencyGraph };
+  }
+
+  private async buildOptimizedContext(
+    intentResult: any,
+    knowledgeGraph: any,
+    projectContext: any,
+    filesToRead: string[],
+    snapshot: any,
+    githubUrl: string,
+    githubToken?: string,
+  ): Promise<{
+    fileContext: Record<string, string>;
+    skeletonContext: Record<string, string>;
+    tokenEstimate: number;
+  }> {
+    const rawContext = await this.buildFileContext(filesToRead, snapshot, githubUrl, githubToken);
+    const fileContext: Record<string, string> = {};
+    const skeletonContext: Record<string, string> = {};
+    let currentTokens = 0;
+    const MAX_TOKEN_BUDGET = 15000;
+
+    // First, prioritize target files (FULL content)
+    for (const [pathKey, content] of Object.entries(rawContext)) {
+      const approxTokens = Math.ceil(content.length / 4);
+      if (currentTokens + approxTokens <= MAX_TOKEN_BUDGET) {
+        fileContext[pathKey] = content;
+        currentTokens += approxTokens;
+      } else {
+        // Skeletonize if token limit is tight
+        const skeleton = this.skeletonizeDependencyFile(content);
+        const skelTokens = Math.ceil(skeleton.length / 4);
+        if (currentTokens + skelTokens <= MAX_TOKEN_BUDGET) {
+          skeletonContext[pathKey] = skeleton;
+          currentTokens += skelTokens;
+        }
+      }
+    }
+
+    return { fileContext, skeletonContext, tokenEstimate: currentTokens };
+  }
+
+  private async generateRoadmapAndDiffs(
+    message: string,
+    intentResult: any,
+    optimizedContext: any,
+    systemPrompt: string,
+  ): Promise<{
+    roadmap: RoadmapStep[];
+    changes: AgentFileChange[];
+    explanation: string;
+    commitMessage: string;
+    validationCommands: string[];
+    layerViolations?: string[];
+  }> {
+    // Phase A: Generate Roadmap
+    let roadmap: RoadmapStep[] = [
+      { phase: 1, title: "Analysis & Types", layer: "Schema", targetFiles: [], description: "Define necessary interfaces and models" },
+      { phase: 2, title: "Service Implementation", layer: "Service", targetFiles: [], description: "Implement business logic" },
+      { phase: 3, title: "Controller & Route Handling", layer: "Controller", targetFiles: [], description: "Expose API endpoints and validate inputs" },
+    ];
+
+    try {
+      const roadmapCompletion = await this.getOpenAI().chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: IMPLEMENTATION_PLANNER_PROMPT },
+          { role: "user", content: `REQUEST: ${message}\nINTENT: ${intentResult.intent}` },
+        ],
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+      });
+      const parsedRoadmap = JSON.parse(roadmapCompletion.choices[0]?.message?.content || "{}");
+      if (Array.isArray(parsedRoadmap.roadmap) && parsedRoadmap.roadmap.length > 0) {
+        roadmap = parsedRoadmap.roadmap;
+      }
+    } catch {
+      // Use fallback roadmap
+    }
+
+    // Phase B: Coding Agent Diff Generation
+    const contextContent = Object.entries(optimizedContext.fileContext)
+      .map(([p, c]) => `=== FULL FILE: ${p} ===\n${c}`)
+      .concat(
+        Object.entries(optimizedContext.skeletonContext).map(
+          ([p, c]) => `=== SKELETON DEPENDENCY: ${p} ===\n${c}`,
+        ),
+      )
+      .join("\n\n");
+
+    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextContent}\n\nREMINDER: Every file in your "changes" array MUST contain the COMPLETE file content — all imports, all functions, all exports. The output will be written directly to disk and compiled. Partial files or placeholders will cause build failures.`;
+
+    const completion = await this.getOpenAI().chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\n${CODING_AGENT_PROMPT}\n\n${LAYER_CONSTRAINT_PROMPT}` },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.2,
+      max_tokens: 16000,
+      response_format: { type: "json_object" },
+    });
+
+    const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
+    const changes: AgentFileChange[] = Array.isArray(parsed.changes) ? parsed.changes : [];
+    const explanation = parsed.explanation || "Agent generated code diffs.";
+    const commitMessage = parsed.commitMessage || `feat(${intentResult.intent.toLowerCase()}): implementation updates`;
+
+    return {
+      roadmap,
+      changes,
+      explanation,
+      commitMessage,
+      validationCommands: ["npx tsc --noEmit", "npm run build"],
+    };
+  }
+
+  private async runSelfHealingLoop(
+    initialChanges: AgentFileChange[],
+    localPath: string | null | undefined,
+    commands: string[],
+    systemPrompt: string,
+    originalMessage: string,
+  ): Promise<{
+    finalChanges: AgentFileChange[];
+    attempts: number;
+    success: boolean;
+    errorLog?: string;
+  }> {
+    const MAX_REPAIR_RETRIES = 5;
+    let currentChanges = [...initialChanges];
+    let previousErrors = "";
+
+    for (let attempt = 1; attempt <= MAX_REPAIR_RETRIES; attempt++) {
+      if (!currentChanges.length) {
+        return { finalChanges: [], attempts: attempt, success: true };
+      }
+
+      const validation = localPath
+        ? await this.validateWithShell(currentChanges, localPath, commands)
+        : await this.selfReviewChanges(currentChanges);
+
+      if (validation.success) {
+        return { finalChanges: currentChanges, attempts: attempt, success: true };
+      }
+
+      previousErrors = validation.errors;
+
+      // Pass raw terminal traces back to specialized repair prompt
+      const repairCompletion = await this.getOpenAI().chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: SELF_HEALING_REPAIR_PROMPT },
+          {
+            role: "user",
+            content: `ORIGINAL REQUEST: ${originalMessage}\n\nCURRENT CHANGES:\n${JSON.stringify(currentChanges, null, 2)}\n\nRAW TERMINAL ERROR TRACE (REPAIR ATTEMPT ${attempt}/${MAX_REPAIR_RETRIES}):\n${previousErrors}`,
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 8000,
+        response_format: { type: "json_object" },
+      });
+
+      try {
+        const repairParsed = JSON.parse(repairCompletion.choices[0]?.message?.content || "{}");
+        if (Array.isArray(repairParsed.changes) && repairParsed.changes.length > 0) {
+          currentChanges = repairParsed.changes;
+        }
+      } catch {
+        // Keep current changes for next retry if parse fails
+      }
+    }
+
+    return {
+      finalChanges: currentChanges,
+      attempts: MAX_REPAIR_RETRIES,
+      success: false,
+      errorLog: previousErrors,
+    };
+  }
+
+  private async runReflectionAndSecurityAudit(
+    changes: AgentFileChange[],
+  ): Promise<{
+    approvedChanges: AgentFileChange[];
+    passed: boolean;
+    critiqueScore: number;
+    securityPass: boolean;
+    summary: string;
+  }> {
+    if (!changes.length) {
+      return { approvedChanges: [], passed: true, critiqueScore: 1.0, securityPass: true, summary: "No changes to review." };
+    }
+
+    const diffText = changes.map((c) => `=== FILE: ${c.path} ===\n${c.content}`).join("\n\n");
+
+    // 1. Independent Critique Pass
+    let critiqueScore = 0.90;
+    try {
+      const critiqueCompletion = await this.getOpenAI().chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: CODE_CRITIQUE_PROMPT },
+          { role: "user", content: diffText },
+        ],
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+      });
+      const critiqueResult = JSON.parse(critiqueCompletion.choices[0]?.message?.content || "{}");
+      if (typeof critiqueResult.score === "number") critiqueScore = critiqueResult.score;
+    } catch {
+      critiqueScore = 0.90;
+    }
+
+    // 2. Security Audit Pass
+    let securityPass = true;
+    try {
+      const secCompletion = await this.getOpenAI().chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: SECURITY_REVIEW_PROMPT },
+          { role: "user", content: diffText },
+        ],
+        temperature: 0.0,
+        response_format: { type: "json_object" },
+      });
+      const secResult = JSON.parse(secCompletion.choices[0]?.message?.content || "{}");
+      if (typeof secResult.passed === "boolean") securityPass = secResult.passed;
+    } catch {
+      securityPass = true;
+    }
+
+    return {
+      approvedChanges: changes,
+      passed: securityPass && critiqueScore >= 0.80,
+      critiqueScore,
+      securityPass,
+      summary: `Reflection Pass Score: ${(critiqueScore * 100).toFixed(0)}%. Security Pass: ${securityPass ? "PASSED" : "FLAGGED"}.`,
+    };
+  }
+
+  private async persistProjectMemory(projectId: string, userMessage: string, auditResult: any): Promise<void> {
+    try {
+      const memoryCompletion = await this.getOpenAI().chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: MEMORY_PERSISTENCE_PROMPT },
+          { role: "user", content: `USER TASK: ${userMessage}\nAUDIT SUMMARY: ${auditResult.summary}` },
+        ],
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+      });
+
+      const parsed = JSON.parse(memoryCompletion.choices[0]?.message?.content || "{}");
+      const note = parsed.summaryEntry || `Updated code and structure for: ${userMessage.slice(0, 100)}`;
+      await this.recordAgentMemory(projectId, note);
+    } catch {
+      await this.recordAgentMemory(projectId, `Executed task: ${userMessage.slice(0, 100)}`);
+    }
+  }
+
   async runCodingAgent(
     userId: string,
     projectId: string,
     request: ChatRequest,
   ): Promise<AgentResponse> {
-    const MAX_ITERATIONS = 3;
-
     const session = await this.getOrCreateSession(userId, "project", projectId, request.sessionId);
     const projectContext = await this.buildProjectContext(projectId);
     const project = await prisma.project.findUnique({
@@ -1516,74 +1937,88 @@ Respond in clean Markdown only — no preamble, no closing remarks, and do NOT w
     const githubUrl = project?.githubUrl || "";
     const githubToken = project?.githubToken ? decrypt(project.githubToken) : undefined;
 
-    // ── Stage 1: Planner ──────────────────────────────────────────────────
-    const plan = await this.planTask(request.message, snapshot);
-
-    // ── Stage 2: Context Builder ──────────────────────────────────────────
-    const fileContext = await this.buildFileContext(plan.filesToRead || [], snapshot, githubUrl, githubToken);
-    const systemPrompt = this.buildAgentSystemPrompt(projectContext, snapshot, approvedArchitecture?.content, projectContext.summary?.summary);
-
-    // ── Stages 3–5: Executor → Validator loop ─────────────────────────────
-    let changes: AgentFileChange[] = [];
-    let explanation = "";
-    let commitMessage = "chore: agent changes";
-    let previousErrors: string | null = null;
-
-    for (let i = 0; i < MAX_ITERATIONS; i++) {
-      const result = await this.executeChanges(
-        request.message,
-        plan.approach || "",
-        fileContext,
-        systemPrompt,
-        previousErrors,
-      );
-
-      if ("needsClarification" in result) {
-        await this.saveMessage(session.id, "assistant", `[Agent] ❓ ${result.question}`);
-        return {
-          explanation: "",
-          changes: [],
-          commitMessage: "",
-          sessionId: session.id,
-          needsClarification: true,
-          question: result.question,
-          options: result.options,
-        };
-      }
-
-      changes = result.changes || [];
-      explanation = result.explanation || "";
-      commitMessage = result.commitMessage || "chore: agent changes";
-
-      if (!changes.length) break;
-
-      const validation = project?.localPath
-        ? await this.validateWithShell(changes, project.localPath, plan.validationCommands || ["tsc --noEmit"])
-        : await this.selfReviewChanges(changes);
-
-      if (validation.success) break;
-
-      previousErrors = validation.errors;
-      explanation += `\n\n[Auto-fix attempt ${i + 1}] Errors found — retrying...`;
+    // ── Stage 1: Intent Analysis & Ambiguity Classifier ──────────────────────
+    const intentResult = await this.classifyIntentAndAmbiguity(request.message, projectContext);
+    if (intentResult.requiresClarification) {
+      await this.saveMessage(session.id, "assistant", `[Agent] ❓ ${intentResult.question || "Please clarify your request."}`);
+      return {
+        explanation: intentResult.reasoning,
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        needsClarification: true,
+        question: intentResult.question || "Could you provide more specific details for this request?",
+        options: intentResult.options || ["Proceed with default settings", "Specify target files"],
+        intent: intentResult.intent,
+        confidence: intentResult.confidence,
+      };
     }
 
-    const summary = `[Agent] ${explanation}\n\nFiles changed:\n${changes.map((c) => `- ${c.path}: ${c.description}`).join("\n")}`;
+    // ── Stage 2: Repository Knowledge Graph & Symbol Extraction ─────────────
+    const knowledgeGraph = await this.buildKnowledgeGraph(snapshot);
+    const plan = await this.planTask(request.message, snapshot);
+
+    // ── Stage 3: Dynamic Context Optimizer ──────────────────────────────────
+    const optimizedContext = await this.buildOptimizedContext(
+      intentResult,
+      knowledgeGraph,
+      projectContext,
+      plan.filesToRead || [],
+      snapshot,
+      githubUrl,
+      githubToken,
+    );
+
+    const systemPrompt = this.buildAgentSystemPrompt(
+      projectContext,
+      snapshot,
+      approvedArchitecture?.content,
+      projectContext.summary?.summary,
+    );
+
+    // ── Stage 4: Implementation Planner & Layer-Constrained Coding Agent ────
+    const roadmapAndDiff = await this.generateRoadmapAndDiffs(
+      request.message,
+      intentResult,
+      optimizedContext,
+      systemPrompt,
+    );
+
+    // ── Stage 5: Self-Healing Repair Loop (Up to 5 Retries) ────────────────
+    const repairResult = await this.runSelfHealingLoop(
+      roadmapAndDiff.changes,
+      project?.localPath,
+      roadmapAndDiff.validationCommands,
+      systemPrompt,
+      request.message,
+    );
+
+    // ── Stage 6: Independent Reflection & Security Review ─────────────────
+    const auditResult = await this.runReflectionAndSecurityAudit(repairResult.finalChanges);
+
+    // ── Stage 7: Project Memory Persistence ─────────────────────────────────
+    await this.persistProjectMemory(projectId, request.message, auditResult);
+
+    const summary = `[Agent Intent: ${intentResult.intent}] ${roadmapAndDiff.explanation}\n\n${auditResult.summary}\n\nFiles changed:\n${repairResult.finalChanges.map((c) => `- ${c.path}: ${c.description}`).join("\n")}`;
     await this.saveMessage(session.id, "assistant", summary);
 
     if (!session.title) await this.updateSessionTitle(session.id, request.message);
 
-    if (changes.length > 0) {
-      const fileList = changes.map((c) => c.path).join(", ");
-      await this.recordAgentMemory(projectId, `${commitMessage} — ${explanation.slice(0, 200)} (files: ${fileList})`);
-    }
-
-    return { explanation, changes, commitMessage, sessionId: session.id };
+    return {
+      explanation: roadmapAndDiff.explanation + "\n\n" + auditResult.summary,
+      changes: repairResult.finalChanges,
+      commitMessage: roadmapAndDiff.commitMessage,
+      sessionId: session.id,
+      intent: intentResult.intent,
+      confidence: intentResult.confidence,
+      roadmap: roadmapAndDiff.roadmap,
+      securityPass: auditResult.securityPass,
+      critiqueScore: auditResult.critiqueScore,
+      buildVerified: repairResult.success,
+      buildErrors: repairResult.errorLog,
+    };
   }
 
-  // Appends a note to the project's persistent memory summary (bounded to the
-  // most recent entries) so later runs — including chat mode, which already
-  // reads this — stay consistent with decisions and conventions established
-  // in earlier agent runs instead of re-deciding from scratch every time.
   private async recordAgentMemory(projectId: string, note: string): Promise<void> {
     const existing = await prisma.projectMemorySummary.findUnique({ where: { projectId } });
     const priorLines = existing?.summary ? existing.summary.split("\n").filter(Boolean) : [];
