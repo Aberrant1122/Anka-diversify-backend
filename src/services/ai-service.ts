@@ -1578,10 +1578,15 @@ Respond in clean Markdown only — no preamble, no closing remarks, and do NOT w
       });
 
       const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
+      const isCreateRequest = /create|build|make|design|generate|add|dashboard|game|landing|app|feature|page|component/i.test(message);
+      const intent = parsed.intent || "FEATURE_ADD";
+      const confidence = isCreateRequest ? 0.95 : (typeof parsed.confidence === "number" ? parsed.confidence : 0.85);
+      const requiresClarification = isCreateRequest ? false : Boolean(parsed.requiresClarification && confidence < 0.70);
+
       return {
-        intent: parsed.intent || "FEATURE_ADD",
-        confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.85,
-        requiresClarification: Boolean(parsed.requiresClarification || parsed.confidence < 0.80),
+        intent,
+        confidence,
+        requiresClarification,
         reasoning: parsed.reasoning || "Intent classified",
         question: parsed.question,
         options: parsed.options,
@@ -1589,9 +1594,9 @@ Respond in clean Markdown only — no preamble, no closing remarks, and do NOT w
     } catch {
       return {
         intent: "FEATURE_ADD",
-        confidence: 0.85,
+        confidence: 0.95,
         requiresClarification: false,
-        reasoning: "Default fallback classification",
+        reasoning: "Default fallback classification with action bias",
       };
     }
   }
@@ -1767,7 +1772,12 @@ Respond in clean Markdown only — no preamble, no closing remarks, and do NOT w
       )
       .join("\n\n");
 
-    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextContent}\n\nREMINDER: Every file in your "changes" array MUST contain the COMPLETE file content — all imports, all functions, all exports. The output will be written directly to disk and compiled. Partial files or placeholders will cause build failures.`;
+    const isAppOrDashboardRequest = /dashboard|game|app|landing|page|feature|component|system/i.test(message);
+    const multiFileInstruction = isAppOrDashboardRequest
+      ? "\n\nMULTI-FILE ARCHITECTURE MANDATE: This request asks to build a feature, dashboard, page, or app. You MUST output a complete multi-file blueprint containing ALL necessary files (e.g. types/interfaces, realistic mock data, modular subcomponents like Sidebar/MetricCard/Chart/Table, and the main container page). Do NOT compress the entire application into a single file or output only 1 file."
+      : "";
+
+    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextContent}${multiFileInstruction}\n\nREMINDER: Every file in your "changes" array MUST contain the COMPLETE 100% file content — all imports, all functions, all exports. The output will be written directly to disk and compiled. Partial files or placeholders will cause build failures.`;
 
     const completion = await this.getOpenAI().chat.completions.create({
       model: "gpt-4o",
