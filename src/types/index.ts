@@ -262,6 +262,62 @@ export interface ContextMetadata {
   lastUpdated: Date;
 }
 
+// Knowledge Graph Component Hierarchy Types (Component -> Who imports it -> Who renders it -> Which route owns it -> Is it reachable -> Can user navigate to it)
+export interface ComponentImportRef {
+  file: string;
+  importedSymbols: string[];
+}
+
+export interface ComponentRenderRef {
+  file: string;
+  parentComponent: string;
+  jsxTag: string;
+}
+
+export interface RouteOwnershipRef {
+  routeFile: string;
+  routePath: string;
+}
+
+export interface NavigationTriggerRef {
+  file: string;
+  type: "Link" | "router.push" | "nav_item" | "anchor";
+  targetHref: string;
+}
+
+export interface ComponentKnowledgeNode {
+  /** 1. Component symbol name */
+  component: string;
+  /** Source file path */
+  file: string;
+  /** Export kind */
+  exportKind: string;
+
+  /** 2. Who imports it? */
+  whoImportsIt: ComponentImportRef[];
+
+  /** 3. Who renders it? */
+  whoRendersIt: ComponentRenderRef[];
+
+  /** 4. Which route owns it? */
+  whichRouteOwnsIt: RouteOwnershipRef | null;
+
+  /** 5. Is it reachable? */
+  isReachable: boolean;
+  reachabilityReason: string;
+
+  /** 6. Can user navigate to it? */
+  canUserNavigateToIt: boolean;
+  navigationTriggers: NavigationTriggerRef[];
+}
+
+export interface ExtendedKnowledgeGraph {
+  exports: Array<{ file: string; kind: string; symbol: string }>;
+  imports: Array<{ file: string; source: string; importedSymbols: string[] }>;
+  dependencyGraph: Record<string, string[]>;
+  componentNodes: Record<string, ComponentKnowledgeNode>;
+}
+
 // Coding Agent Types
 export interface AgentFileChange {
   path: string;
@@ -276,6 +332,12 @@ export interface RoadmapStep {
   layer?: "Controller" | "Service" | "Repository" | "Schema" | "UI";
   targetFiles: string[];
   description: string;
+}
+
+export interface ChecklistItem {
+  label: string;
+  checked: boolean;
+  category?: string;
 }
 
 export interface AgentResponse {
@@ -294,6 +356,8 @@ export interface AgentResponse {
   layerViolations?: string[];
   buildVerified?: boolean;
   buildErrors?: string;
+  verificationChecklist?: ChecklistItem[];
+  lifecycleStage?: "Done" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
 }
 
 // Error Types
