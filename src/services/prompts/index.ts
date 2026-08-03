@@ -48,10 +48,12 @@ ${isStandalone ? `STANDALONE ARCHITECTURE MANDATE:
 ` : `Context Scope (only files from these paths are relevant to this task):
 ${contract.contextScope.length > 0 ? contract.contextScope.map((p) => `  • ${p}`).join("\n") : "  • (entire project)"}`}
 
-CRITICAL RULES:
+CRITICAL ANTI-HALLUCINATION RULES:
 1. Every file in your "changes" array MUST align with the Goal and Target Environment.
-2. Do NOT generate files for React components, pages, or modules unless explicitly part of the request.
-3. Honor the maxFiles limit (${contract.maxFiles}).
+2. Do NOT invent or import non-existent files, functions, components, or npm packages.
+3. Do NOT generate files for React components, pages, or modules unless explicitly part of the request.
+4. Honor the maxFiles limit (${contract.maxFiles}).
+5. Generate COMPLETE, 100% working code from line 1 to the end — NO placeholders, NO "// ... existing code" comments.
 ══════════════════════════════════════════════════════════
 `;
 }
@@ -73,7 +75,10 @@ CRITICAL PIPELINE MANDATES:
    - Reset all state (currentInput, previousInput, operator) whenever an error occurs (such as division by zero or NaN), preventing subsequent operations on "Error".
    - Prevent invalid input states (e.g., multiple leading zeros like '0005', repeated decimals like '1.2.3', or consecutive operator presses).
    - Ensure clear ('C') and backspace ('⌫') reliably reset state variables back to clean defaults.
-   - When an operator is clicked repeatedly, update the active operator without crashing or creating NaN states.
+11. ZERO HALLUCINATION MANDATE:
+   - Ground every element ID, class name, function name, and variable strictly in reality.
+   - Do NOT reference non-existent CSS files, external JS libraries (unless loaded via explicit <script src="...">), or unimported modules.
+   - For calculators: index.html MUST contain the #display element and grid of buttons, style.css MUST style every button and layout container, and script.js MUST implement the complete calculation logic.
 
 You MUST respond strictly with a valid JSON object matching this schema:
 {
