@@ -242,6 +242,10 @@ export class AiController {
       if (!userId) return res.status(401).json({ error: "User ID required" });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
+      if (req.headers.accept?.includes("text/event-stream") || req.query.stream === "true") {
+        return this.streamAgent(req, res);
+      }
+
       const result = await aiService.runCodingAgent(userId, projectId, req.body);
       res.json({ success: true, data: result });
     } catch (error) {
@@ -250,6 +254,40 @@ export class AiController {
         error: "Internal server error",
         message: error instanceof Error ? error.message : "Unknown error",
       });
+    }
+  }
+
+  async streamAgent(req: Request, res: Response) {
+    try {
+      const userId = req.headers["x-user-id"] as string;
+      const { projectId } = req.params;
+      if (!userId) return res.status(401).json({ error: "User ID required" });
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+
+      const sendEvent = (event: string, data: any) => {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+
+      const result = await aiService.runCodingAgent(
+        userId,
+        projectId,
+        req.body,
+        (progressEvent) => {
+          sendEvent("progress", progressEvent);
+        }
+      );
+
+      sendEvent("complete", result);
+      res.end();
+    } catch (error) {
+      console.error("Agent stream error:", error);
+      res.write(`event: error\ndata: ${JSON.stringify({ error: "Agent run failed", message: error instanceof Error ? error.message : "Unknown error" })}\n\n`);
+      res.end();
     }
   }
 
@@ -386,6 +424,66 @@ export class AiController {
     } catch (error) {
       console.error("PR review error:", error);
       res.status(500).json({ error: "Failed to review pull request", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
+  // ── Manifest and Decomposition API Endpoints (Task 17) ─────────────────────
+
+  async generateManifest(req: Request, res: Response) {
+    try {
+      const { projectId } = req.params;
+      const { userRequest, sessionId } = req.body;
+      const manifest = await prisma.agentManifest.findFirst({
+        where: { projectId: String(projectId), sessionId: sessionId ? String(sessionId) : undefined },
+        orderBy: { generatedAt: "desc" },
+      });
+      res.json({ success: true, data: manifest });
+    } catch (error) {
+      console.error("Generate manifest API error:", error);
+      res.status(500).json({ error: "Failed to fetch/generate manifest", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
+  async approveManifest(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const updated = await prisma.agentManifest.update({
+        where: { id: String(id) },
+        data: { validationStatus: "approved", approvedAt: new Date() },
+      });
+      res.json({ success: true, data: updated });
+    } catch (error) {
+      console.error("Approve manifest error:", error);
+      res.status(500).json({ error: "Failed to approve manifest", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
+  async rejectManifest(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const updated = await prisma.agentManifest.update({
+        where: { id: String(id) },
+        data: { validationStatus: "rejected" },
+      });
+      res.json({ success: true, data: updated });
+    } catch (error) {
+      console.error("Reject manifest error:", error);
+      res.status(500).json({ error: "Failed to reject manifest", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
+  async getDecomposition(req: Request, res: Response) {
+    try {
+      const { sessionId } = req.params;
+      const decomposition = await prisma.taskDecomposition.findFirst({
+        where: { sessionId: String(sessionId) },
+        include: { subTasksExecs: true },
+        orderBy: { createdAt: "desc" },
+      });
+      res.json({ success: true, data: decomposition });
+    } catch (error) {
+      console.error("Get decomposition error:", error);
+      res.status(500).json({ error: "Failed to get decomposition graph", message: error instanceof Error ? error.message : "Unknown error" });
     }
   }
 }

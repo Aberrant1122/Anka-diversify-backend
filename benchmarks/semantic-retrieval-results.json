@@ -1,0 +1,14 @@
+{
+  "runDate": "2026-07-30T20:02:35.739Z",
+  "provider": "local-feature-hashing-128",
+  "datasetSize": 6,
+  "metrics": {
+    "top1AccuracyPct": 100,
+    "top3AccuracyPct": 100,
+    "meanPrecisionPct": 57.99999999999999,
+    "meanRecallPct": 100,
+    "avgLatencyMs": 0.48077999999998156,
+    "incrementalReindexMs": 0.7274999999999636,
+    "memoryUsageMB": 12.56
+  }
+}

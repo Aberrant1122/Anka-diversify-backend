@@ -34,4 +34,7 @@ router.post("/:phase/approve", phaseController.approvePhase.bind(phaseController
 // POST   /api/projects/:projectId/phases/:phase/request-changes
 router.post("/:phase/request-changes", phaseController.requestChanges.bind(phaseController));
 
+// POST   /api/projects/:projectId/phases/:phase/reject
+router.post("/:phase/reject", phaseController.rejectPhase.bind(phaseController));
+
 export default router;

@@ -79,6 +79,8 @@ model Project {
   phaseArtifacts PhaseArtifact[]
   phaseApprovals PhaseApproval[]
   workflowRuns   WorkflowRun[]
+  agentManifests AgentManifest[]
+  decompositions TaskDecomposition[]
 
   @@map("projects")
 }
@@ -449,4 +451,68 @@ model OrgRule {
   updatedAt   DateTime @updatedAt
 
   @@map("org_rules")
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Agent Manifest and Task Decomposition Models
+// ────────────────────────────────────────────────────────────────────────────
+
+model AgentManifest {
+  id               String    @id @default(cuid())
+  projectId        String
+  sessionId        String
+  taskId           String? // Optional link to a specific task
+  subTaskId        String? // For decomposed tasks
+  manifestJson     Json // The complete FileManifest
+  validationStatus String // "pending" | "approved" | "rejected"
+  validationErrors Json? // Array of ValidationError objects
+  generatedAt      DateTime  @default(now())
+  approvedAt       DateTime?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, sessionId])
+  @@index([taskId])
+  @@map("agent_manifests")
+}
+
+model TaskDecomposition {
+  id                String    @id @default(cuid())
+  projectId         String
+  sessionId         String
+  parentTaskId      String? // Link to original task if available
+  userRequest       String    @db.Text
+  graphJson         Json // The complete DependencyExecutionGraph
+  totalSubTasks     Int
+  completedSubTasks Int       @default(0)
+  status            String // "in_progress" | "completed" | "failed"
+  createdAt         DateTime  @default(now())
+  completedAt       DateTime?
+
+  project        Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  subTasksExecs  SubTaskExecution[]
+
+  @@index([projectId, sessionId])
+  @@map("task_decompositions")
+}
+
+model SubTaskExecution {
+  id              String    @id @default(cuid())
+  decompositionId String
+  subTaskId       String // Maps to SubTask.id from DependencyExecutionGraph
+  category        String // SubTaskCategory enum value
+  description     String    @db.Text
+  targetFiles     Json // Array of file paths
+  manifestId      String? // Links to AgentManifest if generated
+  status          String // "pending" | "in_progress" | "completed" | "failed"
+  executionOrder  Int // Position in topological sort
+  startedAt       DateTime?
+  completedAt     DateTime?
+  errorLog        String?   @db.Text
+
+  decomposition TaskDecomposition @relation(fields: [decompositionId], references: [id], onDelete: Cascade)
+
+  @@index([decompositionId, executionOrder])
+  @@index([status])
+  @@map("sub_task_executions")
 }

@@ -1,0 +1,13 @@
+﻿{
+  "watch": ["src"],
+  "ext": "ts,json",
+  "ignore": [
+    ".anka-cache/**/*",
+    "benchmarks/**/*",
+    "dist/**/*",
+    "node_modules/**/*",
+    ".git/**/*",
+    "*.log"
+  ],
+  "exec": "ts-node src/index.ts"
+}

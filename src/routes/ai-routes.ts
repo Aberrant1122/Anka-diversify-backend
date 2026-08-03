@@ -29,7 +29,14 @@ router.post('/projects/:projectId/sprints/generate', aiController.generateSprint
 
 // Coding Agent Routes
 router.post('/projects/:projectId/agent/run', aiController.runAgent.bind(aiController));
+router.post('/projects/:projectId/agent/stream', aiController.streamAgent.bind(aiController));
 router.post('/projects/:projectId/agent/push', aiController.pushAgentChanges.bind(aiController));
 router.post('/projects/:projectId/tasks/suggest-order', aiController.suggestTaskOrder.bind(aiController));
+
+// Manifest & Task Decomposition Endpoints
+router.post('/projects/:projectId/agent/manifest', aiController.generateManifest.bind(aiController));
+router.post('/agent/manifest/:id/approve', aiController.approveManifest.bind(aiController));
+router.post('/agent/manifest/:id/reject', aiController.rejectManifest.bind(aiController));
+router.get('/agent/decomposition/:sessionId', aiController.getDecomposition.bind(aiController));
 
 export default router;

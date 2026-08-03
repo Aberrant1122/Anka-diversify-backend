@@ -1,0 +1,11 @@
+{
+  "runDate": "2026-07-30T20:18:03.128Z",
+  "metrics": {
+    "surgicalRepairMs": 0.6106000000000051,
+    "surgicalPatchSizePct": 14.29,
+    "fullRewritePatchSizePct": 100,
+    "patchReductionPct": "85.7%",
+    "speedupFactor": "5896x",
+    "formattingPreservedPct": 100
+  }
+}

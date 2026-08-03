@@ -126,6 +126,24 @@ export class PhaseService {
     return this.getPhaseStates(projectId);
   }
 
+  // Reject a phase — records the rejection and resets the phase to not_started.
+  async rejectPhase(
+    projectId: string,
+    phase: string,
+    approvedById: string,
+    comments?: string,
+  ) {
+    await prisma.phaseApproval.create({
+      data: { projectId, phase, approvedById, decision: "rejected", comments },
+    });
+
+    return prisma.projectPhaseState.upsert({
+      where: { projectId_phase: { projectId, phase } },
+      update: { status: "not_started", notes: comments, startedAt: null, completedAt: null },
+      create: { projectId, phase, status: "not_started", notes: comments },
+    });
+  }
+
   // Send a phase back for rework — records the decision and reopens the phase.
   async requestChanges(
     projectId: string,

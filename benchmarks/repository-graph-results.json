@@ -1,0 +1,18 @@
+{
+  "runDate": "2026-07-30T20:20:59.550Z",
+  "codebaseSize": 100,
+  "graphStats": {
+    "nodes": 235,
+    "edges": 724,
+    "buildLatencyMs": 8.636499999999984,
+    "incrementalReindexMs": 1.6461999999999932,
+    "storageSizeKB": 189.2
+  },
+  "queryLatenciesMs": {
+    "whoCalls": 0.002348700000000008,
+    "whatBreaksIfRenamed": 0.003926400000000001,
+    "whichRoutesUseService": 0.012299999999999983,
+    "whereIsComponentRendered": 0.0013505999999999859,
+    "whichAPIsTouchModel": 0.0061806000000000265
+  }
+}

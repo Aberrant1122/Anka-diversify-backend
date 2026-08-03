@@ -878,5 +878,129 @@ export class ProjectController {
       res.status(500).json({ success: false, error: "Failed to fetch pull requests from GitHub" });
     }
   }
+
+  // ── Project Rules ─────────────────────────────────────────────────────────
+
+  async createProjectRule(req: Request, res: Response) {
+    try {
+      const { title, description, priority } = req.body;
+      if (!title) {
+        return res.status(400).json({ success: false, error: "title is required" });
+      }
+      const rule = await projectService.createProjectRule({
+        projectId: param(req, "id"),
+        title,
+        description: description || "",
+        priority,
+      });
+      res.status(201).json({ success: true, data: rule });
+    } catch (error) {
+      console.error("Error creating project rule:", error);
+      res.status(500).json({ success: false, error: "Failed to create rule" });
+    }
+  }
+
+  async updateProjectRule(req: Request, res: Response) {
+    try {
+      const rule = await projectService.updateProjectRule(param(req, "ruleId"), req.body);
+      if (!rule) {
+        return res.status(404).json({ success: false, error: "Rule not found" });
+      }
+      res.json({ success: true, data: rule });
+    } catch (error) {
+      console.error("Error updating project rule:", error);
+      res.status(500).json({ success: false, error: "Failed to update rule" });
+    }
+  }
+
+  async deleteProjectRule(req: Request, res: Response) {
+    try {
+      const deleted = await projectService.deleteProjectRule(param(req, "ruleId"));
+      if (!deleted) {
+        return res.status(404).json({ success: false, error: "Rule not found" });
+      }
+      res.json({ success: true, message: "Rule deleted" });
+    } catch (error) {
+      console.error("Error deleting project rule:", error);
+      res.status(500).json({ success: false, error: "Failed to delete rule" });
+    }
+  }
+
+  // ── Project Decisions ──────────────────────────────────────────────────────
+
+  async createProjectDecision(req: Request, res: Response) {
+    try {
+      const { title, description, impact, artifactId } = req.body;
+      if (!title || !description) {
+        return res.status(400).json({ success: false, error: "title and description are required" });
+      }
+      const decision = await projectService.createProjectDecision({
+        projectId: param(req, "id"),
+        title,
+        description,
+        impact,
+        madeBy: getUserName(req),
+        artifactId,
+      });
+      res.status(201).json({ success: true, data: decision });
+    } catch (error) {
+      console.error("Error creating project decision:", error);
+      res.status(500).json({ success: false, error: "Failed to create decision" });
+    }
+  }
+
+  async updateProjectDecision(req: Request, res: Response) {
+    try {
+      const decision = await projectService.updateProjectDecision(param(req, "decisionId"), req.body);
+      if (!decision) {
+        return res.status(404).json({ success: false, error: "Decision not found" });
+      }
+      res.json({ success: true, data: decision });
+    } catch (error) {
+      console.error("Error updating project decision:", error);
+      res.status(500).json({ success: false, error: "Failed to update decision" });
+    }
+  }
+
+  async deleteProjectDecision(req: Request, res: Response) {
+    try {
+      const deleted = await projectService.deleteProjectDecision(param(req, "decisionId"));
+      if (!deleted) {
+        return res.status(404).json({ success: false, error: "Decision not found" });
+      }
+      res.json({ success: true, message: "Decision deleted" });
+    } catch (error) {
+      console.error("Error deleting project decision:", error);
+      res.status(500).json({ success: false, error: "Failed to delete decision" });
+    }
+  }
+
+  // ── Memory Summary ─────────────────────────────────────────────────────────
+
+  async saveMemorySummary(req: Request, res: Response) {
+    try {
+      const { summary } = req.body;
+      if (!summary) {
+        return res.status(400).json({ success: false, error: "summary is required" });
+      }
+      const result = await projectService.saveMemorySummary(param(req, "id"), summary);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error("Error saving memory summary:", error);
+      res.status(500).json({ success: false, error: "Failed to save memory summary" });
+    }
+  }
+
+  // ── Task Stats ─────────────────────────────────────────────────────────
+
+  async getTaskStats(req: Request, res: Response) {
+    try {
+      const stats = await projectService.getTaskStats(param(req, "id"));
+      res.json({ success: true, data: stats });
+    } catch (error) {
+      console.error("Error fetching task stats:", error);
+      res.status(500).json({ success: false, error: "Failed to fetch task stats" });
+    }
+  }
 }
 

@@ -1,0 +1,61 @@
+{
+  "runDate": "2026-07-30T19:56:15.445Z",
+  "repositoryFileCount": 102,
+  "indexingLatencyMs": 7.590799999999973,
+  "iterationsPerTool": 1000,
+  "toolMetrics": [
+    {
+      "tool": "findService (normalized)",
+      "totalTimeMs": 437.0312,
+      "avgLatencyMs": 0.4370312,
+      "opsPerSec": 2288
+    },
+    {
+      "tool": "findComponent (normalized)",
+      "totalTimeMs": 362.7409999999999,
+      "avgLatencyMs": 0.36274099999999987,
+      "opsPerSec": 2757
+    },
+    {
+      "tool": "findRoute (App Router)",
+      "totalTimeMs": 213.39700000000016,
+      "avgLatencyMs": 0.21339700000000017,
+      "opsPerSec": 4686
+    },
+    {
+      "tool": "findAPI (Express pattern)",
+      "totalTimeMs": 7.747100000000046,
+      "avgLatencyMs": 0.007747100000000046,
+      "opsPerSec": 129081
+    },
+    {
+      "tool": "findModel (Prisma schema)",
+      "totalTimeMs": 208.4094,
+      "avgLatencyMs": 0.2084094,
+      "opsPerSec": 4798
+    },
+    {
+      "tool": "findReferences (symbol)",
+      "totalTimeMs": 446.8653999999999,
+      "avgLatencyMs": 0.4468653999999999,
+      "opsPerSec": 2238
+    },
+    {
+      "tool": "searchArchitecture (layer)",
+      "totalTimeMs": 177.80639999999994,
+      "avgLatencyMs": 0.17780639999999995,
+      "opsPerSec": 5624
+    },
+    {
+      "tool": "semanticSearch (token overlap)",
+      "totalTimeMs": 1980.0434,
+      "avgLatencyMs": 1.9800434,
+      "opsPerSec": 505
+    }
+  ],
+  "comparison": {
+    "linearScanningAvgUs": 32.77590000000055,
+    "upgradedMultiGraphAvgUs": 437.0312,
+    "speedupMultiplier": "0.1x"
+  }
+}

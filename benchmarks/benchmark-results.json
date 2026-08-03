@@ -1,0 +1,252 @@
+{
+  "runAt": "2026-07-30T19:41:23.617Z",
+  "totalTasks": 5,
+  "completedTasks": 5,
+  "skippedTasks": 0,
+  "results": [
+    {
+      "taskId": "api-001",
+      "taskCategory": "FEATURE_ADD",
+      "prompt": "Add a new GET /api/projects/:projectId/stats endpoint. It should return: totalTasks, completedTasks, inProgressTasks, overdueTasks (tasks with dueDate < now and status != \"done\"), and sprintCount. Use Prisma to query the database. Wire it into the project routes file.",
+      "status": "PARTIAL",
+      "durationMs": 126315,
+      "agentResponse": {
+        "intent": "FEATURE_ADD",
+        "confidence": 0,
+        "filesChanged": 2,
+        "filesAdded": 0,
+        "filesModified": 2,
+        "filesDeleted": 0,
+        "needsClarification": false,
+        "agentClaimedBuildSuccess": false
+      },
+      "validation": {
+        "npmInstallSuccess": false,
+        "npmInstallError": "Command failed: npm install --prefer-offline --no-audit 2>&1\n",
+        "tscSuccess": true,
+        "tscErrors": "",
+        "buildSuccess": false,
+        "buildErrors": "Command failed: npm run build 2>&1\n",
+        "eslintSuccess": true,
+        "eslintErrors": "",
+        "testSuccess": true,
+        "testErrors": ""
+      },
+      "hallucinationDetected": true,
+      "hallucinationDetails": [
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a StatsService\"",
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a StatsService\""
+      ],
+      "tokenUsage": {
+        "promptTokens": 8000,
+        "completionTokens": 2400,
+        "totalTokens": 10400,
+        "estimatedCostUSD": 0.076
+      },
+      "compileErrors": [],
+      "runtimeErrors": [],
+      "finalStatus": "Build: ✗ | TSC: ✓ | 0 compile errors",
+      "sandboxPath": "C:\\Users\\PCC\\Desktop\\anka diversity\\anka-os-backend\\benchmarks\\scratch\\benchmark-workspaces\\run_1785439529803_api-001"
+    },
+    {
+      "taskId": "bugfix-001",
+      "taskCategory": "BUG_FIX",
+      "prompt": "Fix a bug: when creating a sprint, the API allows endDate to be before startDate. Add validation in the sprint creation endpoint to reject requests where endDate is earlier than or equal to startDate. Return a 400 error with message \"End date must be after start date\".",
+      "status": "PARTIAL",
+      "durationMs": 107470,
+      "agentResponse": {
+        "intent": "BUG_FIX",
+        "confidence": 0,
+        "filesChanged": 3,
+        "filesAdded": 3,
+        "filesModified": 0,
+        "filesDeleted": 0,
+        "needsClarification": false,
+        "agentClaimedBuildSuccess": false
+      },
+      "validation": {
+        "npmInstallSuccess": true,
+        "npmInstallError": "",
+        "tscSuccess": true,
+        "tscErrors": "",
+        "buildSuccess": true,
+        "buildErrors": "\n> anka-os-backend@1.0.0 build\n> prisma generate && tsc\n\nEnvironment variables loaded from .env\nPrisma schema loaded from prisma\\schema.prisma\n\n✔ Generated Prisma Client (v5.22.0) to .\\node_modules\\@prisma\\client in 318ms\n\nStart by importing your Prisma Client (See: https://pris.ly/d/importing-client)\n\nTip: Want to turn off tips and other hints? https://pris.ly/tip-4-nohints\n\n┌─────────────────────────────────────────────────────────┐\n│  Update available 5.22.0 -> 7.9.1                       │\n│                                                         │\n│  This is a major update - please follow the guide at    │\n│  https://pris.ly/d/major-version-upgrade                │\n│                                                         │\n│  Run the following to update                            │\n│    npm i --save-dev prisma@latest                       │\n│    npm i @prisma/client@latest                          │\n└─────────────────────────────────────────────────────────┘\n",
+        "eslintSuccess": true,
+        "eslintErrors": "",
+        "testSuccess": true,
+        "testErrors": ""
+      },
+      "hallucinationDetected": true,
+      "hallucinationDetails": [
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a DateValidationService\"",
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a DateValidationService\"",
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a DateValidationService\""
+      ],
+      "tokenUsage": {
+        "promptTokens": 8000,
+        "completionTokens": 3600,
+        "totalTokens": 11600,
+        "estimatedCostUSD": 0.094
+      },
+      "compileErrors": [],
+      "runtimeErrors": [],
+      "finalStatus": "Build passed but hallucinations detected",
+      "sandboxPath": "C:\\Users\\PCC\\Desktop\\anka diversity\\anka-os-backend\\benchmarks\\scratch\\benchmark-workspaces\\run_1785439529803_bugfix-001"
+    },
+    {
+      "taskId": "feature-001",
+      "taskCategory": "FEATURE_ADD",
+      "prompt": "Add a \"Mark All Tasks Complete\" button to the project tasks page. When clicked, it should set all tasks in the current project to status \"done\". The button should be in the top-right of the task list header. Wire it to a new PATCH /api/projects/:projectId/tasks/complete-all backend endpoint.",
+      "status": "PARTIAL",
+      "durationMs": 114642,
+      "agentResponse": {
+        "intent": "FEATURE_ADD",
+        "confidence": 0,
+        "filesChanged": 2,
+        "filesAdded": 0,
+        "filesModified": 2,
+        "filesDeleted": 0,
+        "needsClarification": false,
+        "agentClaimedBuildSuccess": false
+      },
+      "validation": {
+        "npmInstallSuccess": true,
+        "npmInstallError": "",
+        "tscSuccess": true,
+        "tscErrors": "",
+        "buildSuccess": false,
+        "buildErrors": "Command failed: npm run build 2>&1\n",
+        "eslintSuccess": true,
+        "eslintErrors": "",
+        "testSuccess": true,
+        "testErrors": ""
+      },
+      "hallucinationDetected": false,
+      "hallucinationDetails": [],
+      "tokenUsage": {
+        "promptTokens": 8000,
+        "completionTokens": 2400,
+        "totalTokens": 10400,
+        "estimatedCostUSD": 0.076
+      },
+      "compileErrors": [],
+      "runtimeErrors": [],
+      "finalStatus": "Build: ✗ | TSC: ✓ | 0 compile errors",
+      "sandboxPath": "C:\\Users\\PCC\\Desktop\\anka diversity\\anka-os-backend\\benchmarks\\scratch\\benchmark-workspaces\\run_1785439529803_feature-001"
+    },
+    {
+      "taskId": "feature-002",
+      "taskCategory": "FEATURE_ADD",
+      "prompt": "Add a progress bar to each project card on the main dashboard. It should display the project's progress field (0-100). Use a visual bar, not just a number. Style it to match the existing card design.",
+      "status": "PARTIAL",
+      "durationMs": 120383,
+      "agentResponse": {
+        "intent": "FEATURE_ADD",
+        "confidence": 0,
+        "filesChanged": 5,
+        "filesAdded": 3,
+        "filesModified": 2,
+        "filesDeleted": 0,
+        "needsClarification": false,
+        "agentClaimedBuildSuccess": false
+      },
+      "validation": {
+        "npmInstallSuccess": true,
+        "npmInstallError": "",
+        "tscSuccess": true,
+        "tscErrors": "",
+        "buildSuccess": false,
+        "buildErrors": "Command failed: npm run build 2>&1\n",
+        "eslintSuccess": true,
+        "eslintErrors": "",
+        "testSuccess": true,
+        "testErrors": ""
+      },
+      "hallucinationDetected": true,
+      "hallucinationDetails": [
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a ProgressService\"",
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a ProgressService\"",
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a ProgressService\"",
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a ProgressService\"",
+        "Possible hallucination: Agent used \"a\" which the task spec warns against: \"Creating a ProgressService\""
+      ],
+      "tokenUsage": {
+        "promptTokens": 8000,
+        "completionTokens": 6000,
+        "totalTokens": 14000,
+        "estimatedCostUSD": 0.13
+      },
+      "compileErrors": [],
+      "runtimeErrors": [],
+      "finalStatus": "Build: ✗ | TSC: ✓ | 0 compile errors",
+      "sandboxPath": "C:\\Users\\PCC\\Desktop\\anka diversity\\anka-os-backend\\benchmarks\\scratch\\benchmark-workspaces\\run_1785439529803_feature-002"
+    },
+    {
+      "taskId": "refactor-001",
+      "taskCategory": "REFACTOR",
+      "prompt": "Refactor the sprint creation and update logic in the sprint service. Extract all date-related validation into a dedicated private validateSprintDates() method. This method should be called from both create and update operations. Do not change any existing behavior.",
+      "status": "PARTIAL",
+      "durationMs": 103888,
+      "agentResponse": {
+        "intent": "REFACTOR",
+        "confidence": 0,
+        "filesChanged": 6,
+        "filesAdded": 4,
+        "filesModified": 2,
+        "filesDeleted": 0,
+        "needsClarification": false,
+        "agentClaimedBuildSuccess": false
+      },
+      "validation": {
+        "npmInstallSuccess": true,
+        "npmInstallError": "",
+        "tscSuccess": false,
+        "tscErrors": "Command failed: npx tsc --noEmit 2>&1\n",
+        "buildSuccess": false,
+        "buildErrors": "Command failed: npm run build 2>&1\n",
+        "eslintSuccess": true,
+        "eslintErrors": "",
+        "testSuccess": true,
+        "testErrors": ""
+      },
+      "hallucinationDetected": false,
+      "hallucinationDetails": [],
+      "tokenUsage": {
+        "promptTokens": 8000,
+        "completionTokens": 7200,
+        "totalTokens": 15200,
+        "estimatedCostUSD": 0.148
+      },
+      "compileErrors": [],
+      "runtimeErrors": [],
+      "finalStatus": "Build: ✗ | TSC: ✗ | 0 compile errors",
+      "sandboxPath": "C:\\Users\\PCC\\Desktop\\anka diversity\\anka-os-backend\\benchmarks\\scratch\\benchmark-workspaces\\run_1785439529803_refactor-001"
+    }
+  ],
+  "summary": {
+    "buildSuccessRate": 20,
+    "agentSuccessRate": 100,
+    "hallucinationRate": 60,
+    "avgDurationMs": 114539.6,
+    "totalTokens": 61600,
+    "totalEstimatedCostUSD": 0.524,
+    "avgConfidence": 0,
+    "taskBreakdown": {
+      "FEATURE_ADD": {
+        "total": 3,
+        "success": 0,
+        "failed": 0
+      },
+      "BUG_FIX": {
+        "total": 1,
+        "success": 0,
+        "failed": 0
+      },
+      "REFACTOR": {
+        "total": 1,
+        "success": 0,
+        "failed": 0
+      }
+    }
+  }
+}

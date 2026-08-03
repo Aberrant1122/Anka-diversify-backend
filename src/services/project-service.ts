@@ -411,4 +411,138 @@ export class ProjectService {
     await prisma.projectFile.delete({ where: { id: fileId } });
     return file.s3Key || null; // return key so controller can delete from S3
   }
+
+  // ── Project Rules ──────────────────────────────────────────────────────────
+
+  async createProjectRule(data: {
+    projectId: string;
+    title: string;
+    description: string;
+    priority?: string;
+  }) {
+    return prisma.projectRule.create({ data });
+  }
+
+  async updateProjectRule(ruleId: string, data: {
+    title?: string;
+    description?: string;
+    priority?: string;
+  }) {
+    const rule = await prisma.projectRule.findUnique({ where: { id: ruleId } });
+    if (!rule) return null;
+    return prisma.projectRule.update({
+      where: { id: ruleId },
+      data: {
+        ...(data.title !== undefined && { title: data.title }),
+        ...(data.description !== undefined && { description: data.description }),
+        ...(data.priority !== undefined && { priority: data.priority }),
+      },
+    });
+  }
+
+  async deleteProjectRule(ruleId: string) {
+    const rule = await prisma.projectRule.findUnique({ where: { id: ruleId } });
+    if (!rule) return false;
+    await prisma.projectRule.delete({ where: { id: ruleId } });
+    return true;
+  }
+
+  // ── Project Decisions ──────────────────────────────────────────────────────
+
+  async createProjectDecision(data: {
+    projectId: string;
+    title: string;
+    description: string;
+    impact?: string;
+    madeBy?: string;
+    artifactId?: string;
+  }) {
+    return prisma.projectDecision.create({ data });
+  }
+
+  async updateProjectDecision(decisionId: string, data: {
+    title?: string;
+    description?: string;
+    impact?: string;
+  }) {
+    const decision = await prisma.projectDecision.findUnique({ where: { id: decisionId } });
+    if (!decision) return null;
+    return prisma.projectDecision.update({
+      where: { id: decisionId },
+      data: {
+        ...(data.title !== undefined && { title: data.title }),
+        ...(data.description !== undefined && { description: data.description }),
+        ...(data.impact !== undefined && { impact: data.impact }),
+      },
+    });
+  }
+
+  async deleteProjectDecision(decisionId: string) {
+    const decision = await prisma.projectDecision.findUnique({ where: { id: decisionId } });
+    if (!decision) return false;
+    await prisma.projectDecision.delete({ where: { id: decisionId } });
+    return true;
+  }
+
+  // ── Memory Summary ─────────────────────────────────────────────────────────
+
+  async saveMemorySummary(projectId: string, summary: string) {
+    const existing = await prisma.projectMemorySummary.findUnique({
+      where: { projectId },
+    });
+    if (existing) {
+      return prisma.projectMemorySummary.update({
+        where: { projectId },
+        data: { summary, version: existing.version + 1, lastUpdated: new Date() },
+      });
+    }
+    return prisma.projectMemorySummary.create({
+      data: { projectId, summary, version: 1 },
+    });
+  }
+
+  // ── Task Stats ─────────────────────────────────────────────────────────────
+
+  async getTaskStats(projectId: string) {
+    const tasks = await prisma.projectTask.findMany({
+      where: { projectId },
+      select: { status: true, priority: true, dueDate: true },
+    });
+
+    const now = new Date();
+    const totalTasks = tasks.length;
+    let completedTasks = 0;
+    let inProgressTasks = 0;
+    let todoTasks = 0;
+    let reviewTasks = 0;
+    let overdueTasks = 0;
+    const priorityCounts: Record<string, number> = {};
+    const statusCounts: Record<string, number> = {};
+
+    for (const t of tasks) {
+      statusCounts[t.status] = (statusCounts[t.status] || 0) + 1;
+      priorityCounts[t.priority] = (priorityCounts[t.priority] || 0) + 1;
+
+      if (t.status === "done") completedTasks++;
+      else if (t.status === "in_progress" || t.status === "in-progress") inProgressTasks++;
+      else if (t.status === "todo") todoTasks++;
+      else if (t.status === "review") reviewTasks++;
+
+      if (t.dueDate && t.status !== "done" && new Date(t.dueDate) < now) {
+        overdueTasks++;
+      }
+    }
+
+    return {
+      totalTasks,
+      completedTasks,
+      inProgressTasks,
+      todoTasks,
+      reviewTasks,
+      overdueTasks,
+      completionRate: totalTasks > 0 ? parseFloat(((completedTasks / totalTasks) * 100).toFixed(1)) : 0,
+      priorityCounts,
+      statusCounts,
+    };
+  }
 }

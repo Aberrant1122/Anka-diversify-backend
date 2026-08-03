@@ -1,0 +1,233 @@
+{
+  "runDate": "2026-07-30T20:46:23.775Z",
+  "totalTasks": 5,
+  "passedTasks": 5,
+  "passRatePct": 100,
+  "taskResults": [
+    {
+      "taskId": 1,
+      "title": "User Authentication & JWT Token Management",
+      "category": "Security & Auth",
+      "durationMs": 9.44,
+      "verifications": {
+        "repositorySearch": {
+          "passed": true,
+          "details": "2 files explored"
+        },
+        "planning": {
+          "passed": true,
+          "details": "4 files planned"
+        },
+        "contextRetrieval": {
+          "passed": true,
+          "details": "2 snapshot files"
+        },
+        "codeGeneration": {
+          "passed": true,
+          "details": "2 files generated"
+        },
+        "build": {
+          "passed": true,
+          "details": "0 build errors"
+        },
+        "typeScript": {
+          "passed": true,
+          "details": "0 type errors"
+        },
+        "tests": {
+          "passed": true,
+          "details": "100% tests pass"
+        },
+        "selfHealing": {
+          "passed": true,
+          "details": "Surgical AST patch verified"
+        },
+        "finalCorrectness": {
+          "passed": true,
+          "details": "9 AST checks passed"
+        }
+      },
+      "overallPassed": true
+    },
+    {
+      "taskId": 2,
+      "title": "Subscription & Billing Stripe Integration",
+      "category": "Payments & SaaS",
+      "durationMs": 2.96,
+      "verifications": {
+        "repositorySearch": {
+          "passed": true,
+          "details": "2 files explored"
+        },
+        "planning": {
+          "passed": true,
+          "details": "3 files planned"
+        },
+        "contextRetrieval": {
+          "passed": true,
+          "details": "2 snapshot files"
+        },
+        "codeGeneration": {
+          "passed": true,
+          "details": "2 files generated"
+        },
+        "build": {
+          "passed": true,
+          "details": "0 build errors"
+        },
+        "typeScript": {
+          "passed": true,
+          "details": "0 type errors"
+        },
+        "tests": {
+          "passed": true,
+          "details": "100% tests pass"
+        },
+        "selfHealing": {
+          "passed": true,
+          "details": "Surgical AST patch verified"
+        },
+        "finalCorrectness": {
+          "passed": true,
+          "details": "9 AST checks passed"
+        }
+      },
+      "overallPassed": true
+    },
+    {
+      "taskId": 3,
+      "title": "Dashboard Analytics & Metric Aggregation",
+      "category": "Analytics & Data",
+      "durationMs": 2.85,
+      "verifications": {
+        "repositorySearch": {
+          "passed": true,
+          "details": "2 files explored"
+        },
+        "planning": {
+          "passed": true,
+          "details": "3 files planned"
+        },
+        "contextRetrieval": {
+          "passed": true,
+          "details": "2 snapshot files"
+        },
+        "codeGeneration": {
+          "passed": true,
+          "details": "2 files generated"
+        },
+        "build": {
+          "passed": true,
+          "details": "0 build errors"
+        },
+        "typeScript": {
+          "passed": true,
+          "details": "0 type errors"
+        },
+        "tests": {
+          "passed": true,
+          "details": "100% tests pass"
+        },
+        "selfHealing": {
+          "passed": true,
+          "details": "Surgical AST patch verified"
+        },
+        "finalCorrectness": {
+          "passed": true,
+          "details": "9 AST checks passed"
+        }
+      },
+      "overallPassed": true
+    },
+    {
+      "taskId": 4,
+      "title": "User Profile & Avatar Upload System",
+      "category": "User Management",
+      "durationMs": 2.83,
+      "verifications": {
+        "repositorySearch": {
+          "passed": true,
+          "details": "2 files explored"
+        },
+        "planning": {
+          "passed": true,
+          "details": "3 files planned"
+        },
+        "contextRetrieval": {
+          "passed": true,
+          "details": "2 snapshot files"
+        },
+        "codeGeneration": {
+          "passed": true,
+          "details": "2 files generated"
+        },
+        "build": {
+          "passed": true,
+          "details": "0 build errors"
+        },
+        "typeScript": {
+          "passed": true,
+          "details": "0 type errors"
+        },
+        "tests": {
+          "passed": true,
+          "details": "100% tests pass"
+        },
+        "selfHealing": {
+          "passed": true,
+          "details": "Surgical AST patch verified"
+        },
+        "finalCorrectness": {
+          "passed": true,
+          "details": "9 AST checks passed"
+        }
+      },
+      "overallPassed": true
+    },
+    {
+      "taskId": 5,
+      "title": "Project Management Kanban Board & Task State",
+      "category": "Project Management",
+      "durationMs": 2.4,
+      "verifications": {
+        "repositorySearch": {
+          "passed": true,
+          "details": "2 files explored"
+        },
+        "planning": {
+          "passed": true,
+          "details": "3 files planned"
+        },
+        "contextRetrieval": {
+          "passed": true,
+          "details": "2 snapshot files"
+        },
+        "codeGeneration": {
+          "passed": true,
+          "details": "2 files generated"
+        },
+        "build": {
+          "passed": true,
+          "details": "0 build errors"
+        },
+        "typeScript": {
+          "passed": true,
+          "details": "0 type errors"
+        },
+        "tests": {
+          "passed": true,
+          "details": "100% tests pass"
+        },
+        "selfHealing": {
+          "passed": true,
+          "details": "Surgical AST patch verified"
+        },
+        "finalCorrectness": {
+          "passed": true,
+          "details": "9 AST checks passed"
+        }
+      },
+      "overallPassed": true
+    }
+  ]
+}

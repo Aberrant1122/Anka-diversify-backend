@@ -63,6 +63,24 @@ export class PhaseController {
     }
   }
 
+  async rejectPhase(req: Request, res: Response) {
+    try {
+      const userId = getUserId(req);
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+
+      const state = await phaseService.rejectPhase(
+        param(req, "projectId"),
+        param(req, "phase"),
+        userId,
+        req.body?.comments,
+      );
+      res.json({ success: true, data: state });
+    } catch (error: any) {
+      console.error("Error rejecting phase:", error);
+      res.status(500).json({ error: "Internal server error", message: error?.message || "Failed to reject phase" });
+    }
+  }
+
   async requestChanges(req: Request, res: Response) {
     try {
       const userId = getUserId(req);

@@ -42,6 +42,7 @@ router.post('/:id/apply-local', projectController.applyLocalChanges.bind(project
 
 // Project tasks
 router.get('/:id/tasks', projectController.getProjectTasks.bind(projectController));
+router.get('/:id/tasks/stats', projectController.getTaskStats.bind(projectController));
 router.post('/:id/tasks', projectController.createTask.bind(projectController));
 router.put('/:id/tasks/:taskId', projectController.updateTask.bind(projectController));
 router.delete('/:id/tasks/:taskId', projectController.deleteTask.bind(projectController));
@@ -93,6 +94,19 @@ router.get('/:id/git/pulls', projectController.getGitPulls.bind(projectControlle
 
 // S3 Configuration Check
 router.get('/config/s3', projectController.checkS3Config.bind(projectController));
+
+// Project rules
+router.post('/:id/rules', projectController.createProjectRule.bind(projectController));
+router.put('/:id/rules/:ruleId', projectController.updateProjectRule.bind(projectController));
+router.delete('/:id/rules/:ruleId', projectController.deleteProjectRule.bind(projectController));
+
+// Project decisions
+router.post('/:id/decisions', projectController.createProjectDecision.bind(projectController));
+router.put('/:id/decisions/:decisionId', projectController.updateProjectDecision.bind(projectController));
+router.delete('/:id/decisions/:decisionId', projectController.deleteProjectDecision.bind(projectController));
+
+// Memory summary
+router.put('/:id/memory-summary', projectController.saveMemorySummary.bind(projectController));
 
 // Sprints
 router.use('/:projectId/sprints', sprintRoutes);

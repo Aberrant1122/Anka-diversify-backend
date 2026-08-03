@@ -1,0 +1,12 @@
+{
+  "runDate": "2026-07-30T20:12:15.345Z",
+  "iterations": 1000,
+  "metrics": {
+    "avgLatencyMs": 0.07892959999999996,
+    "opsPerSec": 12670,
+    "promptValidatorAvgMs": 3850,
+    "speedupFactor": "48778x",
+    "costPerCall": "$0.00",
+    "determinismPct": 100
+  }
+}

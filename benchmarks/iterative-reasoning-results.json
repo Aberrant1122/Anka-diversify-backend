@@ -1,0 +1,12 @@
+{
+  "runDate": "2026-07-30T20:26:41.689Z",
+  "metrics": {
+    "totalTimeMs": 3.453399999999988,
+    "roundsExecuted": 1,
+    "initialConfidencePct": 20,
+    "finalConfidencePct": 90,
+    "symbolsDiscovered": 4,
+    "filesExplored": 5,
+    "deduplicationPct": 100
+  }
+}

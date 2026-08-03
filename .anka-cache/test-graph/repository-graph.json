@@ -1,0 +1,372 @@
+{
+  "version": "1.0.0",
+  "lastUpdated": "2026-07-30T20:30:47.460Z",
+  "fileHashes": {
+    "src/services/AuthService.ts": "efbdf97c8b25cd983192d935150260f49d6556e8550cc5e897f27b5a214e762b",
+    "src/controllers/AuthController.ts": "62a24c72c13526e75e0f83de4735aa0c3068080b2c99cd0e9105bd85c73dab8a",
+    "src/components/Header.tsx": "62784738725c7bdfaa886efbc6f7e30950ddfa69e14214b06de9adeda2bee402",
+    "src/components/UserAvatar.tsx": "48f688fb1c6fd9bb41e77a02dafdfc7b6f0a1652e063c29cde28b2bb68f90e43",
+    "app/dashboard/page.tsx": "b6993aed42f935cd8ed5157470939ef0a92df3ef258d18b8c247980d366bd676",
+    "src/routes/api-routes.ts": "0983e0a0b661552aeeed9ce4e7d4f1ba71fca12aef04df8581b8ba78f0de8e1f",
+    "prisma/schema.prisma": "6e63263eba0c8915b8d4eef8c3b8724915bb5685ac3502606217afcaf301054f"
+  },
+  "nodes": [
+    {
+      "id": "repo:test-repo",
+      "type": "repository",
+      "name": "test-repo"
+    },
+    {
+      "id": "file:src/services/AuthService.ts",
+      "type": "file",
+      "name": "AuthService.ts",
+      "filePath": "src/services/AuthService.ts"
+    },
+    {
+      "id": "service:AuthService",
+      "type": "service",
+      "name": "AuthService",
+      "filePath": "src/services/AuthService.ts",
+      "line": 1
+    },
+    {
+      "id": "file:src/controllers/AuthController.ts",
+      "type": "file",
+      "name": "AuthController.ts",
+      "filePath": "src/controllers/AuthController.ts"
+    },
+    {
+      "id": "controller:AuthController",
+      "type": "controller",
+      "name": "AuthController",
+      "filePath": "src/controllers/AuthController.ts",
+      "line": 2
+    },
+    {
+      "id": "file:src/components/Header.tsx",
+      "type": "file",
+      "name": "Header.tsx",
+      "filePath": "src/components/Header.tsx"
+    },
+    {
+      "id": "function:Header",
+      "type": "function",
+      "name": "Header",
+      "filePath": "src/components/Header.tsx",
+      "line": 3
+    },
+    {
+      "id": "component:Header",
+      "type": "component",
+      "name": "Header"
+    },
+    {
+      "id": "component:UserAvatar",
+      "type": "component",
+      "name": "UserAvatar",
+      "filePath": "src/components/UserAvatar.tsx"
+    },
+    {
+      "id": "file:src/components/UserAvatar.tsx",
+      "type": "file",
+      "name": "UserAvatar.tsx",
+      "filePath": "src/components/UserAvatar.tsx"
+    },
+    {
+      "id": "function:UserAvatar",
+      "type": "function",
+      "name": "UserAvatar",
+      "filePath": "src/components/UserAvatar.tsx",
+      "line": 1
+    },
+    {
+      "id": "file:app/dashboard/page.tsx",
+      "type": "file",
+      "name": "page.tsx",
+      "filePath": "app/dashboard/page.tsx"
+    },
+    {
+      "id": "function:DashboardPage",
+      "type": "function",
+      "name": "DashboardPage",
+      "filePath": "app/dashboard/page.tsx",
+      "line": 2
+    },
+    {
+      "id": "route:/dashboard",
+      "type": "route",
+      "name": "/dashboard",
+      "filePath": "app/dashboard/page.tsx"
+    },
+    {
+      "id": "component:page",
+      "type": "component",
+      "name": "page",
+      "filePath": "app/dashboard/page.tsx"
+    },
+    {
+      "id": "file:src/routes/api-routes.ts",
+      "type": "file",
+      "name": "api-routes.ts",
+      "filePath": "src/routes/api-routes.ts"
+    },
+    {
+      "id": "api:POST /api/v1/login",
+      "type": "api",
+      "name": "POST /api/v1/login",
+      "filePath": "src/routes/api-routes.ts",
+      "metadata": {
+        "method": "POST",
+        "endpoint": "/api/v1/login"
+      }
+    },
+    {
+      "id": "file:prisma/schema.prisma",
+      "type": "file",
+      "name": "schema.prisma",
+      "filePath": "prisma/schema.prisma"
+    },
+    {
+      "id": "prisma_model:User",
+      "type": "prisma_model",
+      "name": "User",
+      "filePath": "prisma/schema.prisma"
+    }
+  ],
+  "edges": [
+    {
+      "id": "repo:test-repo--owns--file:src/services/AuthService.ts",
+      "sourceId": "repo:test-repo",
+      "targetId": "file:src/services/AuthService.ts",
+      "relation": "owns"
+    },
+    {
+      "id": "repo:test-repo--owns--file:src/controllers/AuthController.ts",
+      "sourceId": "repo:test-repo",
+      "targetId": "file:src/controllers/AuthController.ts",
+      "relation": "owns"
+    },
+    {
+      "id": "repo:test-repo--owns--file:src/components/Header.tsx",
+      "sourceId": "repo:test-repo",
+      "targetId": "file:src/components/Header.tsx",
+      "relation": "owns"
+    },
+    {
+      "id": "repo:test-repo--owns--file:src/components/UserAvatar.tsx",
+      "sourceId": "repo:test-repo",
+      "targetId": "file:src/components/UserAvatar.tsx",
+      "relation": "owns"
+    },
+    {
+      "id": "repo:test-repo--owns--file:app/dashboard/page.tsx",
+      "sourceId": "repo:test-repo",
+      "targetId": "file:app/dashboard/page.tsx",
+      "relation": "owns"
+    },
+    {
+      "id": "repo:test-repo--owns--file:src/routes/api-routes.ts",
+      "sourceId": "repo:test-repo",
+      "targetId": "file:src/routes/api-routes.ts",
+      "relation": "owns"
+    },
+    {
+      "id": "repo:test-repo--owns--file:prisma/schema.prisma",
+      "sourceId": "repo:test-repo",
+      "targetId": "file:prisma/schema.prisma",
+      "relation": "owns"
+    },
+    {
+      "id": "file:src/services/AuthService.ts--exports--service:AuthService",
+      "sourceId": "file:src/services/AuthService.ts",
+      "targetId": "service:AuthService",
+      "relation": "exports"
+    },
+    {
+      "id": "file:src/controllers/AuthController.ts--imports--file:src/services/AuthService.ts",
+      "sourceId": "file:src/controllers/AuthController.ts",
+      "targetId": "file:src/services/AuthService.ts",
+      "relation": "imports"
+    },
+    {
+      "id": "file:src/controllers/AuthController.ts--calls--symbol:AuthService",
+      "sourceId": "file:src/controllers/AuthController.ts",
+      "targetId": "symbol:AuthService",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/controllers/AuthController.ts--calls--service:AuthService",
+      "sourceId": "file:src/controllers/AuthController.ts",
+      "targetId": "service:AuthService",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/controllers/AuthController.ts--calls--function:AuthService",
+      "sourceId": "file:src/controllers/AuthController.ts",
+      "targetId": "function:AuthService",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/controllers/AuthController.ts--renders--component:AuthService",
+      "sourceId": "file:src/controllers/AuthController.ts",
+      "targetId": "component:AuthService",
+      "relation": "renders"
+    },
+    {
+      "id": "file:src/controllers/AuthController.ts--exports--controller:AuthController",
+      "sourceId": "file:src/controllers/AuthController.ts",
+      "targetId": "controller:AuthController",
+      "relation": "exports"
+    },
+    {
+      "id": "file:src/controllers/AuthController.ts--uses--prisma_model:User",
+      "sourceId": "file:src/controllers/AuthController.ts",
+      "targetId": "prisma_model:User",
+      "relation": "uses"
+    },
+    {
+      "id": "file:src/components/Header.tsx--imports--file:react",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "file:react",
+      "relation": "imports"
+    },
+    {
+      "id": "file:src/components/Header.tsx--calls--symbol:React",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "symbol:React",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/components/Header.tsx--calls--service:React",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "service:React",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/components/Header.tsx--calls--function:React",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "function:React",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/components/Header.tsx--renders--component:React",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "component:React",
+      "relation": "renders"
+    },
+    {
+      "id": "file:src/components/Header.tsx--imports--file:src/components/UserAvatar.tsx",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "file:src/components/UserAvatar.tsx",
+      "relation": "imports"
+    },
+    {
+      "id": "file:src/components/Header.tsx--calls--symbol:UserAvatar",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "symbol:UserAvatar",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/components/Header.tsx--calls--service:UserAvatar",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "service:UserAvatar",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/components/Header.tsx--calls--function:UserAvatar",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "function:UserAvatar",
+      "relation": "calls"
+    },
+    {
+      "id": "file:src/components/Header.tsx--renders--component:UserAvatar",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "component:UserAvatar",
+      "relation": "renders"
+    },
+    {
+      "id": "file:src/components/Header.tsx--exports--function:Header",
+      "sourceId": "file:src/components/Header.tsx",
+      "targetId": "function:Header",
+      "relation": "exports"
+    },
+    {
+      "id": "component:Header--renders--component:UserAvatar",
+      "sourceId": "component:Header",
+      "targetId": "component:UserAvatar",
+      "relation": "renders"
+    },
+    {
+      "id": "file:src/components/UserAvatar.tsx--exports--function:UserAvatar",
+      "sourceId": "file:src/components/UserAvatar.tsx",
+      "targetId": "function:UserAvatar",
+      "relation": "exports"
+    },
+    {
+      "id": "file:app/dashboard/page.tsx--imports--file:src/components/Header.tsx",
+      "sourceId": "file:app/dashboard/page.tsx",
+      "targetId": "file:src/components/Header.tsx",
+      "relation": "imports"
+    },
+    {
+      "id": "file:app/dashboard/page.tsx--calls--symbol:Header",
+      "sourceId": "file:app/dashboard/page.tsx",
+      "targetId": "symbol:Header",
+      "relation": "calls"
+    },
+    {
+      "id": "file:app/dashboard/page.tsx--calls--service:Header",
+      "sourceId": "file:app/dashboard/page.tsx",
+      "targetId": "service:Header",
+      "relation": "calls"
+    },
+    {
+      "id": "file:app/dashboard/page.tsx--calls--function:Header",
+      "sourceId": "file:app/dashboard/page.tsx",
+      "targetId": "function:Header",
+      "relation": "calls"
+    },
+    {
+      "id": "file:app/dashboard/page.tsx--renders--component:Header",
+      "sourceId": "file:app/dashboard/page.tsx",
+      "targetId": "component:Header",
+      "relation": "renders"
+    },
+    {
+      "id": "file:app/dashboard/page.tsx--exports--function:DashboardPage",
+      "sourceId": "file:app/dashboard/page.tsx",
+      "targetId": "function:DashboardPage",
+      "relation": "exports"
+    },
+    {
+      "id": "file:app/dashboard/page.tsx--owns--route:/dashboard",
+      "sourceId": "file:app/dashboard/page.tsx",
+      "targetId": "route:/dashboard",
+      "relation": "owns"
+    },
+    {
+      "id": "component:page--renders--component:Header",
+      "sourceId": "component:page",
+      "targetId": "component:Header",
+      "relation": "renders"
+    },
+    {
+      "id": "file:src/routes/api-routes.ts--owns--api:POST /api/v1/login",
+      "sourceId": "file:src/routes/api-routes.ts",
+      "targetId": "api:POST /api/v1/login",
+      "relation": "owns"
+    },
+    {
+      "id": "file:src/routes/api-routes.ts--uses--prisma_model:User",
+      "sourceId": "file:src/routes/api-routes.ts",
+      "targetId": "prisma_model:User",
+      "relation": "uses"
+    },
+    {
+      "id": "file:prisma/schema.prisma--owns--prisma_model:User",
+      "sourceId": "file:prisma/schema.prisma",
+      "targetId": "prisma_model:User",
+      "relation": "owns"
+    }
+  ]
+}

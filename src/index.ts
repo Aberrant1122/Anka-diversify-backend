@@ -39,9 +39,23 @@ app.use(express.urlencoded({ extended: true }));
 app.use(requestLogger);
 
 // CORS configuration
+const allowedOrigins = [
+  process.env.FRONTEND_URL || "http://localhost:3000",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3001",
+];
+
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
+        callback(null, true);
+      } else {
+        callback(null, true); // Dev fallback
+      }
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: [
@@ -151,5 +165,8 @@ httpServer.listen(PORT, () => {
   console.log(`🤖 AI API: http://localhost:${PORT}/api/ai`);
   console.log(`💻 Terminal WS: ws://localhost:${PORT}/terminal`);
 });
+
+httpServer.timeout = 300000; // 5 minutes for long-running AI agent tasks
+httpServer.keepAliveTimeout = 120000; // 2 minutes keep-alive
 
 export default app;

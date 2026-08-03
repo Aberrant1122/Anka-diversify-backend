@@ -324,6 +324,8 @@ export interface AgentFileChange {
   content: string;
   description: string;
   layer?: "Controller" | "Service" | "Repository" | "Schema" | "UI";
+  action?: "create" | "modify" | "delete";
+  isDeleted?: boolean;
 }
 
 export interface RoadmapStep {
@@ -340,6 +342,98 @@ export interface ChecklistItem {
   category?: string;
 }
 
+export type TaskType =
+  | "DELETE_FOLDER"
+  | "DELETE_FILE"
+  | "NEW_FEATURE"
+  | "BUG_FIX"
+  | "REFACTOR"
+  | "FILE_CREATION"
+  | "CONFIG_CHANGE"
+  | "DOCS"
+  | "OPTIMIZATION";
+
+export type TaskRisk = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+
+export type TaskComplexity = "SMALL" | "MEDIUM" | "LARGE" | "COMPLEX";
+
+export interface TaskClassificationResult {
+  taskType: TaskType;
+  risk: TaskRisk;
+  estimatedComplexity: TaskComplexity;
+  intent: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION" | "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE";
+  confidence: number;
+  requiresClarification: boolean;
+  reasoning: string;
+  targetPath?: string;
+  question?: string;
+  options?: string[];
+}
+
+export type PipelineMode =
+  | "REPOSITORY"
+  | "STANDALONE"
+  | "DOCUMENTATION"
+  | "DIRECT_ANSWER";
+
+export type TargetEnvironment =
+  | "HTML_CSS_JS"
+  | "REACT_TS"
+  | "NODE_JS"
+  | "PYTHON"
+  | "MARKDOWN"
+  | "GENERIC";
+
+export type ValidationType =
+  | "TYPESCRIPT_BUILD"
+  | "BROWSER_HTML"
+  | "PYTHON_SYNTAX"
+  | "NONE";
+
+/**
+ * Execution Contract — generated from TaskClassificationResult & TaskRouter.
+ * This contract actively governs every downstream pipeline stage:
+ *  - Pipeline routing (REPOSITORY vs STANDALONE vs DOCS vs DIRECT_ANSWER)
+ *  - Target environment (HTML_CSS_JS vs REACT_TS vs PYTHON, etc.)
+ *  - Repo search scope (bypassed if repositoryRequired = false)
+ *  - Context retrieval filter (only contextScope paths)
+ *  - Code generation guardrails (LLM system prompt injection)
+ *  - Diff critic enforcement (reject files outside scope)
+ *  - Validation engine (BROWSER_HTML vs TYPESCRIPT_BUILD)
+ */
+export interface ExecutionContract {
+  /** Human-readable one-line goal */
+  goal: string;
+  taskType: TaskType;
+  risk: TaskRisk;
+  estimatedComplexity: TaskComplexity;
+  /** Routed execution pipeline mode */
+  pipeline: PipelineMode;
+  /** Primary target technical environment */
+  environment: TargetEnvironment;
+  /** Whether repository searching & graph exploration are required */
+  repositoryRequired: boolean;
+  /** Target expected file layout (e.g. ["index.html", "style.css", "script.js"]) */
+  expectedFiles: string[];
+  /** Primary validation strategy for Stage 5 & 6 */
+  validationType: ValidationType;
+  /** Canonical target paths the task operates on (e.g. ["src/lib"]) */
+  targetPaths: string[];
+  /** Actions the LLM and agent are permitted to perform */
+  allowedActions: string[];
+  /** Actions that are strictly forbidden */
+  forbiddenActions: string[];
+  /** Hard cap: max number of files the agent may touch for this task */
+  maxFiles: number;
+  /** Paths the repository search loop is authorised to search within */
+  searchScope: string[];
+  /** Paths the context retrieval step is allowed to load into the LLM window */
+  contextScope: string[];
+  /** Whether the Diff Critic stage should run */
+  diffCriticEnabled: boolean;
+}
+
+
 export interface AgentResponse {
   explanation: string;
   changes: AgentFileChange[];
@@ -348,16 +442,176 @@ export interface AgentResponse {
   needsClarification?: boolean;
   question?: string;
   options?: string[];
-  intent?: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION";
+  intent?: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION" | "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE";
+  taskType?: TaskType;
+  risk?: TaskRisk;
+  estimatedComplexity?: TaskComplexity;
+  targetPath?: string;
   confidence?: number;
   roadmap?: RoadmapStep[];
   securityPass?: boolean;
   critiqueScore?: number;
   layerViolations?: string[];
   buildVerified?: boolean;
+  repaired?: boolean;
   buildErrors?: string;
   verificationChecklist?: ChecklistItem[];
   lifecycleStage?: "Done" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
+}
+
+export interface AgentProgressEvent {
+  step: number;
+  stageName: string;
+  label: string;
+  detail: string;
+  color: string;
+  badge: string;
+  progress: number;
+  log?: string;
+  taskType?: TaskType;
+  risk?: TaskRisk;
+  estimatedComplexity?: TaskComplexity;
+  targetPath?: string;
+  /** Full Execution Contract emitted in Stage 1 for frontend display */
+  executionContract?: ExecutionContract;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// File Manifest Types (Requirements 1.2, 2.1)
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface FileDeclaration {
+  /** Relative path from project root (e.g., "src/components/Button.tsx") */
+  path: string;
+  /** Action to perform on this file */
+  action: "create" | "modify" | "delete";
+  /** Array of import paths this file depends on */
+  dependencies: string[];
+  /** Human-readable description of file purpose */
+  description: string;
+  /** Optional size estimate */
+  estimatedLines?: number;
+}
+
+export interface FileManifest {
+  /** Array of file declarations */
+  files: FileDeclaration[];
+  /** Total number of files in manifest */
+  totalFiles: number;
+  /** Manifest schema version (e.g., "1.0.0") */
+  manifestVersion: string;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Manifest Validation Types (Requirements 7.3, 8.1, 8.2)
+// ────────────────────────────────────────────────────────────────────────────
+
+export type ValidationErrorType =
+  | "schema"
+  | "import_resolution"
+  | "file_limit"
+  | "orphan"
+  | "path_constraint";
+
+export interface ValidationError {
+  /** Type of validation error */
+  type: ValidationErrorType;
+  /** Files affected by this error */
+  affectedFiles: string[];
+  /** Human-readable error message */
+  message: string;
+  /** Actionable suggestion for fixing the error */
+  suggestion: string;
+}
+
+export interface ValidationResult {
+  /** Whether the validation passed */
+  valid: boolean;
+  /** Array of validation errors (empty if valid) */
+  errors: ValidationError[];
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Task Decomposition Types (Requirements 7.3, 8.1, 8.2)
+// ────────────────────────────────────────────────────────────────────────────
+
+export type SubTaskCategory =
+  | "types_and_interfaces"
+  | "mock_data"
+  | "leaf_components"
+  | "container_components"
+  | "routing_and_navigation"
+  | "api_integration"
+  | "state_management";
+
+export interface SubTask {
+  /** Unique identifier (e.g., "subtask-1") */
+  id: string;
+  /** Category of the sub-task */
+  category: SubTaskCategory;
+  /** Human-readable description */
+  description: string;
+  /** Expected output files for this sub-task */
+  targetFiles: string[];
+  /** Array of sub-task IDs this task depends on */
+  dependencies: string[];
+  /** Estimated complexity */
+  estimatedComplexity: "SMALL" | "MEDIUM";
+}
+
+export interface DependencyExecutionGraph {
+  /** Array of sub-tasks */
+  nodes: SubTask[];
+  /** Topologically sorted sub-task IDs (execution order) */
+  executionOrder: string[];
+  /** Graph schema version (e.g., "1.0.0") */
+  graphVersion: string;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// In-Memory Data Structures for Graph Processing
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface DependencyGraph {
+  /** Map of subTaskId to Set of dependent subTaskIds */
+  adjacencyList: Map<string, Set<string>>;
+  /** Map of subTaskId to count of dependencies */
+  inDegree: Map<string, number>;
+}
+
+export interface SubTaskExecutionResult {
+  /** ID of the executed sub-task */
+  subTaskId: string;
+  /** Whether the execution was successful */
+  success: boolean;
+  /** Generated manifest for this sub-task */
+  manifest: FileManifest;
+  /** Code changes produced */
+  changes: AgentFileChange[];
+  /** Error messages if failed */
+  errors?: string[];
+}
+
+export interface DecompositionExecutionState {
+  /** The dependency execution graph */
+  graph: DependencyExecutionGraph;
+  /** Map of completed sub-task results */
+  completed: Map<string, SubTaskExecutionResult>;
+  /** Set of failed sub-task IDs */
+  failed: Set<string>;
+  /** Set of currently executing sub-task IDs */
+  inProgress: Set<string>;
+  /** Set of pending sub-task IDs */
+  pending: Set<string>;
+}
+
+export interface ImportGraph {
+  /** Map of filePath to Set of files that import it */
+  dependencies: Map<string, Set<string>>;
+  /** Function to check if a file is an entry point */
+  isEntryPoint: (filePath: string) => boolean;
+  /** Function to check if a file is a config file */
+  isConfigFile: (filePath: string) => boolean;
 }
 
 // Error Types

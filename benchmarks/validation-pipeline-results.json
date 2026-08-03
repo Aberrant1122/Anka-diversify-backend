@@ -1,0 +1,18 @@
+{
+  "runDate": "2026-07-30T20:30:04.884Z",
+  "metrics": {
+    "totalTimeMs": 800.6014,
+    "passRatePct": 100,
+    "stagesCount": 7,
+    "attempts": 1,
+    "stageDurations": {
+      "compile": 165.27,
+      "lint": 209.87,
+      "unit_tests": 102.97,
+      "integration_tests": 100.9,
+      "playwright_e2e": 103.87,
+      "api_tests": 112.52,
+      "feature_static_validation": 3.05
+    }
+  }
+}
