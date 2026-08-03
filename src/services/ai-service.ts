@@ -2671,8 +2671,7 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
   }
 
   private getEffectiveSnapshot(snapshot: any, localPath?: string | null): any {
-    const candidatePath = localPath || process.cwd();
-    const diskFiles = scanDirectoryFiles(candidatePath);
+    const diskFiles = (localPath && fs.existsSync(localPath)) ? scanDirectoryFiles(localPath) : [];
     const fileMap = new Map<string, { path: string; content: string }>();
 
     if (snapshot) {

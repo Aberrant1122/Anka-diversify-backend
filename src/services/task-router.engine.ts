@@ -85,6 +85,7 @@ export function routeTask(
   const hasReactFiles = fileList.some((f) => /\.tsx$|\.jsx$/i.test(f));
   const hasTsFiles = fileList.some((f) => /\.ts$/i.test(f) && !f.endsWith(".d.ts"));
   const hasHtmlCssJsFiles = fileList.some((f) => /\.html$|\.css$|\.js$/i.test(f));
+  const existingWebFiles = fileList.filter((f) => /\.html$|\.css$|\.js$/i.test(f));
   const isVanillaWebRepo = fileList.length > 0 && hasHtmlCssJsFiles && !hasReactFiles && !hasTsFiles;
 
   // ── 1. Check for DIRECT_ANSWER / DOCUMENTATION ───────────────────────────────
@@ -110,7 +111,6 @@ export function routeTask(
 
   // If repository consists strictly of HTML/CSS/JS (no React/TS), route to HTML_CSS_JS
   if (isVanillaWebRepo) {
-    const existingWebFiles = fileList.filter((f) => /\.html$|\.css$|\.js$/i.test(f));
     return {
       pipeline: "STANDALONE",
       environment: "HTML_CSS_JS",
@@ -135,12 +135,19 @@ export function routeTask(
 
   if (repoMandatoryTypes.has(taskType) || mentionsRepoFiles) {
     const isPython = PYTHON_PATTERNS.some((p) => p.test(message));
+    const targetEnv: TargetEnvironment = isPython
+      ? "PYTHON"
+      : (hasReactFiles || hasTsFiles ? "REACT_TS" : "HTML_CSS_JS");
+    const valType: ValidationType = isPython
+      ? "PYTHON_SYNTAX"
+      : (hasReactFiles || hasTsFiles ? "TYPESCRIPT_BUILD" : "BROWSER_HTML");
+
     return {
       pipeline: "REPOSITORY",
-      environment: isPython ? "PYTHON" : "REACT_TS",
+      environment: targetEnv,
       repositoryRequired: true,
-      expectedFiles: classification.targetPath ? [classification.targetPath] : [],
-      validationType: isPython ? "PYTHON_SYNTAX" : "TYPESCRIPT_BUILD",
+      expectedFiles: classification.targetPath ? [classification.targetPath] : (isVanillaWebRepo ? existingWebFiles : []),
+      validationType: valType,
     };
   }
 
