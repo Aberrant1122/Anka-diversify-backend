@@ -79,6 +79,10 @@ CRITICAL PIPELINE MANDATES:
    - Ground every element ID, class name, function name, and variable strictly in reality.
    - Do NOT reference non-existent CSS files, external JS libraries (unless loaded via explicit <script src="...">), or unimported modules.
    - For calculators: index.html MUST contain the #display element and grid of buttons, style.css MUST style every button and layout container, and script.js MUST implement the complete calculation logic.
+12. FOLLOW-UP TASK & EDIT MANDATE:
+   - For follow-up requests, edits, or bug fixes, inspect the existing code provided in CONTEXT (index.html, style.css, script.js).
+   - You MUST output the COMPLETE updated content for all modified files in your "changes" array.
+   - Your "changes" array MUST NEVER be empty when a user requests a feature addition, bug fix, or UI change.
 
 You MUST respond strictly with a valid JSON object matching this schema:
 {

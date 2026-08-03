@@ -2722,6 +2722,14 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
 
     // ── Bypass Search for STANDALONE / NON-REPO Tasks ──────────────────────────
     if (contract && contract.repositoryRequired === false) {
+      const existingFiles: Record<string, string> = {};
+      const snapList = Array.isArray(effectiveSnap) ? effectiveSnap : (effectiveSnap?.keyFiles || effectiveSnap?.repoSnapshot || []);
+      for (const f of snapList) {
+        if (f && f.path && typeof f.content === "string" && f.content.trim().length > 0) {
+          existingFiles[f.path] = f.content;
+        }
+      }
+
       const executionMemory: RepositoryExecutionMemory = {
         taskId,
         projectId: projectContext.project.id,
@@ -2729,15 +2737,15 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
         discoveredRoutes: [],
         discoveredServices: [],
         discoveredModels: [],
-        inspectedFiles: new Set<string>(),
+        inspectedFiles: new Set<string>(Object.keys(existingFiles)),
         searchPlanHistory: [],
         currentConfidence: 1.0,
       };
       return {
-        optimizedContext: { fileContext: {}, skeletonContext: {}, tokenEstimate: 0 },
+        optimizedContext: { fileContext: existingFiles, skeletonContext: {}, tokenEstimate: JSON.stringify(existingFiles).length },
         executionMemory,
         finalConfidence: 1.0,
-        searchSummary: `Standalone Pipeline active (pipeline: ${contract.pipeline}, environment: ${contract.environment}) — Repository search bypassed.`,
+        searchSummary: `Standalone Pipeline active (pipeline: ${contract.pipeline}, environment: ${contract.environment}) — Repository search bypassed. ${Object.keys(existingFiles).length} existing standalone file(s) included in context.`,
       };
     }
 
