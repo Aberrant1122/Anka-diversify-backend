@@ -297,10 +297,14 @@ Task → Understand Goal → Determine Completion → Generate Files → Wire Ev
 DESIGN & QUALITY STANDARDS:
 - Generate COMPLETE file contents from line 1 to the last line. NO partial diffs, NO truncated snippets, NO "// ... rest of code" placeholders.
 - Every import statement MUST be explicit and present at the top of the file.
+- REPOSITORY TECH-STACK ALIGNMENT:
+  * ALWAYS inspect the project file tree before creating or modifying files.
+  * If the repository is a Vanilla Web project (index.html, style.css, script.js), modify those existing files directly.
+  * NEVER generate React components (.tsx/.jsx) or Node controllers unless the project actually uses React/JSX or Node.js.
 - When creating UI/dashboards/components (e.g. calculator, task board, analytics):
   * Use modern HSL dark mode, sleek card borders (border-white/10 or border-violet-500/20), backdrop blur glassmorphism, and responsive CSS grid layouts.
   * Include interactive controls (tabs, filters, search, toggle switches, tooltips, buttons).
-  * Use Lucide icons (lucide-react) for visual indicators and badges (+14.2% trend badges, status indicators).
+  * Use Lucide icons (lucide-react for React apps, or inline SVG for Vanilla HTML) for visual indicators and badges.
   * Include rich mock data and complete component logic so the app works immediately out of the box.
   * DEFENSIVE STATE MACHINES: Implement comprehensive state handling (null/undefined variable protection, error state resets, edge case validation, clean default state handling).
 

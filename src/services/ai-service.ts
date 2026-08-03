@@ -2898,8 +2898,14 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
 
     // ── Primary: Deterministic Static Feature Validation ─────────────────────────
     try {
-      const snapshotFiles = (snapshot?.keyFiles || snapshot?.repoSnapshot || []) as Array<{ path: string; content?: string }>;
-      const staticResult = StaticValidationEngine.validate(snapshotFiles, changes);
+      const rawSnapshotFiles = (snapshot?.keyFiles || snapshot?.repoSnapshot || []) as Array<{ path: string; content?: string }>;
+      const projectFilesOnly = rawSnapshotFiles.filter((f) => f.path && !f.path.startsWith("benchmarks/") && !f.path.startsWith("node_modules/"));
+      const rawStaticResult = StaticValidationEngine.validate(projectFilesOnly, changes);
+
+      // Only evaluate issues in files that are part of the current task changes
+      const changedFilePaths = new Set(changes.map((c) => c.path));
+      const relevantIssues = rawStaticResult.issues.filter((i) => changedFilePaths.has(i.file));
+      const staticResult = { ...rawStaticResult, issues: relevantIssues };
 
       const checks = [
         {
@@ -3111,10 +3117,13 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
 
     const intentResult = await this.classifyIntentAndAmbiguity(request.message, projectContext);
 
+    const snapshotFileList = (effectiveSnapshot?.keyFiles || effectiveSnapshot?.repoSnapshot || (Array.isArray(effectiveSnapshot) ? effectiveSnapshot : [])) as Array<any>;
+    const repoFileNames = snapshotFileList.map((f: any) => typeof f === "string" ? f : (f.path || ""));
+
     // ── Build Execution Contract from classification ──────────────────────────
     // The contract governs EVERY subsequent stage: search scope, context filter,
     // code generation guardrails, and diff critic enforcement.
-    const executionContract: ExecutionContract = buildExecutionContract(intentResult, request.message);
+    const executionContract: ExecutionContract = buildExecutionContract(intentResult, request.message, repoFileNames);
 
     // ── Stage 1: Task & Intent Analysis ──────────────────────
     onProgress?.({

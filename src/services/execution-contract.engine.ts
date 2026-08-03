@@ -162,6 +162,7 @@ function buildContextScope(taskType: TaskType, targetPaths: string[]): string[] 
 export function buildExecutionContract(
   classification: TaskClassificationResult,
   message: string,
+  repositoryFiles?: string[],
 ): ExecutionContract {
   const rules = CONTRACT_RULES[classification.taskType];
 
@@ -219,8 +220,8 @@ export function buildExecutionContract(
   };
   const goal = `${goalPrefix[classification.taskType]} ${primaryTarget ? `"${primaryTarget}"` : "(project-wide)"} — ${message.slice(0, 80)}`;
 
-  // Route task to optimal pipeline and target environment
-  const route = routeTask(message, classification);
+  // Route task to optimal pipeline and target environment (passing repositoryFiles for tech-stack auto-detection)
+  const route = routeTask(message, classification, repositoryFiles);
 
   let maxFilesCap = rules.maxFiles;
   if (classification.taskType === "NEW_FEATURE" && (classification.estimatedComplexity === "LARGE" || classification.estimatedComplexity === "COMPLEX")) {

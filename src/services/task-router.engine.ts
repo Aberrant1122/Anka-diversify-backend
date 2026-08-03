@@ -75,9 +75,17 @@ const PYTHON_PATTERNS = [
 export function routeTask(
   message: string,
   classification: TaskClassificationResult,
+  repositoryFiles?: string[],
 ): TaskRouteResult {
   const msgLower = message.toLowerCase();
   const taskType = classification.taskType;
+
+  // Auto-detect repository tech stack from actual repository files
+  const fileList = repositoryFiles || [];
+  const hasReactFiles = fileList.some((f) => /\.tsx$|\.jsx$/i.test(f));
+  const hasTsFiles = fileList.some((f) => /\.ts$/i.test(f) && !f.endsWith(".d.ts"));
+  const hasHtmlCssJsFiles = fileList.some((f) => /\.html$|\.css$|\.js$/i.test(f));
+  const isVanillaWebRepo = fileList.length > 0 && hasHtmlCssJsFiles && !hasReactFiles && !hasTsFiles;
 
   // ── 1. Check for DIRECT_ANSWER / DOCUMENTATION ───────────────────────────────
   if (classification.requiresClarification) {
@@ -97,6 +105,18 @@ export function routeTask(
       repositoryRequired: false,
       expectedFiles: ["README.md"],
       validationType: "NONE",
+    };
+  }
+
+  // If repository consists strictly of HTML/CSS/JS (no React/TS), route to HTML_CSS_JS
+  if (isVanillaWebRepo) {
+    const existingWebFiles = fileList.filter((f) => /\.html$|\.css$|\.js$/i.test(f));
+    return {
+      pipeline: "STANDALONE",
+      environment: "HTML_CSS_JS",
+      repositoryRequired: false,
+      expectedFiles: existingWebFiles.length > 0 ? existingWebFiles : ["index.html", "style.css", "script.js"],
+      validationType: "BROWSER_HTML",
     };
   }
 
