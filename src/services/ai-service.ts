@@ -1457,23 +1457,23 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
       messages: [
         {
           role: "system",
-          content: `You are a HOSTILE code reviewer whose ONLY job is to find errors. You are NOT the author of this code — treat it as adversarial input that is PROBABLY broken.
+          content: `You are an Objective Static Code Auditor.
+Your task is to analyze proposed file changes strictly for CRITICAL SYNTAX or COMPILATION ERRORS that would prevent execution.
 
-CHECK EVERY FILE FOR:
-1. MISSING IMPORTS — Does every symbol used (types, functions, classes, React hooks, libraries) have a corresponding import statement? If a file uses \`useState\` but doesn't import it from 'react', that's an error.
-2. UNDEFINED VARIABLES — Are there variables, functions, or types referenced that are never defined or imported?
-3. TYPE ERRORS — For TypeScript: Are there type mismatches, missing generic parameters, or implicit \`any\`?
-4. INCOMPLETE CODE — Are there TODO comments, placeholder strings like "...", "rest of file", or functions with empty bodies that should have implementations?
-5. SYNTAX ERRORS — Unclosed brackets, missing semicolons (where required), malformed JSX, template literal errors?
-6. MISSING EXPORTS — Does the file export what other files would need to import?
-7. BROKEN DEPENDENCIES — Does the file reference modules/packages that don't exist in a standard project?
-8. LOGIC ERRORS — Obvious bugs like infinite loops, unreachable code, or functions that never return?
-9. DOM & ARITHMETIC LOGIC INTEGRATION — For standalone HTML/CSS/JS apps (calculators, tools, widgets): Do DOM selectors in script.js match the IDs/classes/attributes in index.html? Are event handlers attached to all buttons? Is arithmetic and calculation logic (+, -, *, /, equals, clear, display updates) fully implemented and working without broken cases?
+CHECK FOR CRITICAL SYNTAX & COMPILATION ERRORS ONLY:
+1. SYNTAX ERRORS: Unclosed brackets/tags, malformed JSX/HTML, unclosed string literals.
+2. UNRESOLVED IMPORTS / UNDEFINED SYMBOLS: References to non-existent local files or undefined variables.
+3. INCOMPLETE PLACEHOLDERS: TODO comments, truncated code ("... rest of file"), or missing function bodies.
+4. BROKEN STRUCTURE: HTML missing body/script/css tags, or JS with syntax parse errors.
 
-Be EXTREMELY strict. If you find even ONE issue, report it.
+Do NOT flag minor edge-case handling preferences, style choices, or design suggestions as critical errors. If the syntax is 100% valid and parseable, hasCriticalErrors MUST be false.
 
-Respond with ONLY valid JSON:
-{ "hasErrors": boolean, "errors": "Detailed list of every error found with file path and description. Empty string if no errors." }`,
+Respond ONLY with valid JSON:
+{
+  "hasCriticalErrors": boolean,
+  "criticalErrors": "Detailed description of critical syntax/compilation breakages if any. Empty string if syntax is clean.",
+  "suggestions": ["Optional minor non-critical review notes"]
+}`,
         },
         { role: "user", content: changesText },
       ],
@@ -1484,7 +1484,9 @@ Respond with ONLY valid JSON:
 
     try {
       const result = JSON.parse(completion.choices[0]?.message?.content || "{}");
-      return { success: !result.hasErrors, errors: result.errors || "" };
+      const hasCritical = typeof result.hasCriticalErrors === "boolean" ? result.hasCriticalErrors : Boolean(result.hasErrors && result.errors);
+      const errorMsg = result.criticalErrors || (hasCritical ? result.errors : "") || "";
+      return { success: !hasCritical, errors: errorMsg };
     } catch {
       return { success: true, errors: "" };
     }
