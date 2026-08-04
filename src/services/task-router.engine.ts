@@ -80,13 +80,17 @@ export function routeTask(
   const msgLower = message.toLowerCase();
   const taskType = classification.taskType;
 
-  // Auto-detect repository tech stack from actual repository files
-  const fileList = repositoryFiles || [];
-  const hasReactFiles = fileList.some((f) => /\.tsx$|\.jsx$/i.test(f));
-  const hasTsFiles = fileList.some((f) => /\.ts$/i.test(f) && !f.endsWith(".d.ts"));
-  const hasHtmlCssJsFiles = fileList.some((f) => /\.html$|\.css$|\.js$/i.test(f));
-  const existingWebFiles = fileList.filter((f) => /\.html$|\.css$|\.js$/i.test(f));
-  const isVanillaWebRepo = fileList.length > 0 && hasHtmlCssJsFiles && !hasReactFiles && !hasTsFiles;
+  // Filter out any system or backend files
+  const userFiles = (repositoryFiles || []).filter((f) => !f.includes("anka-os-backend") && !f.includes("node_modules"));
+  const hasReactFiles = userFiles.some((f) => /\.tsx$|\.jsx$/i.test(f) || f.includes("package.json"));
+  const hasTsFiles = userFiles.some((f) => /\.ts$/i.test(f) && !f.endsWith(".d.ts"));
+  const hasHtmlCssJsFiles = userFiles.some((f) => /\.html$|\.css$|\.js$/i.test(f));
+  const existingWebFiles = userFiles.filter((f) => /\.html$|\.css$|\.js$/i.test(f));
+  const isExplicitReact = REACT_TS_PATTERNS.some((p) => p.test(message));
+  const mentionsRepoFiles = /(?:src\/|app\/|components\/|lib\/|services\/|routes\/|controllers\/|pages\/|package\.json|\.env)/i.test(message);
+
+  // If repository consists strictly of Vanilla Web (no React/TS) or is empty without explicit React mention -> STANDALONE HTML_CSS_JS
+  const isVanillaWebRepo = (!hasReactFiles && !hasTsFiles && !isExplicitReact && !mentionsRepoFiles) || (userFiles.length > 0 && hasHtmlCssJsFiles && !hasReactFiles && !hasTsFiles);
 
   // ── 1. Check for DIRECT_ANSWER / DOCUMENTATION ───────────────────────────────
   if (classification.requiresClarification) {
@@ -131,8 +135,6 @@ export function routeTask(
     "OPTIMIZATION",
   ]);
 
-  const mentionsRepoFiles = /(?:src\/|app\/|components\/|lib\/|services\/|routes\/|controllers\/|pages\/|package\.json|\.env)/i.test(message);
-
   if (repoMandatoryTypes.has(taskType) || mentionsRepoFiles) {
     const isPython = PYTHON_PATTERNS.some((p) => p.test(message));
     const targetEnv: TargetEnvironment = isPython
@@ -153,7 +155,6 @@ export function routeTask(
 
   // ── 3. Detect STANDALONE vs REPOSITORY for NEW_FEATURE / FILE_CREATION ──────
   const isExplicitHtmlCssJs = HTML_CSS_JS_PATTERNS.some((p) => p.test(message));
-  const isExplicitReact = REACT_TS_PATTERNS.some((p) => p.test(message));
   const isExplicitPython = PYTHON_PATTERNS.some((p) => p.test(message));
 
   // If prompt explicitly requests HTML/CSS/JS (e.g., "create a calculator with html css and js")
