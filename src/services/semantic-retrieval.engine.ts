@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import OpenAI from "openai";
+import { WasmASTParserEngine } from "./ast-parser.engine";
 
 // ─── Interfaces & Types ───────────────────────────────────────────────────────
 
@@ -51,40 +52,64 @@ export class CodeChunkExtractor {
     const lines = content.split("\n");
     const p = filePath.replace(/\\/g, "/");
 
-    // 1. Functions
-    const fnMatches = content.matchAll(
-      /(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)/g,
-    );
-    for (const m of fnMatches) {
-      const name = m[1];
-      const idx = m.index ?? 0;
-      const startLine = content.slice(0, idx).split("\n").length;
-      const endLine = Math.min(lines.length, startLine + 30);
-      const chunkContent = lines.slice(startLine - 1, endLine).join("\n");
-      const hash = CodeChunkExtractor.hash(chunkContent);
+    // Extract AST symbols via WASM Tree-Sitter Engine
+    const tsSymbols = WasmASTParserEngine.extractSymbols(filePath, content);
 
-      chunks.push({
-        id: `${p}:function:${name}:${startLine}`,
-        filePath: p,
-        chunkType: "function",
-        name,
-        content: chunkContent,
-        startLine,
-        endLine,
-        hash,
-      });
+    // Extract active imports header to bundle into code chunks
+    const importHeaderLines = tsSymbols.imports.map((imp) => lines[imp.line - 1]).filter(Boolean);
+    const importHeader = importHeaderLines.length > 0 ? importHeaderLines.join("\n") + "\n\n" : "";
+
+    if (tsSymbols.functions.length > 0) {
+      for (const func of tsSymbols.functions) {
+        const startLine = func.startLine;
+        const endLine = Math.max(startLine, func.endLine);
+        const rawContent = lines.slice(startLine - 1, endLine).join("\n");
+        const chunkContent = importHeader + rawContent;
+        const hash = CodeChunkExtractor.hash(chunkContent);
+
+        chunks.push({
+          id: `${p}:function:${func.name}:${startLine}`,
+          filePath: p,
+          chunkType: "function",
+          name: func.name,
+          content: chunkContent,
+          startLine,
+          endLine,
+          hash,
+        });
+      }
+    } else {
+      // Regex Fallback
+      const fnMatches = content.matchAll(/(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)/g);
+      for (const m of fnMatches) {
+        const name = m[1];
+        const idx = m.index ?? 0;
+        const startLine = content.slice(0, idx).split("\n").length;
+        const endLine = Math.min(lines.length, startLine + 30);
+        const chunkContent = lines.slice(startLine - 1, endLine).join("\n");
+        const hash = CodeChunkExtractor.hash(chunkContent);
+
+        chunks.push({
+          id: `${p}:function:${name}:${startLine}`,
+          filePath: p,
+          chunkType: "function",
+          name,
+          content: chunkContent,
+          startLine,
+          endLine,
+          hash,
+        });
+      }
     }
 
     // 2. Classes (Services / Controllers / Repositories)
-    const classMatches = content.matchAll(
-      /(?:export\s+)?class\s+([A-Za-z0-9_]+)/g,
-    );
+    const classMatches = content.matchAll(/(?:export\s+)?class\s+([A-Za-z0-9_]+)/g);
     for (const m of classMatches) {
       const name = m[1];
       const idx = m.index ?? 0;
       const startLine = content.slice(0, idx).split("\n").length;
       const endLine = Math.min(lines.length, startLine + 50);
-      const chunkContent = lines.slice(startLine - 1, endLine).join("\n");
+      const chunkContent = importHeader + lines.slice(startLine - 1, endLine).join("\n");
       const hash = CodeChunkExtractor.hash(chunkContent);
 
       let chunkType: CodeChunk["chunkType"] = "class";

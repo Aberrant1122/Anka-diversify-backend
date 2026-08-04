@@ -4,8 +4,9 @@
   "description": "Backend for Anka OS AI Management App",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "nodemon src/index.ts",
-    "build": "prisma generate && tsc",
+    "dev": "node scripts/copy-wasm.js && nodemon src/index.ts",
+    "build": "prisma generate && tsc && node scripts/copy-wasm.js",
+    "copy:wasm": "node scripts/copy-wasm.js",
     "start": "node scripts/db-startup.js && node dist/index.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
@@ -38,6 +39,8 @@
     "pdfkit": "^0.19.1",
     "prisma": "^5.22.0",
     "sqlite3": "^6.0.1",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.20.8",
     "ws": "^8.20.0"
   },
   "prisma": {

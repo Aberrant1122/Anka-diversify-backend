@@ -1,5 +1,6 @@
 import path from "path";
 import { performance } from "perf_hooks";
+import { WasmASTParserEngine } from "./ast-parser.engine";
 
 // ─── Result & Issue Schemas ───────────────────────────────────────────────────
 
@@ -151,46 +152,74 @@ export class StaticValidationEngine {
     const exports: FileAST["exports"] = [];
     const components: FileAST["components"] = [];
 
-    // Parse Imports
-    const importRegex = /import\s+(?:type\s+)?(?:([A-Za-z0-9_]+)|(?:\{([^}]+)\}))?\s*(?:,\s*\{([^}]+)\})?\s*from\s*["']([^"']+)["']/g;
-    let match: RegExpExecArray | null;
+    // Use WASM Tree-Sitter AST Engine for symbol extraction
+    const tsSymbols = WasmASTParserEngine.extractSymbols(p, content);
 
-    while ((match = importRegex.exec(content)) !== null) {
-      const line = content.slice(0, match.index).split("\n").length;
-      const defaultImport = match[1]?.trim();
-      const namedRaw = (match[2] || match[3] || "").split(",").map((s) => s.trim().split(" as ")[0]).filter(Boolean);
-      const rawPath = match[4];
-      const isLocal = rawPath.startsWith(".") || rawPath.startsWith("@/");
-
-      let resolvedPath: string | null = null;
-      if (isLocal) {
-        resolvedPath = StaticValidationEngine.resolveImportPath(p, rawPath, fileMap);
+    if (tsSymbols.imports.length > 0 || tsSymbols.exports.length > 0) {
+      for (const imp of tsSymbols.imports) {
+        let resolvedPath: string | null = null;
+        if (imp.isLocal) {
+          resolvedPath = StaticValidationEngine.resolveImportPath(p, imp.rawPath, fileMap);
+        }
+        imports.push({
+          line: imp.line,
+          rawPath: imp.rawPath,
+          resolvedPath,
+          isLocal: imp.isLocal,
+          defaultImport: imp.defaultImport,
+          namedImports: imp.namedImports,
+        });
       }
 
-      imports.push({
-        line,
-        rawPath,
-        resolvedPath,
-        isLocal,
-        defaultImport,
-        namedImports: namedRaw,
-      });
-    }
+      for (const exp of tsSymbols.exports) {
+        exports.push({
+          line: exp.line,
+          name: exp.name,
+          kind: exp.isDefault ? "default" : "named",
+          type: exp.type as FileAST["exports"][0]["type"],
+        });
+      }
+    } else {
+      // Regex Fallback if AST Engine hasn't initialized or returned empty on custom file types
+      const importRegex = /import\s+(?:type\s+)?(?:([A-Za-z0-9_]+)|(?:\{([^}]+)\}))?\s*(?:,\s*\{([^}]+)\})?\s*from\s*["']([^"']+)["']/g;
+      let match: RegExpExecArray | null;
 
-    // Parse Exports
-    const exportRegex = /export\s+(default\s+)?(interface|class|function|type|const)\s+([A-Za-z0-9_]+)/g;
-    while ((match = exportRegex.exec(content)) !== null) {
-      const line = content.slice(0, match.index).split("\n").length;
-      const isDefault = Boolean(match[1]);
-      const type = match[2] as FileAST["exports"][0]["type"];
-      const name = match[3];
+      while ((match = importRegex.exec(content)) !== null) {
+        const line = content.slice(0, match.index).split("\n").length;
+        const defaultImport = match[1]?.trim();
+        const namedRaw = (match[2] || match[3] || "").split(",").map((s) => s.trim().split(" as ")[0]).filter(Boolean);
+        const rawPath = match[4];
+        const isLocal = rawPath.startsWith(".") || rawPath.startsWith("@/");
 
-      exports.push({
-        line,
-        name,
-        kind: isDefault ? "default" : "named",
-        type,
-      });
+        let resolvedPath: string | null = null;
+        if (isLocal) {
+          resolvedPath = StaticValidationEngine.resolveImportPath(p, rawPath, fileMap);
+        }
+
+        imports.push({
+          line,
+          rawPath,
+          resolvedPath,
+          isLocal,
+          defaultImport,
+          namedImports: namedRaw,
+        });
+      }
+
+      const exportRegex = /export\s+(default\s+)?(interface|class|function|type|const)\s+([A-Za-z0-9_]+)/g;
+      while ((match = exportRegex.exec(content)) !== null) {
+        const line = content.slice(0, match.index).split("\n").length;
+        const isDefault = Boolean(match[1]);
+        const type = match[2] as FileAST["exports"][0]["type"];
+        const name = match[3];
+
+        exports.push({
+          line,
+          name,
+          kind: isDefault ? "default" : "named",
+          type,
+        });
+      }
     }
 
     // Parse Components & Hooks
