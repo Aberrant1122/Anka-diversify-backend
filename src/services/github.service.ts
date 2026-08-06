@@ -219,6 +219,37 @@ export class ProjectGitHubService {
     });
   }
 
+  // Same as buildProjectContext, but for a non-primary ProjectRepository — stored in
+  // its own RepositorySnapshot row so it doesn't clobber the project-level snapshot
+  // used by the legacy single-repo agent path.
+  static async buildRepositoryContext(repositoryId: string, githubUrl: string, token?: string): Promise<void> {
+    const snapshot = await fetchRepoSnapshot(githubUrl, token);
+
+    await prisma.repositorySnapshot.upsert({
+      where: { repositoryId },
+      create: {
+        repositoryId,
+        githubUrl,
+        repoName: snapshot.repoName,
+        defaultBranch: snapshot.defaultBranch,
+        description: snapshot.description,
+        fileTree: JSON.stringify(snapshot.fileTree),
+        languages: JSON.stringify(snapshot.languages),
+        keyFiles: JSON.stringify(snapshot.keyFiles),
+      },
+      update: {
+        githubUrl,
+        repoName: snapshot.repoName,
+        defaultBranch: snapshot.defaultBranch,
+        description: snapshot.description,
+        fileTree: JSON.stringify(snapshot.fileTree),
+        languages: JSON.stringify(snapshot.languages),
+        keyFiles: JSON.stringify(snapshot.keyFiles),
+        lastSyncedAt: new Date(),
+      },
+    });
+  }
+
   static async getFileContent(githubUrl: string, filePath: string, token?: string): Promise<{ content: string; sha: string } | null> {
     const parsed = parseGithubUrl(githubUrl);
     if (!parsed) return null;
@@ -430,6 +461,23 @@ export class ProjectGitHubService {
   static async getSnapshot(projectId: string): Promise<RepoSnapshot | null> {
     const row = await prisma.projectRepoSnapshot.findUnique({
       where: { projectId },
+    });
+    if (!row) return null;
+
+    return {
+      repoName: row.repoName,
+      defaultBranch: row.defaultBranch,
+      description: row.description,
+      languages: JSON.parse(row.languages),
+      fileTree: JSON.parse(row.fileTree),
+      keyFiles: JSON.parse(row.keyFiles),
+      lastSyncedAt: row.lastSyncedAt,
+    };
+  }
+
+  static async getRepositorySnapshot(repositoryId: string): Promise<RepoSnapshot | null> {
+    const row = await prisma.repositorySnapshot.findUnique({
+      where: { repositoryId },
     });
     if (!row) return null;
 

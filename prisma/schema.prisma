@@ -82,8 +82,68 @@ model Project {
   agentManifests AgentManifest[]
   decompositions TaskDecomposition[]
   kanbanBoard    KanbanBoard?
+  repositories   ProjectRepository[]
+  contextSnapshots ContextSnapshot[]
 
   @@map("projects")
+}
+
+// Multi-repository support (Anka OS v2.0 spec §11). A project may span more than
+// one source repository (frontend/backend/mobile/infra/...); Project.githubUrl/
+// githubToken/localPath remain as the legacy single-repo pointer for backward
+// compatibility and are mirrored into one ProjectRepository row (isPrimary=true)
+// on migration rather than removed.
+model ProjectRepository {
+  id           String    @id @default(cuid())
+  projectId    String
+  name         String // human label, e.g. "frontend", "backend"
+  role         String // 'frontend' | 'backend' | 'mobile' | 'infrastructure' | 'shared_library' | 'documentation' | 'data' | 'custom'
+  githubUrl    String
+  githubToken  String? // encrypted, same AES-256-CBC scheme as Project.githubToken
+  localPath    String?
+  defaultBranch String   @default("main")
+  environments Json? // e.g. { staging: {...}, production: {...} }
+  languages    Json? // e.g. ["typescript", "python"]
+  frameworks   Json? // e.g. ["next.js", "express"]
+  buildCommand String?
+  testCommand  String?
+  lintCommand  String?
+  typecheckCommand String?
+  currentIndexedCommit String? // last commit SHA the intelligence layer represents
+  ownerUserId  String?
+  dependencies Json? // service/package/API/event relationships to other ProjectRepository rows
+  executionPolicy Json? // { allowedTools, protectedPaths, riskClass, mergeRules }
+  isPrimary    Boolean   @default(false) // true for the repo backfilled from legacy Project fields
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  project  Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  snapshot RepositorySnapshot?
+
+  @@index([projectId])
+  @@map("project_repositories")
+}
+
+// Per-repository AI context cache (Anka OS v2.0 spec §17.3). Additive and separate
+// from ProjectRepoSnapshot on purpose: the legacy single-repo agent path keeps using
+// ProjectRepoSnapshot untouched (zero behavior change for existing single-repo
+// projects); a non-primary ProjectRepository gets its own row here instead of
+// overwriting the project-level snapshot.
+model RepositorySnapshot {
+  id            String   @id @default(cuid())
+  repositoryId  String   @unique
+  githubUrl     String
+  repoName      String
+  defaultBranch String
+  description   String   @default("")
+  fileTree      String   @db.Text
+  languages     String
+  keyFiles      String   @db.Text
+  lastSyncedAt  DateTime @default(now())
+
+  repository ProjectRepository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@map("repository_snapshots")
 }
 
 model ProjectMember {
@@ -364,6 +424,33 @@ model ProjectRepoSnapshot {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@map("project_repo_snapshots")
+}
+
+// Frozen, auditable record of exactly what an agent run saw (Anka OS v2.0 spec §12.5,
+// §13 hallucination controls). Purely additive — write-only from runCodingAgent's
+// perspective, best-effort (a failed write must never fail the actual agent run).
+model ContextSnapshot {
+  id                     String   @id @default(cuid())
+  projectId              String
+  repositoryId           String? // targeted ProjectRepository; null = legacy/primary repo
+  sessionId              String
+  userMessage            String   @db.Text
+  repoUrl                String?
+  repoName               String?
+  defaultBranch          String?
+  repoLastSyncedAt       DateTime?
+  keyFilesUsed           Json? // file paths included in this run's context
+  approvedArchitectureId String? // PhaseArtifact.id, if an approved architecture doc was in context
+  taskType               String?
+  risk                   String?
+  estimatedComplexity    String?
+  targetPaths            Json?
+  createdAt              DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, sessionId])
+  @@map("context_snapshots")
 }
 
 model Sprint {

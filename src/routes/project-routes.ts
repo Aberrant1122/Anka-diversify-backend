@@ -3,6 +3,7 @@ import { ProjectController } from '../controllers/project-controller';
 import sprintRoutes from './sprint-routes';
 import phaseRoutes from './phase-routes';
 import kanbanRoutes from './kanban-routes';
+import projectRepositoryRoutes from './project-repository-routes';
 
 const router = Router();
 const projectController = new ProjectController();
@@ -117,5 +118,8 @@ router.use('/:projectId/phases', phaseRoutes);
 
 // Kanban & Clarifications (Workflow-driven decomposition & interactive option loop)
 router.use('/:projectId/kanban', kanbanRoutes);
+
+// Multi-repository support (Anka OS v2.0 spec §11)
+router.use('/:projectId/repositories', projectRepositoryRoutes);
 
 export default router;

@@ -209,6 +209,26 @@ export class AiController {
     }
   }
 
+  async getContextSnapshots(req: Request, res: Response) {
+    try {
+      const { projectId } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+
+      const snapshots = await prisma.contextSnapshot.findMany({
+        where: { projectId },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      });
+      res.json({ success: true, data: snapshots });
+    } catch (error) {
+      console.error("Error fetching context snapshots:", error);
+      res.status(500).json({
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
   async getProjectContext(req: Request, res: Response) {
     try {
       const userId = req.headers["x-user-id"] as string;

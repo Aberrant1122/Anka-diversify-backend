@@ -3195,15 +3195,44 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
     const approvedArchitecture = await prisma.phaseArtifact.findFirst({
       where: { projectId, phase: "architecture", approved: true },
       orderBy: { createdAt: "desc" },
-      select: { content: true },
+      select: { id: true, content: true },
     });
 
     await this.saveMessage(session.id, "user", request.message);
 
-    const snapshot = projectContext.repoSnapshot;
-    const githubUrl = project?.githubUrl || "";
-    const githubToken = project?.githubToken ? decrypt(project.githubToken) : undefined;
-    const effectiveLocalPath = await this.ensureLocalWorkspace(projectId, project?.localPath, snapshot);
+    // Resolve which repo this run targets. A repositoryId pointing at a non-primary
+    // ProjectRepository pulls its own RepositorySnapshot/localPath/token instead of
+    // the legacy project-level fields — everything else below is unchanged, so runs
+    // that don't pass repositoryId (or pass the primary repo) behave exactly as before.
+    let snapshot = projectContext.repoSnapshot;
+    let githubUrl = project?.githubUrl || "";
+    let githubToken = project?.githubToken ? decrypt(project.githubToken) : undefined;
+    let targetLocalPath = project?.localPath;
+    let resolvedRepositoryId: string | null = null;
+
+    if (request.repositoryId) {
+      const targetRepo = await prisma.projectRepository.findFirst({
+        where: { id: request.repositoryId, projectId },
+      });
+      if (targetRepo && !targetRepo.isPrimary) {
+        const repoSnapshotRaw = await ProjectGitHubService.getRepositorySnapshot(targetRepo.id);
+        snapshot = repoSnapshotRaw
+          ? {
+              ...repoSnapshotRaw,
+              keyFiles: repoSnapshotRaw.keyFiles.map((file: any) => ({
+                ...file,
+                repoSnapshot: repoSnapshotRaw,
+              })),
+            }
+          : undefined;
+        githubUrl = targetRepo.githubUrl;
+        githubToken = targetRepo.githubToken ? decrypt(targetRepo.githubToken) : undefined;
+        targetLocalPath = targetRepo.localPath;
+        resolvedRepositoryId = targetRepo.id;
+      }
+    }
+
+    const effectiveLocalPath = await this.ensureLocalWorkspace(projectId, targetLocalPath, snapshot);
     const effectiveSnapshot = this.getEffectiveSnapshot(snapshot, effectiveLocalPath);
     const validationCommands = this.detectValidationCommands(effectiveLocalPath, effectiveSnapshot);
 
@@ -3216,6 +3245,32 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
     // The contract governs EVERY subsequent stage: search scope, context filter,
     // code generation guardrails, and diff critic enforcement.
     const executionContract: ExecutionContract = buildExecutionContract(intentResult, request.message, repoFileNames);
+
+    // ── Frozen ContextSnapshot (spec §12.5/§13) — audit/hallucination-analysis record
+    // of exactly what this run saw. Best-effort: never let a snapshot-write failure
+    // interrupt the actual agent run.
+    try {
+      await prisma.contextSnapshot.create({
+        data: {
+          projectId,
+          repositoryId: resolvedRepositoryId,
+          sessionId: session.id,
+          userMessage: request.message,
+          repoUrl: githubUrl || undefined,
+          repoName: (snapshot as any)?.repoName,
+          defaultBranch: (snapshot as any)?.defaultBranch,
+          repoLastSyncedAt: (snapshot as any)?.lastSyncedAt,
+          keyFilesUsed: repoFileNames as any,
+          approvedArchitectureId: approvedArchitecture?.id,
+          taskType: intentResult.taskType,
+          risk: intentResult.risk,
+          estimatedComplexity: intentResult.estimatedComplexity,
+          targetPaths: executionContract.targetPaths as any,
+        },
+      });
+    } catch (err) {
+      console.error("ContextSnapshot write failed (non-fatal):", err);
+    }
 
     // ── Stage 1: Task & Intent Analysis ──────────────────────
     onProgress?.({

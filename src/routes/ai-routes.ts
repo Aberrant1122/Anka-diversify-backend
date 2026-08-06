@@ -14,6 +14,7 @@ router.post('/projects/:projectId/chat', aiController.projectChat.bind(aiControl
 router.get('/projects/:projectId/sessions', aiController.getProjectSessions.bind(aiController));
 router.get('/projects/:projectId/sessions/:sessionId/messages', aiController.getProjectSessionMessages.bind(aiController));
 router.get('/projects/:projectId/context', aiController.getProjectContext.bind(aiController));
+router.get('/projects/:projectId/context-snapshots', aiController.getContextSnapshots.bind(aiController));
 
 // Project Health
 router.get('/projects/:projectId/health', aiController.getProjectHealth.bind(aiController));

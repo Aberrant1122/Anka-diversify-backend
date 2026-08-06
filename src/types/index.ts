@@ -104,6 +104,9 @@ export interface ChatRequest {
   message: string;
   sessionId?: string;
   context?: Record<string, any>;
+  // Which ProjectRepository this coding-agent run targets. Omit (or pass the
+  // project's primary repo id) for the legacy single-repo behavior — unchanged.
+  repositoryId?: string;
 }
 
 export interface ProposedTask {
