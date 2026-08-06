@@ -2570,6 +2570,54 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
     };
   }
 
+  private async runBuildErrorRepairPass(
+    changes: AgentFileChange[],
+    localPath: string | null | undefined,
+    commands: string[],
+    originalMessage: string,
+    errorLog: string,
+  ): Promise<{ finalChanges: AgentFileChange[]; success: boolean; errorLog?: string }> {
+    if (!changes.length || !errorLog) {
+      return { finalChanges: changes, success: false, errorLog };
+    }
+
+    try {
+      const completion = await this.getOpenAI().chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: SELF_HEALING_REPAIR_PROMPT },
+          {
+            role: "user",
+            content: `ORIGINAL REQUEST: ${originalMessage}\n\nPROPOSED FILE CHANGES:\n${JSON.stringify(changes, null, 2)}\n\nCOMPILER / FRAMEWORK BUILD ERROR TRACE:\n${errorLog}\n\nFix all build errors, type mismatches, missing imports, or JSX errors shown above. Return JSON with "changes" array containing complete updated file contents.`,
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 8000,
+        response_format: { type: "json_object" },
+      });
+
+      const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
+      if (Array.isArray(parsed.changes) && parsed.changes.length > 0) {
+        const repairMap = new Map<string, AgentFileChange>(parsed.changes.map((c: AgentFileChange) => [c.path, c]));
+        const merged: AgentFileChange[] = changes.map((c) => repairMap.get(c.path) || c);
+        for (const [p, c] of repairMap) {
+          if (!merged.find((m) => m.path === p)) merged.push(c as AgentFileChange);
+        }
+
+        if (localPath && commands.length > 0) {
+          const val = await this.validateWithShell(merged, localPath, commands);
+          if (val.success) {
+            return { finalChanges: merged, success: true, errorLog: "" };
+          }
+          return { finalChanges: merged, success: false, errorLog: val.errors };
+        }
+        return { finalChanges: merged, success: true, errorLog: "" };
+      }
+    } catch {}
+
+    return { finalChanges: changes, success: false, errorLog };
+  }
+
   private async runReflectionAndSecurityAudit(
     changes: AgentFileChange[],
   ): Promise<{
@@ -3080,30 +3128,56 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
         if (pkgContent) {
           const pkg = JSON.parse(pkgContent);
           const scripts = pkg.scripts || {};
+          const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
           const cmds: string[] = [];
 
-          if (scripts.typecheck || scripts["type-check"]) {
-            cmds.push(pkg.scripts.typecheck ? "npm run typecheck" : "npm run type-check");
-          } else if (pkg.devDependencies?.typescript || pkg.dependencies?.typescript) {
-            cmds.push("npx tsc --noEmit");
+          // Next.js framework detection
+          const isNext = Boolean(
+            deps.next ||
+            files.some((f: string) => f.includes("next.config") || f.startsWith("app/") || f.includes("/app/") || f.startsWith("pages/"))
+          );
+
+          // Angular framework detection
+          const isAngular = Boolean(
+            deps["@angular/core"] ||
+            files.some((f: string) => f.includes("angular.json"))
+          );
+
+          if (isNext) {
+            cmds.push(scripts.build ? "npm run build" : "npx next build");
+            if (scripts.typecheck || scripts["type-check"]) {
+              cmds.push(scripts.typecheck ? "npm run typecheck" : "npm run type-check");
+            }
+            return cmds;
+          }
+
+          if (isAngular) {
+            cmds.push(scripts.build ? "npm run build" : "npx ng build");
+            return cmds;
           }
 
           if (scripts.build) {
             cmds.push("npm run build");
           }
 
+          if (scripts.typecheck || scripts["type-check"]) {
+            cmds.push(scripts.typecheck ? "npm run typecheck" : "npm run type-check");
+          } else if (deps.typescript) {
+            cmds.push("npx tsc --noEmit");
+          }
+
           if (cmds.length > 0) return cmds;
         }
       } catch {}
 
-      return ["npx tsc --noEmit", "npm run build"];
+      return ["npm run build", "npx tsc --noEmit"];
     }
 
     if (hasCargo) return ["cargo check"];
     if (hasGoMod) return ["go build ./..."];
     if (hasPy) return ["python -m py_compile"];
 
-    return ["npx tsc --noEmit", "npm run build"];
+    return ["npm run build", "npx tsc --noEmit"];
   }
 
   async runCodingAgent(
@@ -3409,6 +3483,37 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
       }
     }
 
+    // ── Build Error Repair Pass ──────────────────────────────────────────────
+    if (!repairResult.success && effectiveLocalPath && effectiveValidationCommands.length > 0) {
+      onProgress?.({
+        step: 6,
+        stageName: "FEATURE_VALIDATION",
+        label: "Build Repair Pass",
+        detail: "Build verification failed. Running targeted build error repair pass...",
+        color: "text-amber-400 border-amber-500/30 bg-amber-500/10",
+        badge: "STAGE 6/7",
+        progress: 86,
+        log: `[Build Repair Pass] Analyzing build error log and running targeted compiler repair pass...`,
+      });
+
+      const buildRepairRes = await this.runBuildErrorRepairPass(
+        repairResult.finalChanges,
+        effectiveLocalPath,
+        effectiveValidationCommands,
+        request.message,
+        repairResult.errorLog || "",
+      );
+
+      if (buildRepairRes.success) {
+        repairResult.success = true;
+        repairResult.finalChanges = buildRepairRes.finalChanges;
+        repairResult.errorLog = "";
+      } else {
+        repairResult.finalChanges = buildRepairRes.finalChanges;
+        repairResult.errorLog = buildRepairRes.errorLog;
+      }
+    }
+
     // ── Stage 6: Run App & Security Review / 4-Tier Feature Validation ─────
     onProgress?.({
       step: 6,
@@ -3515,7 +3620,7 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
           { label: "CSS Layout & Styling", checked: featureChecks.find((c) => c.id === "css_styling")?.status !== "FAIL", category: "Feature" },
           { label: "JS Interactivity & Events", checked: featureChecks.find((c) => c.id === "js_interactivity")?.status !== "FAIL", category: "Feature" },
           { label: "Standalone Asset Completeness", checked: featureChecks.find((c) => c.id === "standalone_completeness")?.status !== "FAIL", category: "Feature" },
-          { label: "Zero Syntax Errors", checked: repairResult.success, category: "Build" },
+          { label: repairResult.success ? "Zero Syntax Errors" : "Syntax Errors / Build Failed", checked: repairResult.success, category: "Build" },
           { label: "Standalone App Working", checked: featureValidation.overallPassed, category: "Validation" },
         ]
       : [
@@ -3528,15 +3633,19 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
           { label: "Navigation updated", checked: featureChecks.find((c) => c.id === "nav_integration")?.status !== "FAIL", category: "Feature" },
           { label: "API connected", checked: featureChecks.find((c) => c.id === "api_connection")?.status !== "FAIL", category: "Feature" },
           { label: "No orphan components", checked: featureChecks.find((c) => c.id === "orphan_audit")?.status !== "FAIL", category: "Validation" },
-          { label: "No TS errors", checked: repairResult.success, category: "Build" },
-          { label: "Build passes", checked: repairResult.success, category: "Build" },
+          { label: repairResult.success ? "No TS / Compiler Errors" : "TypeScript / Build Compilation Failed", checked: repairResult.success, category: "Build" },
+          { label: repairResult.success ? "Build passes" : "Build Failed / Flagged", checked: repairResult.success, category: "Build" },
           { label: "Feature functional & working", checked: repairResult.success && featureValidation.overallPassed, category: "Validation" },
         ];
 
     const checklistMarkdown = `\n\n### 📋 Repository Intelligence Verification Checklist\n` +
-      `**Repository Search Confidence:** ${(finalConfidence * 100).toFixed(0)}%\n\n` +
+      `**Repository Search Confidence:** ${(finalConfidence * 100).toFixed(0)}%\n` +
+      `**Build Status:** ${repairResult.success ? "✅ Build Verified / Passed" : "❌ Build Verification Failed"}\n\n` +
       `**Search Summary:**\n${searchSummary}\n\n` +
-      defaultChecklist.map((item) => `${item.checked ? "✅" : "⚠️"} ${item.label}`).join("\n") +
+      defaultChecklist.map((item) => `${item.checked ? "✅" : "❌"} ${item.label}`).join("\n") +
+      (!repairResult.success && repairResult.errorLog
+        ? `\n\n**❌ Build Verification Errors Captured:**\n\`\`\`\n${repairResult.errorLog.slice(0, 2000)}\n\`\`\``
+        : "") +
       (featureValidation.failedChecks.length > 0
         ? `\n\n**⚠️ Feature Validation Issues:**\n` + featureChecks.filter((c) => c.status === "FAIL").map((c) => `- ${c.label}: ${c.details}`).join("\n")
         : "");
@@ -3568,7 +3677,7 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
       repaired: repairResult.attempts > 1,
       buildErrors: repairResult.errorLog,
       verificationChecklist: defaultChecklist,
-      lifecycleStage: "Done",
+      lifecycleStage: repairResult.success ? "Done" : "BuildFailed",
     };
   }
 

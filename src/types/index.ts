@@ -456,7 +456,7 @@ export interface AgentResponse {
   repaired?: boolean;
   buildErrors?: string;
   verificationChecklist?: ChecklistItem[];
-  lifecycleStage?: "Done" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
+  lifecycleStage?: "Done" | "BuildFailed" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
 }
 
 export interface AgentProgressEvent {

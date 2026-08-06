@@ -81,6 +81,7 @@ model Project {
   workflowRuns   WorkflowRun[]
   agentManifests AgentManifest[]
   decompositions TaskDecomposition[]
+  kanbanBoard    KanbanBoard?
 
   @@map("projects")
 }
@@ -516,3 +517,71 @@ model SubTaskExecution {
   @@index([status])
   @@map("sub_task_executions")
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Kanban & Interactive Clarification Models
+// ────────────────────────────────────────────────────────────────────────────
+
+model KanbanBoard {
+  id        String        @id @default(cuid())
+  projectId String        @unique
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  project Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  stages  KanbanStage[]
+
+  @@map("kanban_boards")
+}
+
+model KanbanStage {
+  id      String       @id @default(cuid())
+  boardId String
+  title   String
+  order   Int          @default(0)
+
+  board KanbanBoard  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  tasks KanbanTask[]
+
+  @@index([boardId, order])
+  @@map("kanban_stages")
+}
+
+model KanbanTask {
+  id                 String   @id @default(cuid())
+  stageId            String
+  title              String
+  description        String   @db.Text
+  acceptanceCriteria Json     @default("[]")
+  targetFiles        Json     @default("[]")
+  status             String   @default("todo") // 'todo' | 'in_progress' | 'needs_clarification' | 'completed' | 'failed'
+  order              Int      @default(0)
+  executionLogs      String?  @db.Text
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  stage         KanbanStage       @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  clarifications ClarificationQA[]
+
+  @@index([stageId, order])
+  @@index([status])
+  @@map("kanban_tasks")
+}
+
+model ClarificationQA {
+  id             String    @id @default(cuid())
+  taskId         String
+  question       String    @db.Text
+  options        Json      @default("[]") // Array of string options or { label, value, pros, cons }
+  selectedOption String?
+  userNotes      String?   @db.Text
+  resolved       Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  resolvedAt     DateTime?
+
+  task KanbanTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, resolved])
+  @@map("clarification_qas")
+}
+

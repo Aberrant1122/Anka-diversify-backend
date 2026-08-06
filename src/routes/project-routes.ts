@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { ProjectController } from '../controllers/project-controller';
 import sprintRoutes from './sprint-routes';
 import phaseRoutes from './phase-routes';
+import kanbanRoutes from './kanban-routes';
 
 const router = Router();
 const projectController = new ProjectController();
@@ -113,5 +114,8 @@ router.use('/:projectId/sprints', sprintRoutes);
 
 // Phased workflow (requirements → documentation → architecture → implementation → testing → review)
 router.use('/:projectId/phases', phaseRoutes);
+
+// Kanban & Clarifications (Workflow-driven decomposition & interactive option loop)
+router.use('/:projectId/kanban', kanbanRoutes);
 
 export default router;

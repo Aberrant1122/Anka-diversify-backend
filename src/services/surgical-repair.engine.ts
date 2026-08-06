@@ -55,26 +55,23 @@ export interface AgentFileChange {
 
 export class ErrorDiagnosticsParser {
   /**
-   * Parse TypeScript, SWC, Next.js, and Node build error logs into structured diagnostics.
+   * Parse TypeScript, SWC, Next.js, Angular, and Node build error logs into structured diagnostics.
    */
   static parse(errorLog: string): DiagnosticError[] {
     if (!errorLog) return [];
     const diagnostics: DiagnosticError[] = [];
 
-    // TS Format: src/services/ai-service.ts(2521,9): error TS2322: Type 'X' is not assignable to type 'Y'
-    const tsRegex = /([a-zA-Z0-9_\-\/\\.]+\.(?:ts|tsx|js|jsx))\(([0-9]+),([0-9]+)\):\s*error\s*(TS[0-9]+)?:\s*(.+)/g;
+    // 1. Angular / TS Format: Error: src/app/foo.ts:15:10 - error TS2304: Cannot find name 'x'
+    const angularTsRegex = /(?:Error:\s*)?([a-zA-Z0-9_\-\/\\.]+\.(?:ts|tsx|js|jsx|html|css|scss)):([0-9]+):([0-9]+)\s*-\s*error\s*(TS[0-9]+|NG[0-9]+)?:\s*(.+)/g;
     let match: RegExpExecArray | null;
 
-    while ((match = tsRegex.exec(errorLog)) !== null) {
-      const filePath = match[1].replace(/\\/g, "/");
+    while ((match = angularTsRegex.exec(errorLog)) !== null) {
+      const filePath = match[1].replace(/^\.\//, "").replace(/\\/g, "/");
       const line = parseInt(match[2], 10);
       const column = parseInt(match[3], 10);
-      const code = match[4] || "TS0000";
+      const code = match[4] || "BUILD_ERR";
       const message = match[5].trim();
-
-      // Extract symbol name if available (e.g. Cannot find name 'Foo')
       const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
-      const symbolName = symMatch ? symMatch[1] : undefined;
 
       diagnostics.push({
         file: filePath,
@@ -82,21 +79,44 @@ export class ErrorDiagnosticsParser {
         column,
         code,
         message,
-        symbolName,
+        symbolName: symMatch ? symMatch[1] : undefined,
         rawTrace: match[0],
       });
     }
 
-    // Fallback Next.js / SWC format: ./src/app/page.tsx:14:23
+    // 2. Standard TS Format: src/services/ai-service.ts(2521,9): error TS2322: Type 'X' is not assignable to type 'Y'
+    if (diagnostics.length === 0) {
+      const tsRegex = /([a-zA-Z0-9_\-\/\\.]+\.(?:ts|tsx|js|jsx))\(([0-9]+),([0-9]+)\):\s*error\s*(TS[0-9]+)?:\s*(.+)/g;
+      while ((match = tsRegex.exec(errorLog)) !== null) {
+        const filePath = match[1].replace(/^\.\//, "").replace(/\\/g, "/");
+        const line = parseInt(match[2], 10);
+        const column = parseInt(match[3], 10);
+        const code = match[4] || "TS0000";
+        const message = match[5].trim();
+        const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+
+        diagnostics.push({
+          file: filePath,
+          line,
+          column,
+          code,
+          message,
+          symbolName: symMatch ? symMatch[1] : undefined,
+          rawTrace: match[0],
+        });
+      }
+    }
+
+    // 3. Fallback Next.js / SWC format: ./src/app/page.tsx:14:23
     if (diagnostics.length === 0) {
       const genericRegex = /([a-zA-Z0-9_\-\/\\.]+\.(?:ts|tsx|js|jsx)):([0-9]+):([0-9]+)[\s\-:]+(.+)/g;
       while ((match = genericRegex.exec(errorLog)) !== null) {
-        const filePath = match[1].replace(/\\/g, "/");
+        const filePath = match[1].replace(/^\.\//, "").replace(/\\/g, "/");
         const line = parseInt(match[2], 10);
         const column = parseInt(match[3], 10);
         const message = match[4].trim();
-
         const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+
         diagnostics.push({
           file: filePath,
           line,

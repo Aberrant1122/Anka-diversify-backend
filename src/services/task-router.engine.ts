@@ -43,7 +43,6 @@ const HTML_CSS_JS_PATTERNS = [
   /plain\s*html/i,
   /single\s*page\s*html/i,
   /index\.html/i,
-  /calculator/i,
   /landing\s*page/i,
   /standalone\s*widget/i,
   /canvas\s*game/i,
