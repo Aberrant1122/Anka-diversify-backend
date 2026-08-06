@@ -457,6 +457,7 @@ export interface AgentResponse {
   buildErrors?: string;
   verificationChecklist?: ChecklistItem[];
   lifecycleStage?: "Done" | "BuildFailed" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
+  pipelineMeasurementText?: string;
 }
 
 export interface AgentProgressEvent {
@@ -474,6 +475,9 @@ export interface AgentProgressEvent {
   targetPath?: string;
   /** Full Execution Contract emitted in Stage 1 for frontend display */
   executionContract?: ExecutionContract;
+  durationMs?: number;
+  stageMetrics?: Record<string, any>;
+  pipelineMeasurementText?: string;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
