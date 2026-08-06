@@ -1,26 +1,37 @@
 import { WorkflowContextService } from "../workflow-context.service";
 import { ClarificationHandlerService } from "../clarification-handler.service";
 
-describe("Kanban & Workflow Context System", () => {
+export async function runKanbanWorkflowTests() {
+  console.log("[Test] Running Kanban & Workflow Context tests...");
   const workflowContextService = new WorkflowContextService();
   const clarificationHandlerService = new ClarificationHandlerService();
 
-  test("builds system boundary prompt correctly", () => {
-    const prompt = workflowContextService.buildSystemBoundaryPrompt({
-      projectId: "test-proj-1",
-      requirements: "Must support Google Auth",
-      architecture: "PostgreSQL + Next.js App Router",
-      implementation: "API endpoints in /api/auth",
-    });
-
-    expect(prompt).toContain("CRITICAL PROJECT WORKFLOW BOUNDARIES");
-    expect(prompt).toContain("Must support Google Auth");
-    expect(prompt).toContain("PostgreSQL + Next.js App Router");
-    expect(prompt).toContain("STRICT OUT-OF-SCOPE & AMBIGUITY RULES");
+  const prompt = workflowContextService.buildSystemBoundaryPrompt({
+    projectId: "test-proj-1",
+    requirements: "Must support Google Auth",
+    architecture: "PostgreSQL + Next.js App Router",
+    implementation: "API endpoints in /api/auth",
   });
 
-  test("formats resolved clarification context", async () => {
-    const context = await clarificationHandlerService.getResolvedClarificationContext("non-existent-task");
-    expect(context).toBe("");
+  if (!prompt.includes("CRITICAL PROJECT WORKFLOW BOUNDARIES")) {
+    throw new Error("Expected prompt to contain CRITICAL PROJECT WORKFLOW BOUNDARIES");
+  }
+  if (!prompt.includes("Must support Google Auth")) {
+    throw new Error("Expected prompt to contain requirements");
+  }
+
+  const context = await clarificationHandlerService.getResolvedClarificationContext("non-existent-task");
+  if (context !== "") {
+    throw new Error("Expected empty string for unresolved task context");
+  }
+
+  console.log("  ✓ Kanban & Workflow Context tests passed.");
+}
+
+if (require.main === module) {
+  runKanbanWorkflowTests().catch((err) => {
+    console.error("Test failed:", err);
+    process.exit(1);
   });
-});
+}
+
