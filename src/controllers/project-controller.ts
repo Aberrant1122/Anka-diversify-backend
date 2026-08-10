@@ -3,8 +3,7 @@ import path from "path";
 import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
-import { generatePresignedUrl, deleteFromS3, detectType } from "../services/upload.service";
-import { S3Service } from "../services/s3.service";
+import { generatePresignedUrl, generateDownloadUrl, deleteFromS3, detectType } from "../services/upload.service";
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
@@ -628,7 +627,7 @@ export class ProjectController {
       if (!file.s3Key) {
         return res.status(400).json({ success: false, error: "File has no S3 key" });
       }
-      const downloadUrl = await S3Service.getPresignedUrl(file.s3Key, 3600);
+      const downloadUrl = await generateDownloadUrl(file.s3Key, 3600);
       res.json({ success: true, data: { downloadUrl, filename: file.name, url: downloadUrl } });
     } catch (error) {
       console.error("Error generating download URL:", error);

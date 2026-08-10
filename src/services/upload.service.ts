@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "crypto";
 
@@ -67,6 +67,15 @@ export async function generatePresignedUrl(
     console.error("❌ Failed to generate presigned URL:", error);
     throw new Error(`Failed to generate S3 upload URL: ${error instanceof Error ? error.message : "Unknown error"}`);
   }
+}
+
+export async function generateDownloadUrl(key: string, expirationSeconds: number = 3600): Promise<string> {
+  if (!isS3Configured) {
+    throw new Error("S3 is not configured. Please check environment variables.");
+  }
+
+  const command = new GetObjectCommand({ Bucket: BUCKET, Key: key });
+  return getSignedUrl(s3, command, { expiresIn: expirationSeconds });
 }
 
 export async function deleteFromS3(key: string): Promise<void> {
