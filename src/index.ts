@@ -18,6 +18,7 @@ import "./config/env";
 const prisma = new PrismaClient();
 import { errorHandler, requestLogger } from "./middleware";
 import { authenticateToken } from "./middleware/auth";
+import { requireRole } from "./middleware/rbac";
 import aiRoutes from "./routes/ai-routes";
 import authRoutes from "./routes/auth-routes";
 import adminRoutes from "./routes/admin-routes";
@@ -85,12 +86,12 @@ app.get("/health", (req, res) => {
 // where needed — everything else requires a valid JWT.
 app.use("/api/ai", authenticateToken, aiRoutes);
 app.use("/api/auth", authRoutes);
-app.use("/api/admin", authenticateToken, adminRoutes);
+app.use("/api/admin", authenticateToken, requireRole("admin"), adminRoutes);
 app.use("/api/projects", authenticateToken, projectRoutes);
 app.use("/api/invites", inviteRoutes);
 app.use("/api/notifications", authenticateToken, notificationRoutes);
-app.use("/api/admin/rules", authenticateToken, rulesRoutes);
-app.use("/api/admin/departments", authenticateToken, departmentsRoutes);
+app.use("/api/admin/rules", authenticateToken, requireRole("admin"), rulesRoutes);
+app.use("/api/admin/departments", authenticateToken, requireRole("admin"), departmentsRoutes);
 
 // Error handler
 app.use(errorHandler);

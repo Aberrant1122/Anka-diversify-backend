@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { InviteService } from "../services/invite.service";
 import jwt from "jsonwebtoken";
 import { JWT_SECRET } from "../config/env";
+import { isValidRole } from "../middleware/rbac";
 
 const inviteService = new InviteService();
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -15,6 +16,10 @@ export class InviteController {
 
       if (!email || !role) {
         return res.status(400).json({ success: false, error: "email and role are required" });
+      }
+
+      if (!(await isValidRole(role))) {
+        return res.status(400).json({ success: false, error: `Invalid role: ${role}` });
       }
 
       const invite = await inviteService.createInvite({ email, role, department, invitedById });
@@ -109,6 +114,9 @@ export class InviteController {
   // PUT /api/invites/users/:id — update user role/dept/status
   async updateUser(req: Request, res: Response) {
     try {
+      if (req.body.role && !(await isValidRole(req.body.role))) {
+        return res.status(400).json({ success: false, error: `Invalid role: ${req.body.role}` });
+      }
       const user = await inviteService.updateUser(req.params.id as string, req.body);
       res.json({ success: true, data: user });
     } catch (error) {

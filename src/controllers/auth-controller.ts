@@ -5,23 +5,20 @@ import { prisma } from "../services/database";
 import { User } from "../types";
 import { JWT_SECRET } from "../config/env";
 
+// Public self-signup always gets this role — a caller-supplied `role` field
+// (previously accepted, including "admin") is intentionally ignored. Real role
+// assignment happens only through the admin-gated invite flow.
+const SELF_SIGNUP_ROLE = "developer";
+
 export class AuthController {
   async signup(req: Request, res: Response) {
     try {
-      const { name, email, password, role } = req.body;
+      const { name, email, password } = req.body;
 
-      if (!name || !email || !password || !role) {
+      if (!name || !email || !password) {
         return res
           .status(400)
-          .json({ message: "Name, email, password, and role are required" });
-      }
-
-      // Validate role
-      const validRoles = ["admin", "user", "manager"];
-      if (!validRoles.includes(role)) {
-        return res
-          .status(400)
-          .json({ message: "Invalid role. Must be admin, user, or manager" });
+          .json({ message: "Name, email, and password are required" });
       }
 
       // Check if user already exists
@@ -45,7 +42,7 @@ export class AuthController {
           name,
           email,
           password: hashedPassword,
-          role,
+          role: SELF_SIGNUP_ROLE,
         },
       });
 

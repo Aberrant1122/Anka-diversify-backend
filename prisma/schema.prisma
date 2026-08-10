@@ -525,6 +525,21 @@ model Department {
   @@map("departments")
 }
 
+// Canonical role registry (Anka OS v2.0 spec §5.1 Role/PermissionPolicy). User.role
+// stays a String column — not a hard FK — so every existing `user.role === 'admin'`
+// comparison across both repos keeps working unchanged; this table is what makes
+// that string a real, enforced value instead of arbitrary free text: signup/invite/
+// user-update now validate role against Role.name, and requireRole() middleware
+// gates admin-only routes on it.
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String   @default("")
+  createdAt   DateTime @default(now())
+
+  @@map("roles")
+}
+
 model OrgRule {
   id          String   @id @default(cuid())
   name        String
