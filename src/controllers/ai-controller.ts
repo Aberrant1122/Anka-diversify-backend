@@ -404,7 +404,7 @@ export class AiController {
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
       const { changes, commitMessage } = req.body as {
-        changes: { path: string; content: string }[];
+        changes: { path: string; content: string; repositoryId?: string }[];
         commitMessage: string;
       };
 
@@ -423,8 +423,42 @@ export class AiController {
         return res.status(400).json({ error: "No GitHub token configured for this project. Please add your GitHub token in the project settings." });
       }
 
-      const result = await ProjectGitHubService.pushChanges(project.githubUrl, changes, commitMessage, token);
-      res.json({ success: true, data: result });
+      // Group changes by target repository. Changes with no repositoryId (the
+      // single-repo case, and every existing caller) go to the project's primary
+      // repo — unchanged from before this grouping existed.
+      const primaryChanges = changes.filter((c) => !c.repositoryId);
+      const secondaryChangesByRepo = new Map<string, { path: string; content: string }[]>();
+      for (const c of changes) {
+        if (c.repositoryId) {
+          const list = secondaryChangesByRepo.get(c.repositoryId) || [];
+          list.push({ path: c.path, content: c.content });
+          secondaryChangesByRepo.set(c.repositoryId, list);
+        }
+      }
+
+      const pushes: Array<{ repositoryId: string | null; name: string; sha: string; url: string }> = [];
+
+      if (primaryChanges.length > 0) {
+        const result = await ProjectGitHubService.pushChanges(project.githubUrl, primaryChanges, commitMessage, token);
+        pushes.push({ repositoryId: null, name: "primary", ...result });
+      }
+
+      for (const [repositoryId, repoChanges] of secondaryChangesByRepo.entries()) {
+        const repo = await prisma.projectRepository.findFirst({ where: { id: repositoryId, projectId } });
+        if (!repo) {
+          return res.status(400).json({ error: `Repository ${repositoryId} not found on this project` });
+        }
+        const repoToken = repo.githubToken ? decrypt(repo.githubToken) : undefined;
+        if (!repoToken) {
+          return res.status(400).json({ error: `No GitHub token configured for repository "${repo.name}"` });
+        }
+        const result = await ProjectGitHubService.pushChanges(repo.githubUrl, repoChanges, commitMessage, repoToken, repo.defaultBranch);
+        pushes.push({ repositoryId: repo.id, name: repo.name, ...result });
+      }
+
+      // Top-level sha/url mirror the first push for existing callers that expect a
+      // single { sha, url } shape; `pushes` carries the full multi-repo breakdown.
+      res.json({ success: true, data: { ...pushes[0], pushes } });
     } catch (error) {
       console.error("Agent push error:", error);
       res.status(500).json({

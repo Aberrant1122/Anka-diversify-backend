@@ -51,6 +51,7 @@ import {
   RoadmapStep,
   ComponentKnowledgeNode,
   ExtendedKnowledgeGraph,
+  RepositoryContextOption,
 } from "../types";
 import { ProjectGitHubService } from "./github.service";
 import { decrypt } from "../utils/encryption";
@@ -3426,8 +3427,54 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
         });
 
         try {
+          // Was previously passed `projectContext`, which has no `existingFiles` field at
+          // all — decomposition ran with zero real file knowledge. Also now carries
+          // whichever repo (primary or a targeted secondary ProjectRepository) this run
+          // actually resolved above, instead of silently defaulting to the primary repo.
+          const decompositionContext = { existingFiles: repoFileNames, repoSnapshot: effectiveSnapshot };
+
+          // ── Multi-repo coordinator setup (spec §11.2) — only when the project
+          // actually has more than one registered repository; otherwise this is a
+          // no-op and behavior is identical to before this block existed.
+          const allRepos = await prisma.projectRepository.findMany({ where: { projectId } });
+          let availableRepositories: RepositoryContextOption[] | undefined;
+          const repoContextMap = new Map<string, { existingFiles: string[]; repoSnapshot: any }>();
+
+          if (allRepos.length > 1) {
+            for (const repo of allRepos) {
+              let repoSnap: any;
+              if (repo.isPrimary) {
+                repoSnap = effectiveSnapshot;
+              } else {
+                const raw = await ProjectGitHubService.getRepositorySnapshot(repo.id);
+                repoSnap = this.getEffectiveSnapshot(raw, repo.localPath);
+              }
+              const fileList = (repoSnap?.fileTree || []) as string[];
+              repoContextMap.set(repo.id, { existingFiles: fileList, repoSnapshot: repoSnap });
+            }
+            availableRepositories = allRepos.map((repo) => ({
+              repositoryId: repo.id,
+              name: repo.name,
+              role: repo.role,
+              existingFiles: repoContextMap.get(repo.id)?.existingFiles || [],
+            }));
+          }
+
           const decomposer = new TaskDecomposer(this.getOpenAI());
-          const graph = await decomposer.decomposeTask(request.message, projectContext, intentResult);
+          const graph = await decomposer.decomposeTask(request.message, decompositionContext, intentResult, availableRepositories);
+
+          if (graph.crossRepoEdges && graph.crossRepoEdges.length > 0) {
+            onProgress?.({
+              step: 3,
+              stageName: "REPO_SEARCH",
+              label: "Cross-Repo Plan",
+              detail: `${graph.crossRepoEdges.length} dependency edge(s) cross a repository boundary — review before push.`,
+              color: "text-purple-400 border-purple-500/30 bg-purple-500/10",
+              badge: "MULTI-REPO",
+              progress: 53,
+              log: `[Coordinator] Cross-repo edges: ${graph.crossRepoEdges.map((e) => `${e.fromSubTaskId}(${e.fromRepositoryId})→${e.toSubTaskId}(${e.toRepositoryId})`).join(", ")}`,
+            });
+          }
 
           await prisma.taskDecomposition.create({
             data: {
@@ -3447,7 +3494,14 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
             const subTask = graph.nodes.find((n) => n.id === subTaskId);
             if (!subTask) continue;
 
-            const res = await executor.executeSubTask(subTask, completedMap, projectContext, executionContract);
+            // A sub-task tagged with a repositoryId gets that repo's own context
+            // (unmodified executeSubTask, just called with different data) — falls
+            // back to the single-repo context for untagged sub-tasks, which is every
+            // sub-task in the non-multi-repo case.
+            const subTaskContext = (subTask.repositoryId && repoContextMap.get(subTask.repositoryId)) || decompositionContext;
+            const res = await executor.executeSubTask(subTask, completedMap, subTaskContext, executionContract);
+            res.repositoryId = subTask.repositoryId;
+            res.changes = res.changes.map((c) => ({ ...c, repositoryId: subTask.repositoryId }));
             completedMap.set(subTaskId, res);
           }
 

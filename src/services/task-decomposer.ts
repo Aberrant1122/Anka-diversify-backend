@@ -5,6 +5,8 @@ import {
   SubTaskCategory,
   TaskClassificationResult,
   DependencyGraph,
+  RepositoryContextOption,
+  CrossRepoEdge,
 } from "../types";
 import { TASK_DECOMPOSITION_PROMPT } from "./prompts";
 
@@ -26,9 +28,14 @@ export class TaskDecomposer {
   public async decomposeTask(
     userRequest: string,
     repositoryContext: { existingFiles?: string[]; repoSnapshot?: any },
-    intentResult: TaskClassificationResult
+    intentResult: TaskClassificationResult,
+    // Only passed for genuinely multi-repo projects (spec §11.2). When present,
+    // the model is asked to tag each sub-task with which repo it targets.
+    // Omitted/empty → identical behavior to before this param existed.
+    availableRepositories?: RepositoryContextOption[]
   ): Promise<DependencyExecutionGraph> {
     const existingFiles = repositoryContext.existingFiles || [];
+    const isMultiRepo = !!availableRepositories && availableRepositories.length > 1;
 
     let contextText = `USER REQUEST:\n${userRequest}\n\n`;
     contextText += `INTENT ANALYSIS:\n`;
@@ -37,8 +44,17 @@ export class TaskDecomposer {
     contextText += `- Estimated Complexity: ${intentResult.estimatedComplexity}\n`;
     contextText += `- Target Path: ${intentResult.targetPath || "project-wide"}\n\n`;
 
-    contextText += `EXISTING REPOSITORY FILES (SAMPLE):\n`;
-    contextText += existingFiles.slice(0, 40).map((f) => `- ${f}`).join("\n");
+    if (isMultiRepo) {
+      contextText += `MULTIPLE REPOSITORIES AVAILABLE — every sub-task MUST include a "repositoryId" field set to one of these exact IDs:\n`;
+      for (const repo of availableRepositories!) {
+        contextText += `- repositoryId "${repo.repositoryId}": "${repo.name}" (role: ${repo.role})\n`;
+        contextText += `  Sample files: ${repo.existingFiles.slice(0, 15).join(", ") || "(none yet)"}\n`;
+      }
+      contextText += `A sub-task that changes files in one repo must not list targetFiles from another repo. If a sub-task in one repo depends on a sub-task in a different repo (e.g. frontend consuming a backend API), still express that as a normal "dependencies" entry — cross-repo edges are detected automatically from that.\n\n`;
+    } else {
+      contextText += `EXISTING REPOSITORY FILES (SAMPLE):\n`;
+      contextText += existingFiles.slice(0, 40).map((f) => `- ${f}`).join("\n");
+    }
 
     try {
       const response = await this.openai.chat.completions.create({
@@ -54,7 +70,8 @@ export class TaskDecomposer {
       const rawContent = response.choices[0]?.message?.content || "{}";
       const parsed = JSON.parse(rawContent);
 
-      const graph = this.normalizeAndValidateGraph(parsed, userRequest);
+      const validRepoIds = availableRepositories?.map((r) => r.repositoryId);
+      const graph = this.normalizeAndValidateGraph(parsed, userRequest, validRepoIds);
       return graph;
     } catch (err: any) {
       console.error("[TaskDecomposer] Error in task decomposition:", err?.message || err);
@@ -171,7 +188,7 @@ export class TaskDecomposer {
   /**
    * Normalizes raw LLM output graph, ensures DAG acyclicity, and sets topological execution order.
    */
-  private normalizeAndValidateGraph(parsed: any, userRequest: string): DependencyExecutionGraph {
+  private normalizeAndValidateGraph(parsed: any, userRequest: string, validRepoIds?: string[]): DependencyExecutionGraph {
     const rawNodes = Array.isArray(parsed.nodes) ? parsed.nodes : [];
 
     const nodes: SubTask[] = rawNodes.map((n: any, idx: number) => ({
@@ -181,6 +198,11 @@ export class TaskDecomposer {
       targetFiles: Array.isArray(n.targetFiles) ? n.targetFiles : [],
       dependencies: Array.isArray(n.dependencies) ? n.dependencies : [],
       estimatedComplexity: n.estimatedComplexity === "MEDIUM" ? "MEDIUM" : "SMALL",
+      // Only kept if it matches a repo we actually offered — a hallucinated ID
+      // is dropped rather than trusted.
+      repositoryId: validRepoIds && typeof n.repositoryId === "string" && validRepoIds.includes(n.repositoryId)
+        ? n.repositoryId
+        : undefined,
     }));
 
     // Enforce bounds: 2 to 8 sub-tasks
@@ -210,7 +232,31 @@ export class TaskDecomposer {
     }
 
     candidateGraph.executionOrder = this.topologicalSort(candidateGraph);
+    candidateGraph.crossRepoEdges = this.computeCrossRepoEdges(candidateGraph);
     return candidateGraph;
+  }
+
+  // The "shared contract" signal from spec §11.2, scoped down to what's cheap and
+  // honest to compute without another LLM call: which dependency edges cross a
+  // repository boundary. Not a negotiated API contract — a map of where one exists.
+  private computeCrossRepoEdges(graph: DependencyExecutionGraph): CrossRepoEdge[] {
+    const edges: CrossRepoEdge[] = [];
+    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+    for (const node of graph.nodes) {
+      if (!node.repositoryId) continue;
+      for (const depId of node.dependencies || []) {
+        const dep = byId.get(depId);
+        if (dep?.repositoryId && dep.repositoryId !== node.repositoryId) {
+          edges.push({
+            fromSubTaskId: dep.id,
+            fromRepositoryId: dep.repositoryId,
+            toSubTaskId: node.id,
+            toRepositoryId: node.repositoryId,
+          });
+        }
+      }
+    }
+    return edges;
   }
 
   private normalizeCategory(cat: string): SubTaskCategory {

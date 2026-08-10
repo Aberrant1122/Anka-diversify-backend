@@ -329,6 +329,9 @@ export interface AgentFileChange {
   layer?: "Controller" | "Service" | "Repository" | "Schema" | "UI";
   action?: "create" | "modify" | "delete";
   isDeleted?: boolean;
+  // Which ProjectRepository this change targets, for multi-repo coordinated changes.
+  // Undefined = the project's primary/legacy repo (unchanged single-repo behavior).
+  repositoryId?: string;
 }
 
 export interface RoadmapStep {
@@ -560,6 +563,18 @@ export interface SubTask {
   dependencies: string[];
   /** Estimated complexity */
   estimatedComplexity: "SMALL" | "MEDIUM";
+  // Which ProjectRepository this sub-task targets, for multi-repo coordinated
+  // changes (spec §11.2). Undefined = single-repo mode, unchanged behavior.
+  repositoryId?: string;
+}
+
+// A dependency edge whose two sub-tasks target different repositories — the
+// signal a human should look at the cross-repo boundary before merging.
+export interface CrossRepoEdge {
+  fromSubTaskId: string;
+  fromRepositoryId: string;
+  toSubTaskId: string;
+  toRepositoryId: string;
 }
 
 export interface DependencyExecutionGraph {
@@ -569,6 +584,17 @@ export interface DependencyExecutionGraph {
   executionOrder: string[];
   /** Graph schema version (e.g., "1.0.0") */
   graphVersion: string;
+  /** Populated when nodes span more than one repository */
+  crossRepoEdges?: CrossRepoEdge[];
+}
+
+// One repository's available context, offered to the decomposer when a project
+// has more than one ProjectRepository — lets it tag sub-tasks with repositoryId.
+export interface RepositoryContextOption {
+  repositoryId: string;
+  name: string;
+  role: string;
+  existingFiles: string[];
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -593,6 +619,8 @@ export interface SubTaskExecutionResult {
   changes: AgentFileChange[];
   /** Error messages if failed */
   errors?: string[];
+  /** Set by the orchestrator after execution, from the source SubTask's repositoryId */
+  repositoryId?: string;
 }
 
 export interface DecompositionExecutionState {
