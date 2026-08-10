@@ -4,6 +4,7 @@ import sprintRoutes from './sprint-routes';
 import phaseRoutes from './phase-routes';
 import kanbanRoutes from './kanban-routes';
 import projectRepositoryRoutes from './project-repository-routes';
+import { requireRole } from '../middleware/rbac';
 
 const router = Router();
 const projectController = new ProjectController();
@@ -95,7 +96,7 @@ router.get('/:id/git/branches', projectController.getGitBranches.bind(projectCon
 router.get('/:id/git/pulls', projectController.getGitPulls.bind(projectController));
 
 // S3 Configuration Check
-router.get('/config/s3', projectController.checkS3Config.bind(projectController));
+router.get('/config/s3', requireRole('admin'), projectController.checkS3Config.bind(projectController));
 
 // Project rules
 router.post('/:id/rules', projectController.createProjectRule.bind(projectController));
