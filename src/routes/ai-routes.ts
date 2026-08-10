@@ -15,6 +15,9 @@ router.get('/projects/:projectId/sessions', aiController.getProjectSessions.bind
 router.get('/projects/:projectId/sessions/:sessionId/messages', aiController.getProjectSessionMessages.bind(aiController));
 router.get('/projects/:projectId/context', aiController.getProjectContext.bind(aiController));
 router.get('/projects/:projectId/context-snapshots', aiController.getContextSnapshots.bind(aiController));
+router.get('/projects/:projectId/drift-records', aiController.getDriftRecords.bind(aiController));
+router.post('/projects/:projectId/drift-records', aiController.createDriftRecord.bind(aiController));
+router.patch('/projects/:projectId/drift-records/:recordId', aiController.resolveDriftRecord.bind(aiController));
 
 // Project Health
 router.get('/projects/:projectId/health', aiController.getProjectHealth.bind(aiController));

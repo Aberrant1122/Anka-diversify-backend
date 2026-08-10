@@ -3195,7 +3195,7 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
     const approvedArchitecture = await prisma.phaseArtifact.findFirst({
       where: { projectId, phase: "architecture", approved: true },
       orderBy: { createdAt: "desc" },
-      select: { id: true, content: true },
+      select: { id: true, content: true, createdAt: true },
     });
 
     await this.saveMessage(session.id, "user", request.message);
@@ -3246,6 +3246,49 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
     // code generation guardrails, and diff critic enforcement.
     const executionContract: ExecutionContract = buildExecutionContract(intentResult, request.message, repoFileNames);
 
+    // ── Evidence labels (spec §13.1) — classifies each context source this run used.
+    // Purely a labeling pass over data already gathered above; no new LLM call.
+    const repoLastSyncedAt = (snapshot as any)?.lastSyncedAt as Date | string | undefined;
+    const evidenceLabels: Record<string, string> = {};
+    if (repoFileNames.length > 0) evidenceLabels.repoFiles = "Verified-Repository";
+    if (approvedArchitecture) evidenceLabels.architecture = "Approved-Human";
+    evidenceLabels.taskClassification = "Inferred-Agent";
+    if (!repoFileNames.length && !approvedArchitecture) evidenceLabels.overall = "Unknown";
+
+    // ── ArchitectureDriftRecord heuristic (spec §12.4) — cheap, timestamp-based only:
+    // flags when the repo has been synced meaningfully *after* the approved architecture
+    // doc was written, since that's when code and doc are most likely to have diverged.
+    // This is not semantic comparison — it's a signal for a human to look, not a verdict.
+    if (approvedArchitecture && repoLastSyncedAt) {
+      const repoSyncTime = new Date(repoLastSyncedAt).getTime();
+      const architectureTime = approvedArchitecture.createdAt.getTime();
+      const DRIFT_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 1 day
+      if (repoSyncTime - architectureTime > DRIFT_THRESHOLD_MS) {
+        try {
+          const existingOpenDrift = await prisma.architectureDriftRecord.findFirst({
+            where: { projectId, status: "open", detectedBy: "heuristic" },
+          });
+          if (!existingOpenDrift) {
+            await prisma.architectureDriftRecord.create({
+              data: {
+                projectId,
+                description: `Repository was synced ${Math.round((repoSyncTime - architectureTime) / (24 * 60 * 60 * 1000))} day(s) after the current approved architecture doc was written — code may have moved on since the doc was approved.`,
+                evidence: {
+                  architectureArtifactId: approvedArchitecture.id,
+                  architectureApprovedAt: approvedArchitecture.createdAt,
+                  repoLastSyncedAt,
+                } as any,
+                risk: "low",
+                detectedBy: "heuristic",
+              },
+            });
+          }
+        } catch (err) {
+          console.error("ArchitectureDriftRecord heuristic write failed (non-fatal):", err);
+        }
+      }
+    }
+
     // ── Frozen ContextSnapshot (spec §12.5/§13) — audit/hallucination-analysis record
     // of exactly what this run saw. Best-effort: never let a snapshot-write failure
     // interrupt the actual agent run.
@@ -3259,13 +3302,14 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
           repoUrl: githubUrl || undefined,
           repoName: (snapshot as any)?.repoName,
           defaultBranch: (snapshot as any)?.defaultBranch,
-          repoLastSyncedAt: (snapshot as any)?.lastSyncedAt,
+          repoLastSyncedAt,
           keyFilesUsed: repoFileNames as any,
           approvedArchitectureId: approvedArchitecture?.id,
           taskType: intentResult.taskType,
           risk: intentResult.risk,
           estimatedComplexity: intentResult.estimatedComplexity,
           targetPaths: executionContract.targetPaths as any,
+          evidenceLabels: evidenceLabels as any,
         },
       });
     } catch (err) {

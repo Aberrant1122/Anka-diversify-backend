@@ -84,6 +84,7 @@ model Project {
   kanbanBoard    KanbanBoard?
   repositories   ProjectRepository[]
   contextSnapshots ContextSnapshot[]
+  architectureDriftRecords ArchitectureDriftRecord[]
 
   @@map("projects")
 }
@@ -445,12 +446,42 @@ model ContextSnapshot {
   risk                   String?
   estimatedComplexity    String?
   targetPaths            Json?
+  // Evidence classification for this run's context sources, per spec §13.1
+  // (Verified-Repository / Verified-Execution / Approved-Human / Retrieved-History /
+  // Inferred-Agent / Unknown). Computed at write time from data already gathered —
+  // no new LLM call, purely labeling what runCodingAgent already collected.
+  evidenceLabels         Json?
   createdAt              DateTime @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, sessionId])
   @@map("context_snapshots")
+}
+
+// Flags a disagreement between approved architecture and observed repository state
+// (spec §12.4). Detection here is a cheap, timestamp-based heuristic run inline in
+// runCodingAgent (no extra LLM call) — not full semantic comparison. Records can also
+// be created directly (human- or agent-flagged) via the API for a real conflict found
+// during other work.
+model ArchitectureDriftRecord {
+  id                String    @id @default(cuid())
+  projectId         String
+  description       String    @db.Text
+  affectedScope     Json? // e.g. file paths or component names believed affected
+  evidence          Json? // e.g. { architectureArtifactId, architectureApprovedAt, repoLastSyncedAt }
+  risk              String    @default("medium") // 'low' | 'medium' | 'high' | 'critical'
+  proposedResolution String?  @db.Text
+  ownerUserId       String?
+  status            String    @default("open") // 'open' | 'resolved_code_corrected' | 'resolved_architecture_updated' | 'accepted_exception' | 'dismissed'
+  detectedBy        String    @default("heuristic") // 'heuristic' | 'agent' | 'human'
+  createdAt         DateTime  @default(now())
+  resolvedAt        DateTime?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+  @@map("architecture_drift_records")
 }
 
 model Sprint {

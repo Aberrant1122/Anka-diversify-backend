@@ -229,6 +229,91 @@ export class AiController {
     }
   }
 
+  async getDriftRecords(req: Request, res: Response) {
+    try {
+      const { projectId } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+
+      const records = await prisma.architectureDriftRecord.findMany({
+        where: { projectId },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      });
+      res.json({ success: true, data: records });
+    } catch (error) {
+      console.error("Error fetching drift records:", error);
+      res.status(500).json({
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  async createDriftRecord(req: Request, res: Response) {
+    try {
+      const { projectId } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+
+      const { description, affectedScope, evidence, risk, proposedResolution } = req.body;
+      if (!description) {
+        return res.status(400).json({ error: "description is required" });
+      }
+
+      const record = await prisma.architectureDriftRecord.create({
+        data: {
+          projectId,
+          description,
+          affectedScope,
+          evidence,
+          risk: risk || "medium",
+          proposedResolution,
+          detectedBy: "human",
+        },
+      });
+      res.status(201).json({ success: true, data: record });
+    } catch (error) {
+      console.error("Error creating drift record:", error);
+      res.status(500).json({
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  async resolveDriftRecord(req: Request, res: Response) {
+    try {
+      const { projectId, recordId } = req.params;
+      if (Array.isArray(projectId) || Array.isArray(recordId)) {
+        return res.status(400).json({ error: "Invalid parameters" });
+      }
+
+      const { status, proposedResolution } = req.body;
+      const validStatuses = ["open", "resolved_code_corrected", "resolved_architecture_updated", "accepted_exception", "dismissed"];
+      if (!status || !validStatuses.includes(status)) {
+        return res.status(400).json({ error: `status must be one of: ${validStatuses.join(", ")}` });
+      }
+
+      const existing = await prisma.architectureDriftRecord.findFirst({ where: { id: recordId, projectId } });
+      if (!existing) return res.status(404).json({ error: "Drift record not found" });
+
+      const record = await prisma.architectureDriftRecord.update({
+        where: { id: recordId },
+        data: {
+          status,
+          proposedResolution: proposedResolution ?? undefined,
+          resolvedAt: status === "open" ? null : new Date(),
+        },
+      });
+      res.json({ success: true, data: record });
+    } catch (error) {
+      console.error("Error resolving drift record:", error);
+      res.status(500).json({
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
   async getProjectContext(req: Request, res: Response) {
     try {
       const userId = req.headers["x-user-id"] as string;
