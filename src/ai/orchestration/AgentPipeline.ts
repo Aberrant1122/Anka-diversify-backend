@@ -26,6 +26,14 @@ import { ManifestValidator } from "../../services/manifest-validator";
 import { SemanticRetrievalEngine } from "../../services/semantic-retrieval.engine";
 import { decrypt } from "../../utils/encryption";
 
+/**
+ * Per-project cache of the last successfully indexed repository revision hash.
+ * When the effective-snapshot revision matches, Stage 4 re-uses the existing
+ * vector store and skips the embedding step entirely.
+ * Keyed by projectId → contentHash string.
+ */
+const _lastIndexedRevision = new Map<string, string>();
+
 const prisma = new PrismaClient();
 
 export class AgentPipeline {
@@ -151,14 +159,31 @@ export class AgentPipeline {
     );
 
     // Stage 4: Real Vector & Hybrid Keyword Semantic Retrieval
+    // Guard: skip re-indexing if the effective repository content has not changed
+    // since the last pipeline run for this project (revision-based freshness check).
     const s4Start = performance.now();
+    const currentRevisionHash = effectiveSnapshot.revision?.contentHash;
+    const cachedRevisionHash = _lastIndexedRevision.get(projectId);
+    const revisionChanged = currentRevisionHash !== cachedRevisionHash;
+
     try {
       const semanticEngine = new SemanticRetrievalEngine();
       const rawSnapshotFiles = Array.isArray(effectiveSnapshot)
         ? effectiveSnapshot
         : effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || [];
 
-      await semanticEngine.indexCodebase(rawSnapshotFiles);
+      if (revisionChanged || !currentRevisionHash) {
+        // Repository has changed (or has no revision) — re-index embeddings.
+        await semanticEngine.indexCodebase(rawSnapshotFiles);
+        if (currentRevisionHash) {
+          _lastIndexedRevision.set(projectId, currentRevisionHash);
+        }
+      } else {
+        // Repository is unchanged — skip re-indexing entirely.
+        // The EmbeddingCacheManager already holds chunk vectors from the previous run.
+        console.log(`[AgentPipeline] Revision unchanged (${currentRevisionHash.slice(0, 12)}…) — skipping re-indexing for project ${projectId}`);
+      }
+
       const semanticResults = await semanticEngine.search(request.message, 10);
 
       // Enrich optimizedContext.fileContext if top semantic vector matches are not present

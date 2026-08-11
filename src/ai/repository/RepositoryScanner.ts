@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { scanDirectoryFiles, mergeFilesWithDiskPriority } from "../../services/repository-tool.engine";
-import { RepositorySnapshotData } from "./RepositorySnapshot";
+import { RepositorySnapshotData, computeRevision } from "./RepositorySnapshot";
 
 export class RepositoryScanner {
   static async ensureLocalWorkspace(
@@ -64,6 +64,11 @@ export class RepositoryScanner {
     // Disk files win; snapshot is fallback for remote-only paths.
     const mergedList = mergeFilesWithDiskPriority(candidateDirs, snapshotList);
 
+    // Stamp a deterministic content fingerprint derived from the effective
+    // (disk-first) file set. This is the authoritative revision for the
+    // repository intelligence generated in this pipeline run.
+    const revision = computeRevision(mergedList);
+
     return {
       repoName: snapshot?.repoName || "workspace",
       defaultBranch: snapshot?.defaultBranch || "main",
@@ -72,6 +77,7 @@ export class RepositoryScanner {
       fileTree: mergedList.map((f) => f.path),
       keyFiles: mergedList,
       lastSyncedAt: snapshot?.lastSyncedAt || new Date(),
+      revision,
     };
   }
 }
