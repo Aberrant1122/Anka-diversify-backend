@@ -160,6 +160,7 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
       maxRounds: 5,
       confidenceThreshold: 0.80,
       contract,
+      projectId: projectContext.project.id,
     });
 
     const reasoningTrace = await reasoningEngine.executeReasoningLoop(message, intentResult.intent, contract);

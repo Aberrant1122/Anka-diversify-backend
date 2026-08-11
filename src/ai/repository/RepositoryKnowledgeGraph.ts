@@ -1,5 +1,67 @@
+import fs from "fs";
 import path from "path";
 import { ExtendedKnowledgeGraph, ComponentKnowledgeNode } from "../shared/types";
+
+export interface PersistedKnowledgeGraph {
+  revisionHash: string;
+  generatedAt: string;
+  graph: ExtendedKnowledgeGraph;
+}
+
+/**
+ * Load persisted project knowledge graph from .anka-cache/projects/{projectId}/knowledge-graph.json
+ * If expectedRevisionHash is provided, returns null if the persisted graph's revisionHash differs.
+ */
+export function loadPersistedKnowledgeGraph(
+  projectId: string,
+  expectedRevisionHash?: string,
+  customBaseDir?: string,
+): ExtendedKnowledgeGraph | null {
+  try {
+    const cwd = customBaseDir || process.cwd();
+    const kgPath = path.join(cwd, ".anka-cache", "projects", projectId, "knowledge-graph.json");
+    if (!fs.existsSync(kgPath)) return null;
+    const raw = fs.readFileSync(kgPath, "utf8");
+    const data: PersistedKnowledgeGraph = JSON.parse(raw);
+
+    if (!data || typeof data.revisionHash !== "string" || !data.graph) {
+      return null;
+    }
+
+    if (expectedRevisionHash && data.revisionHash !== expectedRevisionHash) {
+      return null;
+    }
+
+    return data.graph;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save project knowledge graph to .anka-cache/projects/{projectId}/knowledge-graph.json
+ */
+export function savePersistedKnowledgeGraph(
+  projectId: string,
+  revisionHash: string,
+  graph: ExtendedKnowledgeGraph,
+  customBaseDir?: string,
+): void {
+  try {
+    const cwd = customBaseDir || process.cwd();
+    const dir = path.join(cwd, ".anka-cache", "projects", projectId);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const kgPath = path.join(dir, "knowledge-graph.json");
+    const record: PersistedKnowledgeGraph = {
+      revisionHash,
+      generatedAt: new Date().toISOString(),
+      graph,
+    };
+    fs.writeFileSync(kgPath, JSON.stringify(record, null, 2), "utf8");
+  } catch {}
+}
 
 export class RepositoryKnowledgeGraph {
   static skeletonizeDependencyFile(content: string): string {

@@ -7,7 +7,7 @@ import { IntentClassifier } from "../classification/IntentClassifier";
 import { buildExecutionContract } from "../contracts/ExecutionContractBuilder";
 import { ContractGuardrails } from "../contracts/ContractGuardrails";
 import { RepositoryScanner } from "../repository/RepositoryScanner";
-import { RepositoryKnowledgeGraph } from "../repository/RepositoryKnowledgeGraph";
+import { RepositoryKnowledgeGraph, loadPersistedKnowledgeGraph, savePersistedKnowledgeGraph } from "../repository/RepositoryKnowledgeGraph";
 import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder";
 import { RepositorySearch } from "../repository/RepositorySearch";
 import { CodeGenerator } from "../generation/CodeGenerator";
@@ -53,6 +53,7 @@ export class AgentPipeline {
     const snapshot = projectContext.repoSnapshot;
     const effectiveLocalPath = await RepositoryScanner.ensureLocalWorkspace(projectId, project?.localPath, snapshot);
     const effectiveSnapshot = RepositoryScanner.getEffectiveSnapshot(snapshot, effectiveLocalPath);
+    const currentRevisionHash = effectiveSnapshot.revision?.contentHash;
     const validationCommands = ValidationPlanner.detectValidationCommands(effectiveLocalPath, effectiveSnapshot);
 
     const pipelineStart = performance.now();
@@ -105,7 +106,18 @@ export class AgentPipeline {
 
     // Stage 2: Understand Goal & Knowledge Graph
     const s2Start = performance.now();
-    const knowledgeGraph = await RepositoryKnowledgeGraph.buildKnowledgeGraph(effectiveSnapshot);
+    let knowledgeGraph = currentRevisionHash
+      ? loadPersistedKnowledgeGraph(projectId, currentRevisionHash)
+      : null;
+
+    if (knowledgeGraph) {
+      console.log(`[AgentPipeline] Knowledge graph unchanged (${currentRevisionHash?.slice(0, 12)}…) — reusing cached graph for project ${projectId}`);
+    } else {
+      knowledgeGraph = await RepositoryKnowledgeGraph.buildKnowledgeGraph(effectiveSnapshot);
+      if (currentRevisionHash) {
+        savePersistedKnowledgeGraph(projectId, currentRevisionHash, knowledgeGraph);
+      }
+    }
     const s2Time = performance.now() - s2Start;
     const scannedCount = repoFileNames.length || 1;
     const extractedSymbolsCount = (knowledgeGraph as any).symbols?.size || scannedCount * 5;
@@ -155,7 +167,6 @@ export class AgentPipeline {
     // Guard: skip re-indexing if the effective repository content has not changed
     // since the last pipeline run for this project (persisted revision freshness check).
     const s4Start = performance.now();
-    const currentRevisionHash = effectiveSnapshot.revision?.contentHash;
     const persistedRevision = loadPersistedRevision(projectId);
     const cachedRevisionHash = persistedRevision?.contentHash;
     const revisionChanged = !persistedRevision || currentRevisionHash !== cachedRevisionHash;
