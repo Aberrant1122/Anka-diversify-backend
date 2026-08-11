@@ -93,7 +93,7 @@ export class AutomatedValidationPipelineEngine {
       stageResults = [];
       let currentAttemptFailed = false;
 
-      // ── Stage 1: Compile Check ─────────────────────────────────────────────
+      // ── Stage 1: Compile Check ───────────────────────────────────────+──────
       const compileRes = await this.runShellStage(
         "compile",
         this.options.commands?.compile || "npx tsc --noEmit",

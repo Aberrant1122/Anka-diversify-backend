@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import { AiService } from "./ai-service";
+import { AiService } from "../ai/application/AiService";
 
 const prisma = new PrismaClient();
 const aiService = AiService.getInstance();
