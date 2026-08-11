@@ -22,17 +22,10 @@ import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { PipelineTelemetry } from "./PipelineTelemetry";
 import { PipelineResultBuilder } from "./PipelineResult";
 import { SubTaskExecutor } from "../../services/sub-task-executor";
+import { RepositorySnapshotData, loadPersistedRevision, savePersistedRevision } from "../repository/RepositorySnapshot";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { SemanticRetrievalEngine } from "../../services/semantic-retrieval.engine";
 import { decrypt } from "../../utils/encryption";
-
-/**
- * Per-project cache of the last successfully indexed repository revision hash.
- * When the effective-snapshot revision matches, Stage 4 re-uses the existing
- * vector store and skips the embedding step entirely.
- * Keyed by projectId → contentHash string.
- */
-const _lastIndexedRevision = new Map<string, string>();
 
 const prisma = new PrismaClient();
 
@@ -160,14 +153,17 @@ export class AgentPipeline {
 
     // Stage 4: Real Vector & Hybrid Keyword Semantic Retrieval
     // Guard: skip re-indexing if the effective repository content has not changed
-    // since the last pipeline run for this project (revision-based freshness check).
+    // since the last pipeline run for this project (persisted revision freshness check).
     const s4Start = performance.now();
     const currentRevisionHash = effectiveSnapshot.revision?.contentHash;
-    const cachedRevisionHash = _lastIndexedRevision.get(projectId);
-    const revisionChanged = currentRevisionHash !== cachedRevisionHash;
+    const persistedRevision = loadPersistedRevision(projectId);
+    const cachedRevisionHash = persistedRevision?.contentHash;
+    const revisionChanged = !persistedRevision || currentRevisionHash !== cachedRevisionHash;
+
+    const projectCacheDir = path.join(process.cwd(), ".anka-cache", "projects", projectId);
 
     try {
-      const semanticEngine = new SemanticRetrievalEngine();
+      const semanticEngine = new SemanticRetrievalEngine(undefined, projectCacheDir);
       const rawSnapshotFiles = Array.isArray(effectiveSnapshot)
         ? effectiveSnapshot
         : effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || [];
@@ -175,8 +171,8 @@ export class AgentPipeline {
       if (revisionChanged || !currentRevisionHash) {
         // Repository has changed (or has no revision) — re-index embeddings.
         await semanticEngine.indexCodebase(rawSnapshotFiles);
-        if (currentRevisionHash) {
-          _lastIndexedRevision.set(projectId, currentRevisionHash);
+        if (effectiveSnapshot.revision) {
+          savePersistedRevision(projectId, effectiveSnapshot.revision);
         }
       } else {
         // Repository is unchanged — skip re-indexing entirely.

@@ -1,4 +1,6 @@
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 
 // ─── Repository Revision ──────────────────────────────────────────────────────
 
@@ -52,6 +54,61 @@ export function computeRevision(
     fileCount: entries.length,
     generatedAt: new Date(),
   };
+}
+
+/**
+ * Load persisted project revision from .anka-cache/projects/{projectId}/revision.json
+ */
+export function loadPersistedRevision(
+  projectId: string,
+  customBaseDir?: string,
+): RepositoryRevision | null {
+  try {
+    const cwd = customBaseDir || process.cwd();
+    const revPath = path.join(cwd, ".anka-cache", "projects", projectId, "revision.json");
+    if (!fs.existsSync(revPath)) return null;
+    const raw = fs.readFileSync(revPath, "utf8");
+    const data = JSON.parse(raw);
+    if (!data || typeof data.contentHash !== "string") return null;
+    return {
+      contentHash: data.contentHash,
+      fileCount: typeof data.fileCount === "number" ? data.fileCount : 0,
+      generatedAt: data.generatedAt ? new Date(data.generatedAt) : new Date(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save project revision to .anka-cache/projects/{projectId}/revision.json
+ */
+export function savePersistedRevision(
+  projectId: string,
+  revision: RepositoryRevision,
+  customBaseDir?: string,
+): void {
+  try {
+    const cwd = customBaseDir || process.cwd();
+    const dir = path.join(cwd, ".anka-cache", "projects", projectId);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const revPath = path.join(dir, "revision.json");
+    fs.writeFileSync(
+      revPath,
+      JSON.stringify(
+        {
+          contentHash: revision.contentHash,
+          fileCount: revision.fileCount,
+          generatedAt: revision.generatedAt.toISOString(),
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch {}
 }
 
 // ─── Repository Snapshot Data ─────────────────────────────────────────────────
