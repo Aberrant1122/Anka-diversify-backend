@@ -161,6 +161,7 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
       confidenceThreshold: 0.80,
       contract,
       projectId: projectContext.project.id,
+      toolEngine,
     });
 
     const reasoningTrace = await reasoningEngine.executeReasoningLoop(message, intentResult.intent, contract);

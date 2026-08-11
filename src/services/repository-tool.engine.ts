@@ -289,11 +289,11 @@ export class MultiGraphIndex {
   public apiGraph: ApiGraphNode[] = [];
   public prismaModelGraph: PrismaModelGraphNode[] = [];
 
-  constructor(snapshotFiles: SnapshotFile[]) {
-    this.buildIndices(snapshotFiles);
+  constructor(snapshotFiles: SnapshotFile[], knowledgeGraph?: any) {
+    this.buildIndices(snapshotFiles, knowledgeGraph);
   }
 
-  private buildIndices(rawFiles: SnapshotFile[]) {
+  private buildIndices(rawFiles: SnapshotFile[], knowledgeGraph?: any) {
     // 1. Build File Index
     for (const rf of rawFiles) {
       if (!rf.path) continue;
@@ -417,23 +417,55 @@ export class MultiGraphIndex {
       }
     }
 
-    // Cross-link Who Imports / Who Renders
-    for (const [p, fe] of this.filesMap.entries()) {
-      for (const node of this.componentGraph.values()) {
-        if (node.file === p) continue;
-
-        if (fe.content.includes(node.name)) {
-          if (fe.content.includes(`import`) && fe.content.includes(node.name)) {
-            node.whoImportsIt.push({ file: p, symbols: [node.name] });
+    // Cross-link Who Imports / Who Renders (reuse knowledgeGraph when available)
+    if (knowledgeGraph && knowledgeGraph.componentNodes) {
+      for (const [name, node] of Object.entries(knowledgeGraph.componentNodes as Record<string, any>)) {
+        if (!this.componentGraph.has(name)) {
+          const compNode: ComponentGraphNode = {
+            name: node.component || name,
+            normalizedName: SymbolNormalizer.canonical(node.component || name),
+            file: node.file,
+            exportKind: node.exportKind || "named",
+            whoImportsIt: (node.whoImportsIt || []).map((i: any) => ({ file: i.file, symbols: i.importedSymbols || [] })),
+            whoRendersIt: node.whoRendersIt || [],
+            whichRouteOwnsIt: node.whichRouteOwnsIt || null,
+            isReachable: Boolean(node.isReachable),
+            reachabilityReason: node.reachabilityReason || "",
+            snippet: `component ${node.component || name} in ${node.file}`,
+          };
+          this.componentGraph.set(name, compNode);
+        } else {
+          const existing = this.componentGraph.get(name)!;
+          if (node.whoImportsIt && node.whoImportsIt.length > 0 && existing.whoImportsIt.length === 0) {
+            existing.whoImportsIt = node.whoImportsIt.map((i: any) => ({ file: i.file, symbols: i.importedSymbols || [] }));
           }
+          if (node.whoRendersIt && node.whoRendersIt.length > 0 && existing.whoRendersIt.length === 0) {
+            existing.whoRendersIt = node.whoRendersIt;
+          }
+          if (node.whichRouteOwnsIt) existing.whichRouteOwnsIt = node.whichRouteOwnsIt;
+          existing.isReachable = Boolean(node.isReachable);
+          if (node.reachabilityReason) existing.reachabilityReason = node.reachabilityReason;
+        }
+      }
+    } else {
+      // Fallback regex cross-link loop when knowledgeGraph is not supplied
+      for (const [p, fe] of this.filesMap.entries()) {
+        for (const node of this.componentGraph.values()) {
+          if (node.file === p) continue;
 
-          const jsxRegex = new RegExp(`<${node.name}(\\s|>|\\/)`);
-          if (jsxRegex.test(fe.content)) {
-            node.whoRendersIt.push({
-              file: p,
-              parentComponent: fe.baseName,
-              jsxTag: `<${node.name}>`,
-            });
+          if (fe.content.includes(node.name)) {
+            if (fe.content.includes(`import`) && fe.content.includes(node.name)) {
+              node.whoImportsIt.push({ file: p, symbols: [node.name] });
+            }
+
+            const jsxRegex = new RegExp(`<${node.name}(\\s|>|\\/)`);
+            if (jsxRegex.test(fe.content)) {
+              node.whoRendersIt.push({
+                file: p,
+                parentComponent: fe.baseName,
+                jsxTag: `<${node.name}>`,
+              });
+            }
           }
         }
       }
@@ -681,9 +713,9 @@ export class RepositoryToolEngine {
   private rawFiles: SnapshotFile[];
   private semanticRetrievalEngine: SemanticRetrievalEngine;
 
-  constructor(snapshot: any, localPath?: string | null) {
+  constructor(snapshot: any, localPath?: string | null, knowledgeGraph?: any) {
     this.rawFiles = getSnapshotFiles(snapshot, localPath);
-    this.index = new MultiGraphIndex(this.rawFiles);
+    this.index = new MultiGraphIndex(this.rawFiles, knowledgeGraph);
     this.semanticRetrievalEngine = new SemanticRetrievalEngine();
   }
 

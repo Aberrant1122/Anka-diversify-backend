@@ -55,6 +55,7 @@ export interface IterativeReasoningOptions {
   /** Optional Execution Contract to scope searches and context retrieval */
   contract?: ExecutionContract;
   projectId?: string;
+  toolEngine?: RepositoryToolEngine;
 }
 
 // ─── Iterative Reasoning Agent Engine ─────────────────────────────────────────
@@ -67,7 +68,7 @@ export class IterativeReasoningEngine {
   private contract: ExecutionContract | undefined;
 
   constructor(options: IterativeReasoningOptions) {
-    this.toolEngine = new RepositoryToolEngine(options.snapshot);
+    this.toolEngine = options.toolEngine || new RepositoryToolEngine(options.snapshot);
     const cacheDir = options.projectId
       ? path.join(process.cwd(), ".anka-cache", "projects", options.projectId)
       : undefined;
