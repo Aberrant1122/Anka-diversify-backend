@@ -21,6 +21,7 @@ import { buildExecutionContract } from "./execution-contract.engine";
 import { ManifestGenerator } from "./manifest-generator";
 import { ManifestValidator } from "./manifest-validator";
 import { TaskDecomposer } from "./task-decomposer";
+import { acquireReservations, releaseReservations } from "./file-reservation-service";
 import { SubTaskExecutor } from "./sub-task-executor";
 import {
   ChatRequest,
@@ -3490,19 +3491,55 @@ body { background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; al
           const executor = new SubTaskExecutor(new ManifestGenerator(this.getOpenAI()));
           const completedMap = new Map<string, any>();
 
-          for (const subTaskId of graph.executionOrder) {
-            const subTask = graph.nodes.find((n) => n.id === subTaskId);
-            if (!subTask) continue;
+          try {
+            for (const subTaskId of graph.executionOrder) {
+              const subTask = graph.nodes.find((n) => n.id === subTaskId);
+              if (!subTask) continue;
 
-            // A sub-task tagged with a repositoryId gets that repo's own context
-            // (unmodified executeSubTask, just called with different data) — falls
-            // back to the single-repo context for untagged sub-tasks, which is every
-            // sub-task in the non-multi-repo case.
-            const subTaskContext = (subTask.repositoryId && repoContextMap.get(subTask.repositoryId)) || decompositionContext;
-            const res = await executor.executeSubTask(subTask, completedMap, subTaskContext, executionContract);
-            res.repositoryId = subTask.repositoryId;
-            res.changes = res.changes.map((c) => ({ ...c, repositoryId: subTask.repositoryId }));
-            completedMap.set(subTaskId, res);
+              // File/resource reservations (spec §14.3) — advisory lock per sub-task's
+              // target files, scoped to whichever repo it targets. A conflict (another
+              // active session already holds one of these files) fails this sub-task
+              // with a clear error instead of silently racing/overwriting; it does not
+              // retry or serialize automatically — that's a human-reconciliation signal.
+              const reservation = await acquireReservations(
+                projectId,
+                subTask.repositoryId || null,
+                subTask.targetFiles,
+                session.id,
+                "agent_run",
+                subTask.description,
+              );
+              if (reservation.conflicts.length > 0) {
+                completedMap.set(subTaskId, {
+                  subTaskId,
+                  success: false,
+                  manifest: { files: [], totalFiles: 0, manifestVersion: "1.0.0" },
+                  changes: [],
+                  errors: reservation.conflicts.map(
+                    (c) => `File reservation conflict: "${c.filePath}" is held by another active session (${c.holderType}, session ${c.heldBySessionId}).`
+                  ),
+                  repositoryId: subTask.repositoryId,
+                });
+                continue;
+              }
+
+              // A sub-task tagged with a repositoryId gets that repo's own context
+              // (unmodified executeSubTask, just called with different data) — falls
+              // back to the single-repo context for untagged sub-tasks, which is every
+              // sub-task in the non-multi-repo case.
+              const subTaskContext = (subTask.repositoryId && repoContextMap.get(subTask.repositoryId)) || decompositionContext;
+              const res = await executor.executeSubTask(subTask, completedMap, subTaskContext, executionContract);
+              res.repositoryId = subTask.repositoryId;
+              res.changes = res.changes.map((c: any) => ({ ...c, repositoryId: subTask.repositoryId }));
+              completedMap.set(subTaskId, res);
+            }
+          } finally {
+            // Always release this session's reservations once the run's sub-tasks are
+            // done (success, failure, or thrown) — a stuck run must not hold files
+            // beyond its own execution; the TTL is just a backstop for crashes.
+            await releaseReservations(session.id).catch((err) =>
+              console.error("Failed to release file reservations (non-fatal):", err)
+            );
           }
 
           const aggregated = executor.aggregateResults(completedMap);

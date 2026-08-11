@@ -4,6 +4,7 @@ import { ProjectGitHubService } from "../services/github.service";
 import { ChatRequest } from "../types";
 import { PrismaClient } from "@prisma/client";
 import { decrypt } from "../utils/encryption";
+import { listActiveReservations } from "../services/file-reservation-service";
 
 const prisma = new PrismaClient();
 
@@ -222,6 +223,22 @@ export class AiController {
       res.json({ success: true, data: snapshots });
     } catch (error) {
       console.error("Error fetching context snapshots:", error);
+      res.status(500).json({
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  async getFileReservations(req: Request, res: Response) {
+    try {
+      const { projectId } = req.params;
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+
+      const reservations = await listActiveReservations(projectId);
+      res.json({ success: true, data: reservations });
+    } catch (error) {
+      console.error("Error fetching file reservations:", error);
       res.status(500).json({
         error: "Internal server error",
         message: error instanceof Error ? error.message : "Unknown error",

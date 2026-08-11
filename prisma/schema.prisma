@@ -85,6 +85,7 @@ model Project {
   repositories   ProjectRepository[]
   contextSnapshots ContextSnapshot[]
   architectureDriftRecords ArchitectureDriftRecord[]
+  fileReservations FileReservation[]
 
   @@map("projects")
 }
@@ -482,6 +483,28 @@ model ArchitectureDriftRecord {
 
   @@index([projectId, status])
   @@map("architecture_drift_records")
+}
+
+// Lightweight file/resource locks (spec §14.3) so parallel agent runs — or an agent
+// run and a human — don't unknowingly collide on the same file. Advisory, not OS-level
+// locking: a conflict blocks a sub-task's execution and surfaces as an error rather
+// than silently overwriting, but nothing prevents a human editing the file directly
+// outside this system. Reservations always expire; a crashed run can't hold one forever.
+model FileReservation {
+  id           String   @id @default(cuid())
+  projectId    String
+  repositoryId String? // which ProjectRepository this file belongs to; null = primary
+  filePath     String
+  holderType   String // 'agent_run' | 'human'
+  sessionId    String // AiChatSession.id for agent runs; a client-issued id for humans
+  reason       String?
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, filePath])
+  @@map("file_reservations")
 }
 
 model Sprint {
