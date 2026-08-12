@@ -2,89 +2,163 @@ import {
   ErrorDiagnosticsParser,
   SurgicalPatchEngine,
   SurgicalRepairSessionTracker,
+  DiagnosticError,
 } from "../surgical-repair.engine";
 
-function assertEqual(actual: any, expected: any, testName: string) {
-  const aStr = JSON.stringify(actual);
-  const eStr = JSON.stringify(expected);
-  if (aStr === eStr) {
-    console.log(`  ✅ [PASS] ${testName}`);
-  } else {
-    console.error(`  ❌ [FAIL] ${testName}\n     Expected: ${eStr}\n     Actual:   ${aStr}`);
-    process.exitCode = 1;
-  }
-}
+describe("Surgical Repair Engine", () => {
+  // ─── Error Diagnostics Parser ──────────────────────────────────────────────
 
-function assertTrue(condition: boolean, testName: string) {
-  if (condition) {
-    console.log(`  ✅ [PASS] ${testName}`);
-  } else {
-    console.error(`  ❌ [FAIL] ${testName}`);
-    process.exitCode = 1;
-  }
-}
-
-async function runTests() {
-  console.log("\n🧪 RUNNING SURGICAL REPAIR ENGINE UNIT TESTS\n" + "─".repeat(50));
-
-  // 1. Error Diagnostics Parser Test
-  console.log("\n1️⃣  Error Diagnostics Parser Tests:");
-  const sampleTrace = `
+  describe("ErrorDiagnosticsParser", () => {
+    const sampleTrace = `
 src/services/payment.service.ts(15,10): error TS2304: Cannot find name 'PaymentGateway'
 src/components/Header.tsx(42,5): error TS2322: Type 'string' is not assignable to type 'number'
 `;
-  const diags = ErrorDiagnosticsParser.parse(sampleTrace);
-  assertEqual(diags.length, 2, "Parsed 2 TypeScript diagnostic errors");
-  assertEqual(diags[0].file, "src/services/payment.service.ts", "File 1 correctly parsed");
-  assertEqual(diags[0].line, 15, "Line 1 correctly parsed as 15");
-  assertEqual(diags[0].code, "TS2304", "Code 1 correctly parsed as TS2304");
-  assertEqual(diags[0].symbolName, "PaymentGateway", "Symbol name correctly extracted as PaymentGateway");
 
-  // 2. Surgical Patch Generator Test
-  console.log("\n2️⃣  Surgical Patch Generator Tests:");
-  const fileContent = `import fs from 'fs';\n\nexport class Service {\n  public run() { return PaymentGateway.process(); }\n}`;
-  const patch = SurgicalPatchEngine.generateMinimalPatch(fileContent, "src/services/payment.service.ts", diags[0]);
+    it("should parse 2 TypeScript diagnostic errors", () => {
+      const diags = ErrorDiagnosticsParser.parse(sampleTrace);
+      expect(diags.length).toBe(2);
+    });
 
-  assertTrue(patch.linesAdded === 1, "Generated minimal patch adding 1 import line");
-  assertTrue(patch.replacementContent.includes("import { PaymentGateway }"), "Patch contains missing import declaration");
-
-  // 3. Surgical Patch Applicator Test (Formatting Preservation)
-  console.log("\n3️⃣  Surgical Patch Applicator Tests:");
-  const fileContent20 = `import fs from 'fs';\nimport path from 'path';\n\n// Service class\nexport class Service {\n  public run() {\n    return PaymentGateway.process();\n  }\n}\n\n// Helper functions\nexport function helper1() { return 1; }\nexport function helper2() { return 2; }\nexport function helper3() { return 3; }\nexport function helper4() { return 4; }\nexport function helper5() { return 5; }\nexport function helper6() { return 6; }\nexport function helper7() { return 7; }\nexport function helper8() { return 8; }\nexport function helper9() { return 9; }\n`;
-  const patch20 = SurgicalPatchEngine.generateMinimalPatch(fileContent20, "src/services/payment.service.ts", diags[0]);
-  const res = SurgicalPatchEngine.applyPatch(fileContent20, patch20);
-  assertTrue(res.newContent.startsWith("import fs from 'fs';"), "Preserves existing header import");
-  assertTrue(res.newContent.includes("import { PaymentGateway }"), "Includes newly inserted surgical import");
-  assertTrue(res.newContent.includes("export class Service"), "Preserves surrounding class declaration and formatting");
-  assertTrue(res.patchSizePct < 15.0, `Patch size is surgical (${res.patchSizePct}% of file)`);
-
-  // 4. Session & History Tracker Test
-  console.log("\n4️⃣  Surgical Repair Session Tracker Tests:");
-  const tracker = new SurgicalRepairSessionTracker("test_session_123");
-  tracker.recordAttempt({
-    attempt: 1,
-    timestamp: new Date().toISOString(),
-    diagnostics: diags,
-    patchesApplied: [patch],
-    totalFileLines: 5,
-    linesChanged: 1,
-    patchSizePct: 20.0,
-    repairTimeMs: 12.5,
-    compileSuccess: true,
+    it("should correctly parse file path, line, code, and symbol", () => {
+      const diags = ErrorDiagnosticsParser.parse(sampleTrace);
+      expect(diags[0].file).toBe("src/services/payment.service.ts");
+      expect(diags[0].line).toBe(15);
+      expect(diags[0].code).toBe("TS2304");
+      expect(diags[0].symbolName).toBe("PaymentGateway");
+    });
   });
 
-  const metrics = tracker.getMetrics(true);
-  assertEqual(metrics.totalAttempts, 1, "Total attempts recorded is 1");
-  assertEqual(metrics.successful, true, "Session status recorded as successful");
-  assertEqual(metrics.averagePatchSizePct, 20.0, "Average patch size recorded as 20.0%");
+  // ─── Surgical Patch Generator ──────────────────────────────────────────────
 
-  const markdown = tracker.generateSummaryMarkdown(true);
-  assertTrue(markdown.includes("SURGICAL REPAIR SESSION METRICS REPORT"), "Generated metrics summary markdown report");
+  describe("SurgicalPatchEngine.generateMinimalPatch", () => {
+    it("should return a no-op patch for TS2304 (missing import) — deferred to LLM", () => {
+      const fileContent = `import fs from 'fs';\n\nexport class Service {\n  public run() { return PaymentGateway.process(); }\n}`;
+      const diag: DiagnosticError = {
+        file: "src/services/payment.service.ts",
+        line: 4,
+        code: "TS2304",
+        message: "Cannot find name 'PaymentGateway'",
+        symbolName: "PaymentGateway",
+        rawTrace: "src/services/payment.service.ts(4,30): error TS2304: Cannot find name 'PaymentGateway'",
+      };
 
-  console.log("\n✨ ALL SURGICAL REPAIR ENGINE UNIT TESTS PASSED!\n");
-}
+      const patch = SurgicalPatchEngine.generateMinimalPatch(fileContent, diag.file, diag);
 
-runTests().catch((err) => {
-  console.error("Unit test execution error:", err);
-  process.exit(1);
+      // No-op: targetContent === replacementContent
+      expect(patch.targetContent).toBe(patch.replacementContent);
+      expect(patch.linesAdded).toBe(0);
+      expect(patch.linesRemoved).toBe(0);
+      expect(patch.affectedNodeName).toContain("deferred to LLM");
+    });
+
+    it("should return a no-op patch for TS2552 (missing import) — deferred to LLM", () => {
+      const fileContent = `export const x = SomeService.doStuff();`;
+      const diag: DiagnosticError = {
+        file: "src/app/page.ts",
+        line: 1,
+        code: "TS2552",
+        message: "Cannot find name 'SomeService'. Did you mean 'SomeOtherService'?",
+        symbolName: "SomeService",
+        rawTrace: "src/app/page.ts:1:19 - error TS2552: Cannot find name 'SomeService'",
+      };
+
+      const patch = SurgicalPatchEngine.generateMinimalPatch(fileContent, diag.file, diag);
+
+      expect(patch.targetContent).toBe(patch.replacementContent);
+      expect(patch.linesAdded).toBe(0);
+      expect(patch.affectedNodeName).toContain("deferred to LLM");
+    });
+
+    it("should return an identity patch for non-import type errors (line-specific)", () => {
+      const fileContent = `import fs from 'fs';\n\nexport class Service {\n  public run(): number { return "hello"; }\n}`;
+      const diag: DiagnosticError = {
+        file: "src/services/payment.service.ts",
+        line: 4,
+        code: "TS2322",
+        message: "Type 'string' is not assignable to type 'number'",
+        symbolName: undefined,
+        rawTrace: 'src/services/payment.service.ts(4,26): error TS2322: Type \'string\' is not assignable to type \'number\'',
+      };
+
+      const patch = SurgicalPatchEngine.generateMinimalPatch(fileContent, diag.file, diag);
+
+      expect(patch.startLine).toBe(4);
+      expect(patch.endLine).toBe(4);
+      expect(patch.affectedNodeName).toContain("ASTNode");
+    });
+  });
+
+  // ─── Patch Applicator ──────────────────────────────────────────────────────
+
+  describe("SurgicalPatchEngine.applyPatch", () => {
+    it("should preserve surrounding formatting when applying a patch", () => {
+      const fileContent = `import fs from 'fs';\nimport path from 'path';\n\nexport class Service {\n  public run() {}\n}`;
+      const patch = {
+        file: "test.ts",
+        startLine: 4,
+        endLine: 4,
+        targetContent: "export class Service {",
+        replacementContent: "export class UpdatedService {",
+        affectedNodeName: "ClassDeclaration",
+        linesAdded: 0,
+        linesRemoved: 0,
+      };
+
+      const result = SurgicalPatchEngine.applyPatch(fileContent, patch);
+
+      expect(result.newContent).toContain("import fs from 'fs';");
+      expect(result.newContent).toContain("export class UpdatedService {");
+      expect(result.newContent).toContain("  public run() {}");
+    });
+  });
+
+  // ─── Session Tracker ───────────────────────────────────────────────────────
+
+  describe("SurgicalRepairSessionTracker", () => {
+    it("should record attempt and produce correct metrics", () => {
+      const diag: DiagnosticError = {
+        file: "test.ts",
+        line: 1,
+        code: "TS2304",
+        message: "test",
+        rawTrace: "test",
+      };
+
+      const tracker = new SurgicalRepairSessionTracker("test_session");
+      tracker.recordAttempt({
+        attempt: 1,
+        timestamp: new Date().toISOString(),
+        diagnostics: [diag],
+        patchesApplied: [],
+        totalFileLines: 10,
+        linesChanged: 2,
+        patchSizePct: 20.0,
+        repairTimeMs: 12.5,
+        compileSuccess: true,
+      });
+
+      const metrics = tracker.getMetrics(true);
+      expect(metrics.totalAttempts).toBe(1);
+      expect(metrics.successful).toBe(true);
+      expect(metrics.averagePatchSizePct).toBe(20.0);
+    });
+
+    it("should generate a markdown summary report", () => {
+      const tracker = new SurgicalRepairSessionTracker("test_session");
+      tracker.recordAttempt({
+        attempt: 1,
+        timestamp: new Date().toISOString(),
+        diagnostics: [],
+        patchesApplied: [],
+        totalFileLines: 5,
+        linesChanged: 1,
+        patchSizePct: 10.0,
+        repairTimeMs: 5.0,
+        compileSuccess: true,
+      });
+
+      const markdown = tracker.generateSummaryMarkdown(true);
+      expect(markdown).toContain("SURGICAL REPAIR SESSION METRICS REPORT");
+    });
+  });
 });

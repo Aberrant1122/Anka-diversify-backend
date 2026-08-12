@@ -181,26 +181,19 @@ export class SurgicalPatchEngine {
     const targetLineContent = lines[targetLineIdx] || "";
 
     // Case 1: Missing Symbol / Import (TS2304 / TS2552)
+    // Cannot safely determine the correct import path from the symbol name alone.
+    // Return a no-op patch (targetContent === replacementContent) so the repair loop
+    // falls through to the LLM path which has full file context.
     if ((diag.code === "TS2304" || diag.code === "TS2552") && diag.symbolName) {
-      // Find last import line at top of file
-      let lastImportLine = 0;
-      for (let i = 0; i < Math.min(lines.length, 30); i++) {
-        if (lines[i].trim().startsWith("import ")) lastImportLine = i + 1;
-      }
-
-      const insertLine = lastImportLine > 0 ? lastImportLine + 1 : 1;
-      const targetContent = lines[insertLine - 1] || "";
-      const missingImportLine = `import { ${diag.symbolName} } from "./${diag.symbolName.toLowerCase()}";`;
-      const replacementContent = `${missingImportLine}\n${targetContent}`;
-
+      const firstLineContent = lines[0] || "";
       return {
         file: filePath,
-        startLine: insertLine,
-        endLine: insertLine,
-        targetContent,
-        replacementContent,
-        affectedNodeName: `ImportDeclaration (${diag.symbolName})`,
-        linesAdded: 1,
+        startLine: 1,
+        endLine: 1,
+        targetContent: firstLineContent,
+        replacementContent: firstLineContent,
+        affectedNodeName: `ImportDeclaration (${diag.symbolName}) — deferred to LLM`,
+        linesAdded: 0,
         linesRemoved: 0,
       };
     }

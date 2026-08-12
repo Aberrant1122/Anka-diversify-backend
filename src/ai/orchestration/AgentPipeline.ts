@@ -55,7 +55,6 @@ export class AgentPipeline {
     const effectiveLocalPath = await RepositoryScanner.ensureLocalWorkspace(projectId, project?.localPath, snapshot);
     const effectiveSnapshot = RepositoryScanner.getEffectiveSnapshot(snapshot, effectiveLocalPath);
     const currentRevisionHash = effectiveSnapshot.revision?.contentHash;
-    const validationCommands = ValidationPlanner.detectValidationCommands(effectiveLocalPath, effectiveSnapshot);
 
     const pipelineStart = performance.now();
 
