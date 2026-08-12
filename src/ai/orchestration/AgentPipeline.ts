@@ -325,72 +325,102 @@ export class AgentPipeline {
     );
 
     const fsManager = new FileSystemStateManager();
+    let transactionCommitted = false;
+    let transactionRolledBack = false;
+    let rollbackErrorLog: string | null = null;
+
     if (effectiveLocalPath) {
       await fsManager.snapshot(criticResult.accepted, effectiveLocalPath);
     }
 
-    const repairResult = await SelfHealingEngine.runSelfHealingLoop(
-      criticResult.accepted,
-      effectiveLocalPath,
-      effectiveValidationCommands,
-      systemPrompt,
-      request.message,
-      fsManager,
-      projectId,
-      onProgress,
-    );
+    const safeRollback = async () => {
+      if (transactionCommitted || transactionRolledBack || !effectiveLocalPath) return;
+      transactionRolledBack = true;
+      try {
+        await fsManager.rollback(effectiveLocalPath);
+      } catch (err: any) {
+        rollbackErrorLog = `[CRITICAL] Filesystem rollback failed: ${err?.message || err}`;
+        console.error(rollbackErrorLog, err);
+      }
+    };
 
-    if (!repairResult.success && !repairResult.infrastructureError && effectiveLocalPath && effectiveValidationCommands.length > 0) {
-      const buildRepairRes = await BuildErrorRepair.runBuildErrorRepairPass(
-        repairResult.finalChanges,
+    let repairResult: any;
+    let auditResult: any;
+    let featureValidation: any;
+    let overallGatePassed = false;
+    let s8Time = 0;
+    let s9Time = 0;
+
+    try {
+      // Stage 8: Self-Healing Build Repair
+      const s8Start = performance.now();
+      repairResult = await SelfHealingEngine.runSelfHealingLoop(
+        criticResult.accepted,
         effectiveLocalPath,
         effectiveValidationCommands,
+        systemPrompt,
         request.message,
-        repairResult.errorLog || "",
         fsManager,
+        projectId,
+        onProgress,
       );
 
-      if (buildRepairRes.success) {
-        repairResult.success = true;
-        repairResult.finalChanges = buildRepairRes.finalChanges;
-        repairResult.errorLog = "";
-      } else {
-        repairResult.finalChanges = buildRepairRes.finalChanges;
-        repairResult.errorLog = buildRepairRes.errorLog;
+      if (!repairResult.success && !repairResult.infrastructureError && effectiveLocalPath && effectiveValidationCommands.length > 0) {
+        const buildRepairRes = await BuildErrorRepair.runBuildErrorRepairPass(
+          repairResult.finalChanges,
+          effectiveLocalPath,
+          effectiveValidationCommands,
+          request.message,
+          repairResult.errorLog || "",
+          fsManager,
+        );
+
+        if (buildRepairRes.success) {
+          repairResult.success = true;
+          repairResult.finalChanges = buildRepairRes.finalChanges;
+          repairResult.errorLog = "";
+        } else {
+          repairResult.finalChanges = buildRepairRes.finalChanges;
+          repairResult.errorLog = buildRepairRes.errorLog;
+        }
       }
+      s8Time = performance.now() - s8Start;
+
+      // Stage 9: Reflection & Security Audit
+      const s9Start = performance.now();
+      onProgress?.({
+        step: 9,
+        stageName: "SECURITY_AUDIT",
+        label: "Security & Reflection Audit",
+        detail: "Auditing security constraints and reflection rules",
+        color: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
+        badge: "STAGE 9 · SECURITY",
+        progress: 90,
+        log: "[Stage 9] Running Reflection & Security Audit...",
+        durationMs: 0,
+      });
+
+      auditResult = await SecurityAuditor.runReflectionAndSecurityAudit(repairResult.finalChanges);
+      featureValidation = await ValidationDetector.runFeatureValidation(
+        repairResult.finalChanges,
+        effectiveSnapshot,
+        request.message,
+        executionContract,
+      );
+      s9Time = performance.now() - s9Start;
+
+      overallGatePassed = Boolean(repairResult.success && auditResult.securityPass && featureValidation.overallPassed);
+
+      if (overallGatePassed) {
+        transactionCommitted = true;
+        fsManager.commit();
+      } else {
+        await safeRollback();
+      }
+    } catch (unhandledError: any) {
+      await safeRollback();
+      throw unhandledError;
     }
-
-    // Transaction outcome: commit if repair succeeded; rollback if both repair steps failed
-    if (repairResult.success) {
-      fsManager.commit();
-    } else if (effectiveLocalPath) {
-      await fsManager.rollback(effectiveLocalPath);
-    }
-
-    const s8Time = performance.now() - s8Start;
-
-    // Stage 9: Reflection & Security Audit
-    const s9Start = performance.now();
-    onProgress?.({
-      step: 9,
-      stageName: "SECURITY_AUDIT",
-      label: "Security & Reflection Audit",
-      detail: "Auditing security constraints and reflection rules",
-      color: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
-      badge: "STAGE 9 · SECURITY",
-      progress: 90,
-      log: "[Stage 9] Running Reflection & Security Audit...",
-      durationMs: 0,
-    });
-
-    const auditResult = await SecurityAuditor.runReflectionAndSecurityAudit(repairResult.finalChanges);
-    let featureValidation = await ValidationDetector.runFeatureValidation(
-      repairResult.finalChanges,
-      effectiveSnapshot,
-      request.message,
-      executionContract,
-    );
-    const s9Time = performance.now() - s9Start;
 
     const totalPipelineDuration = performance.now() - pipelineStart;
     const promptTokensK = (outputTokens / 1000).toFixed(1);
@@ -458,12 +488,12 @@ export class AgentPipeline {
         ? `\n\n**❌ Build Verification Errors Captured:**\n\`\`\`\n${repairResult.errorLog.slice(0, 2000)}\n\`\`\``
         : "") +
       (featureValidation.failedChecks.length > 0
-        ? `\n\n**⚠️ Feature Validation Issues:**\n` + featureChecks.filter((c) => c.status === "FAIL").map((c) => `- ${c.label}: ${c.details}`).join("\n")
+        ? `\n\n**⚠️ Feature Validation Issues:**\n` + featureChecks.filter((c: any) => c.status === "FAIL").map((c: any) => `- ${c.label}: ${c.details}`).join("\n")
         : "");
 
     const fileChangeLines =
       repairResult.finalChanges.length > 0
-        ? repairResult.finalChanges.map((c) => `- ${c.path}: ${c.action === "delete" || c.isDeleted ? "[DELETED] " : ""}${c.description}`).join("\n")
+        ? repairResult.finalChanges.map((c: any) => `- ${c.path}: ${c.action === "delete" || c.isDeleted ? "[DELETED] " : ""}${c.description}`).join("\n")
         : "No files changed.";
 
     const summary = `[TaskType: ${intentResult.taskType} | Risk: ${intentResult.risk} | Complexity: ${intentResult.estimatedComplexity}] ${roadmapAndDiff.explanation}\n\n${auditResult.summary}${checklistMarkdown}\n\nFiles Modified / Deleted:\n${fileChangeLines}`;
@@ -471,9 +501,11 @@ export class AgentPipeline {
 
     if (!session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
 
+    const gateSuccess = overallGatePassed && !rollbackErrorLog;
+
     return {
       explanation: roadmapAndDiff.explanation + "\n\n" + auditResult.summary + checklistMarkdown,
-      changes: repairResult.finalChanges,
+      changes: gateSuccess ? repairResult.finalChanges : [],
       commitMessage: roadmapAndDiff.commitMessage,
       sessionId: session.id,
       intent: intentResult.intent,
@@ -485,11 +517,16 @@ export class AgentPipeline {
       roadmap: roadmapAndDiff.roadmap,
       securityPass: auditResult.securityPass,
       critiqueScore: auditResult.critiqueScore,
-      buildVerified: repairResult.success,
+      buildVerified: gateSuccess,
       repaired: repairResult.attempts > 1,
-      buildErrors: repairResult.errorLog,
+      buildErrors: [
+        !repairResult.success && repairResult.errorLog ? repairResult.errorLog : "",
+        !auditResult.securityPass ? "Security audit failed / flagged critical security violations." : "",
+        !featureValidation.overallPassed ? "Feature / static validation failed required checks." : "",
+        rollbackErrorLog ? rollbackErrorLog : "",
+      ].filter(Boolean).join("\n\n") || repairResult.errorLog,
       verificationChecklist: defaultChecklist,
-      lifecycleStage: repairResult.success ? "Done" : "BuildFailed",
+      lifecycleStage: gateSuccess ? "Done" : "BuildFailed",
       pipelineMeasurementText,
     };
   }
