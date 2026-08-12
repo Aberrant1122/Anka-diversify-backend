@@ -3,6 +3,7 @@ import path from "path";
 import { getOpenAI } from "../shared/utils";
 import { AgentFileChange } from "../shared/types";
 import { ValidationRunner } from "../validation/ValidationRunner";
+import { FileSystemStateManager, RepairInfrastructureError } from "../validation/FileSystemStateManager";
 import { ErrorDiagnosticsParser } from "./ErrorDiagnosticsParser";
 import { SurgicalPatchEngine, SurgicalPatchChunk } from "./SurgicalPatchEngine";
 import { RepairSessionTracker } from "./RepairSessionTracker";
@@ -15,11 +16,14 @@ export class SelfHealingEngine {
     commands: string[],
     systemPrompt: string,
     originalMessage: string,
+    fsManager?: FileSystemStateManager,
+    projectId?: string,
   ): Promise<{
     finalChanges: AgentFileChange[];
     attempts: number;
     success: boolean;
     errorLog?: string;
+    infrastructureError?: boolean;
   }> {
     const MAX_REPAIR_RETRIES = 5;
     let currentChanges = [...initialChanges];
@@ -50,12 +54,30 @@ export class SelfHealingEngine {
       } else if (!currentChanges.length) {
         return { finalChanges: [], attempts: attempt, success: true };
       } else {
-        if (localPath) {
+        if (fsManager && localPath) {
+          try {
+            await fsManager.apply(currentChanges, localPath);
+          } catch (err: any) {
+            if (err instanceof RepairInfrastructureError) {
+              return {
+                finalChanges: currentChanges,
+                attempts: attempt,
+                success: false,
+                errorLog: err.message,
+                infrastructureError: true,
+              };
+            }
+          }
+        } else if (localPath) {
           for (const change of currentChanges) {
             try {
               const abs = path.join(localPath, change.path);
-              await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-              await fs.promises.writeFile(abs, change.content, "utf8");
+              if (change.action === "delete" || change.isDeleted) {
+                if (fs.existsSync(abs)) await fs.promises.rm(abs, { recursive: true, force: true });
+              } else {
+                await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+                await fs.promises.writeFile(abs, change.content, "utf8");
+              }
             } catch {}
           }
         }
@@ -81,7 +103,9 @@ export class SelfHealingEngine {
 
           const summaryMd = tracker.generateSummaryMarkdown(true);
           try {
-            const cacheDir = path.join(process.cwd(), ".anka-cache");
+            const cacheDir = projectId
+              ? path.join(process.cwd(), ".anka-cache", "projects", projectId)
+              : path.join(process.cwd(), ".anka-cache");
             if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
             fs.writeFileSync(path.join(cacheDir, "repair-metrics.md"), summaryMd, "utf8");
           } catch {}

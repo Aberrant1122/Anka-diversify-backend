@@ -1,6 +1,9 @@
+import fs from "fs";
+import path from "path";
 import { getOpenAI } from "../shared/utils";
 import { AgentFileChange } from "../shared/types";
 import { ValidationRunner } from "../validation/ValidationRunner";
+import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { buildSelfHealingRepairPrompt } from "../prompts/repair";
 
 export class BuildErrorRepair {
@@ -10,6 +13,7 @@ export class BuildErrorRepair {
     commands: string[],
     originalMessage: string,
     errorLog: string,
+    fsManager?: FileSystemStateManager,
   ): Promise<{ finalChanges: AgentFileChange[]; success: boolean; errorLog?: string }> {
     if (!changes.length || !errorLog) {
       return { finalChanges: changes, success: false, errorLog };
@@ -43,6 +47,22 @@ export class BuildErrorRepair {
         }
 
         if (localPath && commands.length > 0) {
+          if (fsManager) {
+            await fsManager.apply(merged, localPath);
+          } else {
+            for (const change of merged) {
+              try {
+                const abs = path.join(localPath, change.path);
+                if (change.action === "delete" || change.isDeleted) {
+                  if (fs.existsSync(abs)) await fs.promises.rm(abs, { recursive: true, force: true });
+                } else {
+                  await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+                  await fs.promises.writeFile(abs, change.content, "utf8");
+                }
+              } catch {}
+            }
+          }
+
           const val = await ValidationRunner.validateWithShell(merged, localPath, commands);
           if (val.success) {
             return { finalChanges: merged, success: true, errorLog: "" };

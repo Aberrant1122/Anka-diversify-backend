@@ -9,20 +9,21 @@ const execAsync = promisify(exec);
 
 export class ValidationRunner {
   static async validateWithShell(
-    changes: AgentFileChange[],
-    localPath: string,
+    _changes: AgentFileChange[],
+    localPath: string | null | undefined,
     commands: string[],
   ): Promise<{ success: boolean; errors: string }> {
-    for (const change of changes) {
-      const abs = path.join(localPath, change.path);
-      if (change.action === "delete" || change.isDeleted) {
-        if (fs.existsSync(abs)) {
-          await fs.promises.rm(abs, { recursive: true, force: true });
-        }
-      } else {
-        await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-        await fs.promises.writeFile(abs, change.content, "utf8");
+    if (!localPath) {
+      return { success: false, errors: "Validation failed: localPath is missing, null, or undefined." };
+    }
+
+    try {
+      const stat = await fs.promises.stat(localPath);
+      if (!stat.isDirectory()) {
+        return { success: false, errors: `Validation failed: localPath "${localPath}" is not a directory.` };
       }
+    } catch {
+      return { success: false, errors: `Validation failed: localPath "${localPath}" does not exist or is inaccessible.` };
     }
 
     const errors: string[] = [];
@@ -51,12 +52,13 @@ export class ValidationRunner {
     const changesText = changes.map((c) => `=== ${c.path} ===\n${c.content}`).join("\n\n");
     const openai = getOpenAI();
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        {
-          role: "system",
-          content: `You are an Objective Static Code Auditor.
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "system",
+            content: `You are an Objective Static Code Auditor.
 Analyze proposed file changes strictly for CRITICAL SYNTAX or COMPILATION ERRORS.
 
 Respond ONLY with valid JSON:
@@ -65,21 +67,20 @@ Respond ONLY with valid JSON:
   "criticalErrors": "description if any",
   "suggestions": []
 }`,
-        },
-        { role: "user", content: changesText },
-      ],
-      temperature: 0,
-      max_tokens: 2000,
-      response_format: { type: "json_object" },
-    });
+          },
+          { role: "user", content: changesText },
+        ],
+        temperature: 0,
+        max_tokens: 2000,
+        response_format: { type: "json_object" },
+      });
 
-    try {
       const result = JSON.parse(completion.choices[0]?.message?.content || "{}");
       const hasCritical = typeof result.hasCriticalErrors === "boolean" ? result.hasCriticalErrors : Boolean(result.hasErrors && result.errors);
       const errorMsg = result.criticalErrors || (hasCritical ? result.errors : "") || "";
       return { success: !hasCritical, errors: errorMsg };
     } catch {
-      return { success: true, errors: "" };
+      return { success: false, errors: "LLM static review failed to return valid JSON." };
     }
   }
 }

@@ -13,6 +13,7 @@ import { RepositorySearch } from "../repository/RepositorySearch";
 import { CodeGenerator } from "../generation/CodeGenerator";
 import { ManifestGenerator } from "../generation/ManifestGenerator";
 import { TaskDecomposer } from "../generation/TaskDecomposer";
+import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { ValidationPlanner } from "../validation/ValidationPlanner";
 import { ValidationDetector } from "../validation/ValidationDetector";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
@@ -324,43 +325,29 @@ export class AgentPipeline {
       executionContract,
     );
 
+    const fsManager = new FileSystemStateManager();
+    if (effectiveLocalPath) {
+      await fsManager.snapshot(criticResult.accepted, effectiveLocalPath);
+    }
+
     const repairResult = await SelfHealingEngine.runSelfHealingLoop(
       criticResult.accepted,
       effectiveLocalPath,
       effectiveValidationCommands,
       systemPrompt,
       request.message,
+      fsManager,
+      projectId,
     );
 
-    if (repairResult.finalChanges.length > 0) {
-      const targetPaths = new Set<string>();
-      if (effectiveLocalPath) targetPaths.add(effectiveLocalPath);
-      if (project?.localPath && fs.existsSync(project.localPath)) targetPaths.add(project.localPath);
-
-      for (const targetPath of targetPaths) {
-        for (const change of repairResult.finalChanges) {
-          try {
-            const abs = path.join(targetPath, change.path);
-            if (change.action === "delete" || change.isDeleted) {
-              if (fs.existsSync(abs)) {
-                await fs.promises.rm(abs, { recursive: true, force: true });
-              }
-            } else {
-              await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-              await fs.promises.writeFile(abs, change.content, "utf8");
-            }
-          } catch {}
-        }
-      }
-    }
-
-    if (!repairResult.success && effectiveLocalPath && effectiveValidationCommands.length > 0) {
+    if (!repairResult.success && !repairResult.infrastructureError && effectiveLocalPath && effectiveValidationCommands.length > 0) {
       const buildRepairRes = await BuildErrorRepair.runBuildErrorRepairPass(
         repairResult.finalChanges,
         effectiveLocalPath,
         effectiveValidationCommands,
         request.message,
         repairResult.errorLog || "",
+        fsManager,
       );
 
       if (buildRepairRes.success) {
@@ -372,6 +359,14 @@ export class AgentPipeline {
         repairResult.errorLog = buildRepairRes.errorLog;
       }
     }
+
+    // Transaction outcome: commit if repair succeeded; rollback if both repair steps failed
+    if (repairResult.success) {
+      fsManager.commit();
+    } else if (effectiveLocalPath) {
+      await fsManager.rollback(effectiveLocalPath);
+    }
+
     const s8Time = performance.now() - s8Start;
 
     // Stage 9: Reflection & Security Audit
