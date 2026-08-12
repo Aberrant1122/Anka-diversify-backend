@@ -337,6 +337,7 @@ export class AgentPipeline {
       request.message,
       fsManager,
       projectId,
+      onProgress,
     );
 
     if (!repairResult.success && !repairResult.infrastructureError && effectiveLocalPath && effectiveValidationCommands.length > 0) {
@@ -370,6 +371,18 @@ export class AgentPipeline {
 
     // Stage 9: Reflection & Security Audit
     const s9Start = performance.now();
+    onProgress?.({
+      step: 9,
+      stageName: "SECURITY_AUDIT",
+      label: "Security & Reflection Audit",
+      detail: "Auditing security constraints and reflection rules",
+      color: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
+      badge: "STAGE 9 · SECURITY",
+      progress: 90,
+      log: "[Stage 9] Running Reflection & Security Audit...",
+      durationMs: 0,
+    });
+
     const auditResult = await SecurityAuditor.runReflectionAndSecurityAudit(repairResult.finalChanges);
     let featureValidation = await ValidationDetector.runFeatureValidation(
       repairResult.finalChanges,
@@ -407,10 +420,13 @@ export class AgentPipeline {
       validationCommands: effectiveValidationCommands,
       buildSuccess: repairResult.success,
       securityPass: auditResult.securityPass,
+      repairAttempts: repairResult.attempts,
+      errorType: repairResult.errorType,
+      infrastructureError: repairResult.infrastructureError,
     });
 
     onProgress?.({
-      step: 7,
+      step: 10,
       stageName: "MEMORY_PERSISTENCE",
       label: "Verify & Done",
       detail: `Pipeline End: Total Time ${formatMs(totalPipelineDuration)}`,

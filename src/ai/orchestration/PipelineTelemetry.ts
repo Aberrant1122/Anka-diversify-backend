@@ -25,6 +25,9 @@ export class PipelineTelemetry {
     validationCommands: string[];
     buildSuccess: boolean;
     securityPass: boolean;
+    repairAttempts?: number;
+    errorType?: string;
+    infrastructureError?: boolean;
   }): string {
     const pTokens = parseFloat(metrics.promptTokensK || "0") * 1000;
     const cTokens = parseFloat(metrics.completionTokensK || "0") * 1000;
@@ -33,6 +36,14 @@ export class PipelineTelemetry {
       completion_tokens: cTokens || metrics.outputTokens,
     });
     const costText = `$${estimatedCost.toFixed(4)}`;
+
+    const statusText = metrics.buildSuccess
+      ? metrics.repairAttempts && metrics.repairAttempts > 1
+        ? `Repaired (${metrics.repairAttempts} attempts)`
+        : "Passed"
+      : metrics.infrastructureError
+      ? "Failed (Infrastructure Error)"
+      : `Failed (${metrics.repairAttempts || 5} attempts)`;
 
     return `
 \`\`\`text
@@ -87,10 +98,10 @@ Time: ${formatMs(metrics.s7Time)}
 
 Stage 8
 --------
-Build
+Build Repair
 Commands: ${metrics.validationCommands.join(", ") || "npm run build"}
-Status: ${metrics.buildSuccess ? "Passed" : "Repaired"}
-Time: ${formatMs(metrics.s8Time)}
+Status: ${statusText}
+${metrics.errorType ? `Error Type: ${metrics.errorType}\n` : ""}Time: ${formatMs(metrics.s8Time)}
 
 Stage 9
 --------

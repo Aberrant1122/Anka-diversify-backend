@@ -1,9 +1,10 @@
 import fs from "fs";
 import path from "path";
 import { getOpenAI } from "../shared/utils";
-import { AgentFileChange } from "../shared/types";
+import { AgentFileChange, AgentProgressEvent } from "../shared/types";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import { FileSystemStateManager, RepairInfrastructureError } from "../validation/FileSystemStateManager";
+import { ErrorClassifier } from "../validation/ErrorClassifier";
 import { ErrorDiagnosticsParser } from "./ErrorDiagnosticsParser";
 import { SurgicalPatchEngine, SurgicalPatchChunk } from "./SurgicalPatchEngine";
 import { RepairSessionTracker } from "./RepairSessionTracker";
@@ -18,21 +19,39 @@ export class SelfHealingEngine {
     originalMessage: string,
     fsManager?: FileSystemStateManager,
     projectId?: string,
+    onProgress?: (event: AgentProgressEvent) => void,
   ): Promise<{
     finalChanges: AgentFileChange[];
     attempts: number;
     success: boolean;
     errorLog?: string;
     infrastructureError?: boolean;
+    errorType?: string;
   }> {
     const MAX_REPAIR_RETRIES = 5;
     let currentChanges = [...initialChanges];
     let previousErrors = "";
+    let lastErrorType = "UNKNOWN";
     const tracker = new RepairSessionTracker();
 
     for (let attempt = 1; attempt <= MAX_REPAIR_RETRIES; attempt++) {
       const attemptStart = performance.now();
       let validationSuccess = false;
+
+      const classification = ErrorClassifier.classify(previousErrors);
+      lastErrorType = classification.type;
+
+      onProgress?.({
+        step: 8,
+        stageName: "SELF_HEALING",
+        label: "Build Repair",
+        detail: `Repair attempt ${attempt}/${MAX_REPAIR_RETRIES} — ${classification.type}`,
+        color: "text-orange-400 border-orange-500/30 bg-orange-500/10",
+        badge: `STAGE 8 · Attempt ${attempt}/${MAX_REPAIR_RETRIES}`,
+        progress: 75 + Math.round((attempt / MAX_REPAIR_RETRIES) * 10),
+        log: `[Stage 8] Repair attempt ${attempt}/${MAX_REPAIR_RETRIES}: ${previousErrors ? previousErrors.slice(0, 200) : "Running initial validation"}`,
+        durationMs: performance.now() - attemptStart,
+      });
 
       if (!currentChanges.length && localPath) {
         const initialCheck = await ValidationRunner.validateWithShell([], localPath, commands);
@@ -48,11 +67,11 @@ export class SelfHealingEngine {
             repairTimeMs: performance.now() - attemptStart,
             compileSuccess: true,
           });
-          return { finalChanges: [], attempts: attempt, success: true };
+          return { finalChanges: [], attempts: attempt, success: true, errorType: classification.type };
         }
         previousErrors = initialCheck.errors;
       } else if (!currentChanges.length) {
-        return { finalChanges: [], attempts: attempt, success: true };
+        return { finalChanges: [], attempts: attempt, success: true, errorType: classification.type };
       } else {
         if (fsManager && localPath) {
           try {
@@ -65,6 +84,7 @@ export class SelfHealingEngine {
                 success: false,
                 errorLog: err.message,
                 infrastructureError: true,
+                errorType: "INFRA",
               };
             }
           }
@@ -110,7 +130,7 @@ export class SelfHealingEngine {
             fs.writeFileSync(path.join(cacheDir, "repair-metrics.md"), summaryMd, "utf8");
           } catch {}
 
-          return { finalChanges: currentChanges, attempts: attempt, success: true };
+          return { finalChanges: currentChanges, attempts: attempt, success: true, errorType: classification.type };
         }
 
         previousErrors = validation.errors;
@@ -198,6 +218,7 @@ export class SelfHealingEngine {
       attempts: MAX_REPAIR_RETRIES,
       success: false,
       errorLog: previousErrors,
+      errorType: lastErrorType,
     };
   }
 }
