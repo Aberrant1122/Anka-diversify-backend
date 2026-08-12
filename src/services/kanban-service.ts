@@ -1,6 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import { WorkflowContextService } from "./workflow-context.service";
-import { AiService } from "./ai-service";
+import { AiService } from "../ai/application/AiService";
 
 const prisma = new PrismaClient();
 const workflowContextService = new WorkflowContextService();

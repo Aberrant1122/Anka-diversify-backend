@@ -181,9 +181,12 @@ export function routeTask(
     };
   }
 
-  // If request asks to create a simple widget/calculator/tool without specifying React
-  const isStandaloneAppPattern = /create\s+(?:a\s+)?(?:simple\s+)?(?:calculator|timer|stopwatch|todo\s*app|converter|clock|quiz|game)/i.test(message);
-  if (isStandaloneAppPattern && !isExplicitReact && !mentionsRepoFiles) {
+  // If request asks to create a simple widget/calculator/tool/standalone app without specifying React
+  const isFrontendOnlyPattern = /frontend\s*only|mock\s*data|no\s*(real\s*)?backend|ui\s*only|client\s*only|standalone\s*(app|frontend|application)/i.test(message);
+  const isStandaloneAppPattern = /create\s+(?:a\s+)?(?:simple\s+)?(?:calculator|timer|stopwatch|todo\s*app|ecommerce|e-commerce|converter|clock|quiz|game|landing\s*page|website|dashboard)/i.test(message) || isFrontendOnlyPattern;
+
+  // Only route to standalone pipeline if there are NO user files in the repo AND no explicit repo files mentioned
+  if (isStandaloneAppPattern && !isExplicitReact && !mentionsRepoFiles && userFiles.length === 0) {
     return {
       pipeline: "STANDALONE",
       environment: "HTML_CSS_JS",
@@ -193,12 +196,15 @@ export function routeTask(
     };
   }
 
-  // Default: REPOSITORY pipeline (React/TS)
+  // Default: REPOSITORY pipeline (React/TS if repo has TS/React or default, otherwise HTML_CSS_JS)
+  const targetEnv: TargetEnvironment = hasReactFiles || hasTsFiles ? "REACT_TS" : (hasHtmlCssJsFiles ? "HTML_CSS_JS" : "REACT_TS");
+  const valType: ValidationType = targetEnv === "REACT_TS" ? "TYPESCRIPT_BUILD" : "BROWSER_HTML";
+
   return {
     pipeline: "REPOSITORY",
-    environment: "REACT_TS",
-    repositoryRequired: true,
+    environment: targetEnv,
+    repositoryRequired: userFiles.length > 0,
     expectedFiles: [],
-    validationType: "TYPESCRIPT_BUILD",
+    validationType: valType,
   };
 }

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node scripts/copy-wasm.js && nodemon src/index.ts",
     "build": "prisma generate && tsc && node scripts/copy-wasm.js",
+    "test": "jest --config jest.config.json --forceExit",
     "copy:wasm": "node scripts/copy-wasm.js",
     "start": "node scripts/db-startup.js && node dist/index.js",
     "db:generate": "prisma generate",
@@ -51,11 +52,14 @@
     "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
+    "@types/jest": "^30.0.0",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/morgan": "^1.9.10",
     "@types/node": "^25.5.0",
     "@types/pdf-parse": "^1.1.5",
+    "jest": "^30.4.2",
     "nodemon": "^3.1.14",
+    "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2"
   }

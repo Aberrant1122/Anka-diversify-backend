@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { AiService } from "../services/ai-service";
+import { AiService } from "../ai/application/AiService";
 import { ProjectGitHubService } from "../services/github.service";
 import { ChatRequest } from "../types";
 import { PrismaClient } from "@prisma/client";
@@ -399,7 +399,7 @@ export class AiController {
         userId,
         projectId,
         req.body,
-        (progressEvent) => {
+        (progressEvent: any) => {
           sendEvent("progress", progressEvent);
         }
       );

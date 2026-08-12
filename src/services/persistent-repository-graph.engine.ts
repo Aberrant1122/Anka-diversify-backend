@@ -154,6 +154,46 @@ export class PersistentRepositoryGraphEngine {
     if (!inList.some((e) => e.id === edge.id)) inList.push(edge);
   }
 
+  public evictFileFromGraph(filePath: string) {
+    const normPath = filePath.replace(/\\/g, "/");
+    const fileNodeId = `file:${normPath}`;
+
+    const nodeIdsToRemove = new Set<string>();
+    nodeIdsToRemove.add(fileNodeId);
+
+    for (const [id, node] of this.nodeMap.entries()) {
+      if (node.filePath && node.filePath.replace(/\\/g, "/") === normPath) {
+        nodeIdsToRemove.add(id);
+      }
+    }
+
+    for (const id of nodeIdsToRemove) {
+      this.nodeMap.delete(id);
+      this.outEdges.delete(id);
+      this.inEdges.delete(id);
+    }
+
+    this.fileHashes.delete(normPath);
+
+    for (const [sourceId, edges] of this.outEdges.entries()) {
+      const filtered = edges.filter((e) => !nodeIdsToRemove.has(e.targetId) && !nodeIdsToRemove.has(e.sourceId));
+      if (filtered.length > 0) {
+        this.outEdges.set(sourceId, filtered);
+      } else {
+        this.outEdges.delete(sourceId);
+      }
+    }
+
+    for (const [targetId, edges] of this.inEdges.entries()) {
+      const filtered = edges.filter((e) => !nodeIdsToRemove.has(e.sourceId) && !nodeIdsToRemove.has(e.targetId));
+      if (filtered.length > 0) {
+        this.inEdges.set(targetId, filtered);
+      } else {
+        this.inEdges.delete(targetId);
+      }
+    }
+  }
+
   // ── 2. Incremental Codebase Graph Construction ──────────────────────────────
 
   public async buildGraph(
@@ -164,7 +204,15 @@ export class PersistentRepositoryGraphEngine {
     let cachedFiles = 0;
     let reindexedFiles = 0;
 
-    const knownPaths = new Set(files.map((f) => f.path.replace(/\\/g, "/")));
+    const currentPaths = new Set(files.map((f) => f.path.replace(/\\/g, "/")));
+
+    // Evict file data for paths no longer present in current snapshot
+    const existingFilePaths = Array.from(this.fileHashes.keys());
+    for (const existingPath of existingFilePaths) {
+      if (!currentPaths.has(existingPath)) {
+        this.evictFileFromGraph(existingPath);
+      }
+    }
 
     // Add Repository Node
     const repoNodeId = `repo:${repoName}`;
@@ -181,6 +229,11 @@ export class PersistentRepositoryGraphEngine {
         continue;
       }
 
+      // Evict stale symbols/edges if file content changed
+      if (this.fileHashes.has(normPath)) {
+        this.evictFileFromGraph(normPath);
+      }
+
       reindexedFiles++;
       this.fileHashes.set(normPath, hash);
 
@@ -190,7 +243,7 @@ export class PersistentRepositoryGraphEngine {
       this.addEdge(repoNodeId, fileNodeId, "owns");
 
       // Parse AST Features & Invert Graph
-      this.parseFileASTToGraph(normPath, f.content, fileNodeId, knownPaths);
+      this.parseFileASTToGraph(normPath, f.content, fileNodeId, currentPaths);
     }
 
     this.saveToDisk();
