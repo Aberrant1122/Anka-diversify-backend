@@ -12,7 +12,11 @@ export class InviteController {
   async createInvite(req: Request, res: Response) {
     try {
       const { email, role, department } = req.body;
-      const invitedById = req.headers["x-user-id"] as string;
+      const invitedById = req.user?.userId as string | undefined;
+
+      if (!invitedById) {
+        return res.status(401).json({ success: false, error: "Authentication required" });
+      }
 
       if (!email || !role) {
         return res.status(400).json({ success: false, error: "email and role are required" });
@@ -38,7 +42,10 @@ export class InviteController {
   // GET /api/invites — list all invites (admin)
   async listInvites(req: Request, res: Response) {
     try {
-      const invitedById = req.headers["x-user-id"] as string;
+      const invitedById = req.user?.userId as string | undefined;
+      if (!invitedById) {
+        return res.status(401).json({ success: false, error: "Authentication required" });
+      }
       const invites = await inviteService.listInvites(invitedById);
       res.json({ success: true, data: invites });
     } catch (error) {

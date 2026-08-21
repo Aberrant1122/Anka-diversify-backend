@@ -22,9 +22,14 @@ async function ensureUser(userId: string): Promise<void> {
 }
 
 export class ProjectService {
-  async getAllProjects(userId: string = DEMO_USER_ID) {
-    await ensureUser(userId);
+  async getAllProjects(userId: string) {
     return prisma.project.findMany({
+      where: {
+        OR: [
+          { userId },
+          { members: { some: { userId } } },
+        ],
+      },
       include: {
         tasks: true,
         memorySummary: { select: { summary: true, lastUpdated: true } },
@@ -35,10 +40,15 @@ export class ProjectService {
     });
   }
 
-  async getProjectById(id: string, userId: string = DEMO_USER_ID) {
-    await ensureUser(userId);
-    return prisma.project.findUnique({
-      where: { id },
+  async getProjectById(id: string, userId: string) {
+    return prisma.project.findFirst({
+      where: {
+        id,
+        OR: [
+          { userId },
+          { members: { some: { userId } } },
+        ],
+      },
       include: {
         tasks: true,
         memorySummary: true,
@@ -63,9 +73,8 @@ export class ProjectService {
       dueDate?: string;
       status?: string;
     },
-    userId: string = DEMO_USER_ID,
+    userId: string,
   ) {
-    await ensureUser(userId);
     return prisma.project.create({
       data: {
         name: data.name,
@@ -86,7 +95,7 @@ export class ProjectService {
   async updateProjectGitHubToken(
     projectId: string,
     githubToken: string,
-    userId: string = DEMO_USER_ID,
+    userId: string,
   ) {
     // Verify project belongs to user
     const project = await prisma.project.findUnique({
@@ -120,9 +129,10 @@ export class ProjectService {
       progress?: number;
       dueDate?: string;
     },
-    userId: string = DEMO_USER_ID,
+    userId: string,
   ) {
-    const project = await prisma.project.findUnique({ where: { id } });
+    // Owner-only: find the project only if the requesting user is its owner
+    const project = await prisma.project.findFirst({ where: { id, userId } });
     if (!project) return null;
 
     return prisma.project.update({
@@ -141,8 +151,9 @@ export class ProjectService {
     });
   }
 
-  async deleteProject(id: string, userId: string = DEMO_USER_ID) {
-    const project = await prisma.project.findUnique({ where: { id } });
+  async deleteProject(id: string, userId: string) {
+    // Owner-only: find the project only if the requesting user is its owner
+    const project = await prisma.project.findFirst({ where: { id, userId } });
     if (!project) return false;
 
     await prisma.project.delete({ where: { id } });

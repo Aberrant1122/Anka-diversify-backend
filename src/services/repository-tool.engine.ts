@@ -695,13 +695,15 @@ function getSnapshotFiles(snapshot: any, localPath?: string | null): SnapshotFil
     }
   }
 
-  // Collect candidate directories for disk scanning
+  // Collect candidate directories for disk scanning.
+  // ISOLATION RULE: only scan the explicitly-supplied localPath.
+  // We intentionally do NOT fall back to process.cwd() or its parent,
+  // which would cause the engine to mix in sibling projects or the ANKA
+  // backend source directory itself.
   const candidateDirs: string[] = [];
-  if (localPath && fs.existsSync(localPath)) candidateDirs.push(localPath);
-  const cwd = process.cwd();
-  if (fs.existsSync(cwd)) candidateDirs.push(cwd);
-  const parent = path.dirname(cwd);
-  if (fs.existsSync(parent)) candidateDirs.push(parent);
+  if (localPath && fs.existsSync(localPath)) {
+    candidateDirs.push(localPath);
+  }
 
   return mergeFilesWithDiskPriority(candidateDirs, snapshotList);
 }

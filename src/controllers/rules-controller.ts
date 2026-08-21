@@ -7,10 +7,7 @@ function param(req: Request, key: string): string {
   return req.params[key] as string;
 }
 
-function headerStr(req: Request, fallback: string): string {
-  const val = req.headers['x-user-name'];
-  return (Array.isArray(val) ? val[0] : val) || fallback;
-}
+
 
 export class RulesController {
   async list(_req: Request, res: Response) {
@@ -29,6 +26,7 @@ export class RulesController {
       if (!name || !category) {
         return res.status(400).json({ message: 'name and category are required' });
       }
+      const actorName = (req.user?.email as string | undefined) || "Authenticated Admin";
       const rule = await prisma.orgRule.create({
         data: {
           name: String(name),
@@ -36,7 +34,7 @@ export class RulesController {
           category: String(category),
           conditions: (conditions ?? []) as Prisma.InputJsonValue,
           actions: (actions ?? []) as Prisma.InputJsonValue,
-          createdBy: headerStr(req, 'Admin'),
+          createdBy: actorName,
           ruleType: ruleType || null,
         },
       });
@@ -107,7 +105,7 @@ export class RulesController {
           enabled: false,
           conditions: (source.conditions ?? []) as Prisma.InputJsonValue,
           actions: (source.actions ?? []) as Prisma.InputJsonValue,
-          createdBy: headerStr(req, source.createdBy),
+          createdBy: source.createdBy,
           ruleType: source.ruleType,
         },
       });

@@ -7,7 +7,11 @@
  *   C. File only on disk               → disk content returned
  *   D. Windows-style vs POSIX path     → one entry, disk wins
  *   E. RepositoryToolEngine follows same precedence (via getSnapshotFiles)
- *   F. RepositoryKnowledgeGraph receives disk version when both exist
+ *   F. RepositoryScanner.getEffectiveSnapshot feeds disk version to KnowledgeGraph
+ *
+ * New requirements:
+ *   G. Engine does NOT expose process.cwd() files when no localPath is given
+ *   H. Engine is strictly bounded to the supplied localPath (no sibling leakage)
  */
 
 import os from "os";
@@ -154,5 +158,73 @@ describe("RepositoryScanner + RepositoryKnowledgeGraph – disk content propagat
 
     expect(diskExport).toBeDefined();
     expect(staleExport).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G. Engine does NOT expose process.cwd() files when no localPath is supplied
+// ---------------------------------------------------------------------------
+describe("RepositoryToolEngine – repository isolation (no localPath)", () => {
+  test("G: engine does not automatically read process.cwd() when no localPath is provided", () => {
+    // Snapshot contains only a synthetic file that would never exist on disk.
+    const SNAPSHOT_ONLY_PATH = "snapshot-only-unique-isolation-marker.ts";
+    const snapshot = {
+      keyFiles: [
+        { path: SNAPSHOT_ONLY_PATH, content: "export const MARKER = true;" },
+      ],
+    };
+
+    // Instantiate without a localPath — isolation behaviour under test.
+    const engine = new RepositoryToolEngine(snapshot);
+
+    // 1. The snapshot-only file must be readable (snapshot fallback works).
+    const snapshotResult = engine.readFile({ filePath: SNAPSHOT_ONLY_PATH });
+    expect(snapshotResult.found).toBe(true);
+    expect(snapshotResult.content).toContain("MARKER");
+
+    // 2. A file that almost certainly lives in process.cwd() (package.json) but
+    //    is NOT in the snapshot must NOT be findable — the engine must not have
+    //    scanned the host filesystem.
+    //    We verify by checking that the file set comes exclusively from the
+    //    supplied snapshot.
+    const cwdResult = engine.readFile({ filePath: "package.json" });
+    expect(cwdResult.found).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H. Engine is strictly bounded to the supplied localPath (no sibling leakage)
+// ---------------------------------------------------------------------------
+describe("RepositoryToolEngine – repository isolation (bounded localPath)", () => {
+  let repoA: string;
+  let repoB: string;
+
+  beforeEach(() => {
+    repoA = makeTmpDir({ "src/a.ts": "export const A = 1;" });
+    repoB = makeTmpDir({ "src/b.ts": "export const B = 2;" });
+  });
+
+  afterEach(() => {
+    rmDir(repoA);
+    rmDir(repoB);
+  });
+
+  test("H: engine only scans the explicitly supplied localPath, not sibling directories", () => {
+    // Snapshot contains no mention of src/b.ts — only repoA files.
+    const snapshot = {
+      keyFiles: [] as { path: string; content: string }[],
+    };
+
+    // Engine is given repoA as localPath.
+    const engine = new RepositoryToolEngine(snapshot, repoA);
+
+    // src/a.ts must be found (it lives in repoA).
+    const resultA = engine.readFile({ filePath: "src/a.ts" });
+    expect(resultA.found).toBe(true);
+    expect(resultA.content).toContain("A = 1");
+
+    // src/b.ts must NOT be found (it lives in repoB, not repoA, and is not in snapshot).
+    const resultB = engine.readFile({ filePath: "src/b.ts" });
+    expect(resultB.found).toBe(false);
   });
 });

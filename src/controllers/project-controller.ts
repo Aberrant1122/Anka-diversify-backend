@@ -10,13 +10,18 @@ import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils
 const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
-const DEMO_USER_ID = "demo-user-id";
-
 function getUserId(req: Request): string {
-  return req.user?.id || (req.headers["x-user-id"] as string) || DEMO_USER_ID;
+  const userId = req.user?.userId as string | undefined;
+
+  if (!userId) {
+    throw new Error("Authenticated user ID missing");
+  }
+
+  return userId;
 }
+
 function getUserName(req: Request): string {
-  return req.user?.name || (req.headers["x-user-name"] as string) || "Unknown";
+  return (req.user?.email as string | undefined) || "Authenticated User";
 }
 
 function param(req: Request, key: string): string {

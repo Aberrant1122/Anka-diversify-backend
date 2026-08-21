@@ -4,9 +4,7 @@ import { SprintService } from "../services/sprint-service";
 const sprintService = new SprintService();
 
 function getUserId(req: Request): string | null {
-  const val = req.headers["x-user-id"];
-  if (!val) return null;
-  return Array.isArray(val) ? val[0] : val;
+  return (req.user?.userId as string | undefined) || null;
 }
 
 function param(req: Request, key: string): string {
@@ -18,7 +16,7 @@ export class SprintController {
   async getSprints(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const sprints = await sprintService.getSprints(param(req, "projectId"));
       res.json({ success: true, data: sprints, count: sprints.length });
@@ -31,7 +29,7 @@ export class SprintController {
   async createSprint(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const { name, goal, startDate, endDate, velocity } = req.body;
       if (!name || !startDate || !endDate) {
@@ -55,7 +53,7 @@ export class SprintController {
   async updateSprint(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const sprint = await sprintService.updateSprint(param(req, "sprintId"), req.body);
       res.json({ success: true, data: sprint });
@@ -68,7 +66,7 @@ export class SprintController {
   async deleteSprint(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       await sprintService.deleteSprint(param(req, "sprintId"));
       res.json({ success: true, message: "Sprint deleted" });
@@ -81,7 +79,7 @@ export class SprintController {
   async addTaskToSprint(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const { taskId } = req.body;
       if (!taskId) return res.status(400).json({ error: "Bad request", message: "taskId is required" });
@@ -97,7 +95,7 @@ export class SprintController {
   async removeTaskFromSprint(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       await sprintService.removeTaskFromSprint(param(req, "sprintId"), param(req, "taskId"));
       res.json({ success: true, message: "Task removed from sprint" });

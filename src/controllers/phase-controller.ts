@@ -4,9 +4,7 @@ import { PhaseService } from "../services/phase-service";
 const phaseService = new PhaseService();
 
 function getUserId(req: Request): string | null {
-  const val = req.headers["x-user-id"];
-  if (!val) return null;
-  return Array.isArray(val) ? val[0] : val;
+  return (req.user?.userId as string | undefined) || null;
 }
 
 function param(req: Request, key: string): string {
@@ -48,7 +46,7 @@ export class PhaseController {
   async approvePhase(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const states = await phaseService.approvePhase(
         param(req, "projectId"),
@@ -66,7 +64,7 @@ export class PhaseController {
   async rejectPhase(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const state = await phaseService.rejectPhase(
         param(req, "projectId"),
@@ -84,7 +82,7 @@ export class PhaseController {
   async requestChanges(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const state = await phaseService.requestChanges(
         param(req, "projectId"),
@@ -122,7 +120,7 @@ export class PhaseController {
   async runAutomatedPhase(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const result = await phaseService.runAutomatedPhase(param(req, "projectId"), param(req, "phase"), userId, req.body?.brief);
       res.status(201).json({ success: true, data: result });
@@ -145,7 +143,7 @@ export class PhaseController {
   async createArtifact(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "X-User-ID header required" });
+      if (!userId) return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
 
       const { phase, type, title, content } = req.body;
       if (!phase || !type || !title || !content) {

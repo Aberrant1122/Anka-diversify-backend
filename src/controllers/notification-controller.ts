@@ -2,8 +2,7 @@ import { Request, Response } from "express";
 import { notificationService } from "../services/notification-service";
 
 function uid(req: Request): string | null {
-  const v = req.headers["x-user-id"];
-  return v ? (Array.isArray(v) ? v[0] : v) : null;
+  return (req.user?.userId as string | undefined) || null;
 }
 
 export class NotificationController {

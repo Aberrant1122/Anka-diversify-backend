@@ -134,10 +134,10 @@ export class AuthController {
 
   async getProfile(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
 
       if (!userId) {
-        return res.status(401).json({ message: "User ID required" });
+        return res.status(401).json({ message: "Authentication required" });
       }
 
       const user = await prisma.user.findUnique({
