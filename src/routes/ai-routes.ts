@@ -1,8 +1,12 @@
 import { Router } from 'express';
 import { AiController } from '../controllers/ai-controller';
+import { authenticateToken } from '../middleware/auth';
 
 const router = Router();
 const aiController = new AiController();
+
+// Require a valid JWT for every AI endpoint.
+router.use(authenticateToken);
 
 // General Assistant Routes
 router.post('/general/chat', aiController.generalChat.bind(aiController));

@@ -14,9 +14,9 @@ export class AiController {
   // General Assistant Routes
   async generalChat(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       if (!userId) {
-        return res.status(401).json({ error: "User ID required" });
+        return res.status(401).json({ error: "Authentication required" });
       }
 
       const chatRequest: ChatRequest = req.body;
@@ -41,9 +41,9 @@ export class AiController {
 
   async getGeneralSessions(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       if (!userId) {
-        return res.status(401).json({ error: "User ID required" });
+        return res.status(401).json({ error: "Authentication required" });
       }
 
       const sessions = await aiService.getSessions(userId, "general");
@@ -70,11 +70,11 @@ export class AiController {
 
   async getGeneralSessionMessages(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       const { sessionId } = req.params;
 
       if (!userId) {
-        return res.status(401).json({ error: "User ID required" });
+        return res.status(401).json({ error: "Authentication required" });
       }
 
       if (Array.isArray(sessionId)) {
@@ -104,11 +104,11 @@ export class AiController {
   // Project Assistant Routes
   async projectChat(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       const { projectId } = req.params;
 
       if (!userId) {
-        return res.status(401).json({ error: "User ID required" });
+        return res.status(401).json({ error: "Authentication required" });
       }
 
       if (Array.isArray(projectId)) {
@@ -138,11 +138,11 @@ export class AiController {
 
   async getProjectSessions(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       const { projectId } = req.params;
 
       if (!userId) {
-        return res.status(401).json({ error: "User ID required" });
+        return res.status(401).json({ error: "Authentication required" });
       }
 
       if (Array.isArray(projectId)) {
@@ -178,11 +178,11 @@ export class AiController {
 
   async getProjectSessionMessages(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       const { projectId, sessionId } = req.params;
 
       if (!userId) {
-        return res.status(401).json({ error: "User ID required" });
+        return res.status(401).json({ error: "Authentication required" });
       }
 
       if (Array.isArray(sessionId)) {
@@ -333,11 +333,11 @@ export class AiController {
 
   async getProjectContext(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       const { projectId } = req.params;
 
       if (!userId) {
-        return res.status(401).json({ error: "User ID required" });
+        return res.status(401).json({ error: "Authentication required" });
       }
 
       if (Array.isArray(projectId)) {
@@ -359,9 +359,9 @@ export class AiController {
 
   async runAgent(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       const { projectId } = req.params;
-      if (!userId) return res.status(401).json({ error: "User ID required" });
+      if (!userId) return res.status(401).json({ error: "Authentication required" });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
       if (req.headers.accept?.includes("text/event-stream") || req.query.stream === "true") {
@@ -381,9 +381,9 @@ export class AiController {
 
   async streamAgent(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       const { projectId } = req.params;
-      if (!userId) return res.status(401).json({ error: "User ID required" });
+      if (!userId) return res.status(401).json({ error: "Authentication required" });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
       res.setHeader("Content-Type", "text/event-stream");
@@ -415,9 +415,9 @@ export class AiController {
 
   async pushAgentChanges(req: Request, res: Response) {
     try {
-      const userId = req.headers["x-user-id"] as string;
+      const userId = req.user?.userId as string | undefined;
       const { projectId } = req.params;
-      if (!userId) return res.status(401).json({ error: "User ID required" });
+      if (!userId) return res.status(401).json({ error: "Authentication required" });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
       const { changes, commitMessage } = req.body as {
