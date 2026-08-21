@@ -206,4 +206,52 @@ describe("Phase 3: Project-Scoped Embedding Cache & Isolation", () => {
     expect(run2Stats.cachedHits).toBe(run1Stats.totalChunks);
     expect(run2Stats.newlyEmbedded).toBe(0);
   });
+
+  test("7: Process restart / unchanged repository restores vectorStore and enables semantic search from cache", async () => {
+    const cacheDir = path.join(tmpBase, ".anka-cache", "projects", "projRestartSearch");
+
+    const repo = [
+      {
+        path: "src/services/auth.service.ts",
+        content: `
+export class AuthService {
+  public async loginUser(email: string, passwordHash: string) {
+    return { token: "jwt-token", email };
+  }
+}
+`,
+      },
+      {
+        path: "src/components/ThemeToggle.tsx",
+        content: `
+export function ThemeToggle() {
+  return <button>Toggle Dark Mode</button>;
+}
+`,
+      },
+    ];
+
+    // Initial pipeline run: engine1 indexes codebase and populates embedding cache
+    const engine1 = new SemanticRetrievalEngine(undefined, cacheDir);
+    const run1Stats = await engine1.indexCodebase(repo);
+    expect(run1Stats.newlyEmbedded).toBeGreaterThan(0);
+
+    const initialResults = await engine1.search("login authentication user", 5);
+    expect(initialResults.length).toBeGreaterThan(0);
+    expect(initialResults[0].chunk.filePath).toBe("src/services/auth.service.ts");
+
+    // Simulated subsequent run / process restart: create a new SemanticRetrievalEngine instance
+    // vectorStore starts as empty []. indexCodebase(repo) must reconstruct vectorStore using cached vectors.
+    const engine2 = new SemanticRetrievalEngine(undefined, cacheDir);
+    const run2Stats = await engine2.indexCodebase(repo);
+
+    // Verify 100% cache hit and 0 new embeddings
+    expect(run2Stats.cachedHits).toBe(run2Stats.totalChunks);
+    expect(run2Stats.newlyEmbedded).toBe(0);
+
+    // Verify semantic search is fully functional and returns the expected result
+    const searchResults = await engine2.search("login authentication user", 5);
+    expect(searchResults.length).toBeGreaterThan(0);
+    expect(searchResults[0].chunk.filePath).toBe("src/services/auth.service.ts");
+  });
 });

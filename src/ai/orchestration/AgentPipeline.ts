@@ -179,16 +179,18 @@ export class AgentPipeline {
         ? effectiveSnapshot
         : effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || [];
 
+      const indexStats = await semanticEngine.indexCodebase(rawSnapshotFiles);
+
       if (revisionChanged || !currentRevisionHash) {
-        // Repository has changed (or has no revision) — re-index embeddings.
-        await semanticEngine.indexCodebase(rawSnapshotFiles);
+        // Repository has changed (or has no revision) — persist the new revision.
         if (effectiveSnapshot.revision) {
           savePersistedRevision(projectId, effectiveSnapshot.revision);
         }
       } else {
-        // Repository is unchanged — skip re-indexing entirely.
-        // The EmbeddingCacheManager already holds chunk vectors from the previous run.
-        console.log(`[AgentPipeline] Revision unchanged (${currentRevisionHash.slice(0, 12)}…) — skipping re-indexing for project ${projectId}`);
+        // Repository is unchanged — vectorStore was rebuilt entirely from cached embeddings.
+        console.log(
+          `[AgentPipeline] Revision unchanged (${currentRevisionHash.slice(0, 12)}…) — restored semantic index from cached embeddings: ${indexStats.cachedHits} cached, ${indexStats.newlyEmbedded} new`
+        );
       }
 
       const semanticResults = await semanticEngine.search(request.message, 10);
