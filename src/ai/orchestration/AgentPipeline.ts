@@ -29,6 +29,7 @@ import { SemanticRetrievalEngine } from "../../services/semantic-retrieval.engin
 import { buildGroundedSemanticQueries } from "../repository/RetrievalQueryBuilder";
 import { enrichFileContextWithSemanticResults } from "../repository/SemanticContextResolver";
 import { rerankSemanticResults } from "../repository/CodeAwareReranker";
+import { packFileContext } from "../context/ContextPacker";
 import { decrypt } from "../../utils/encryption";
 
 const prisma = new PrismaClient();
@@ -246,6 +247,29 @@ export class AgentPipeline {
           similarityThreshold: 0.4,
           hybridThreshold: 0.35,
         });
+
+        // Deterministically pack full files within token budget
+        const packed = packFileContext({
+          fileContext: optimizedContext.fileContext,
+          targetPath: intentResult?.targetPath,
+          targetPaths: executionContract?.targetPaths,
+          discoveredSymbols: executionMemory?.discoveredSymbols,
+          discoveredServices: executionMemory?.discoveredServices || [],
+          discoveredModels: executionMemory?.discoveredModels || [],
+          discoveredRoutes: executionMemory?.discoveredRoutes || [],
+          semanticResults,
+          maxTokens: 12000,
+        });
+
+        optimizedContext.fileContext = packed.fileContext;
+
+        if (process.env.NODE_ENV !== "production" || packed.excludedFiles.length > 0) {
+          console.log(
+            `[AgentPipeline] Context packed: ${packed.telemetry.contextFilesAfterPacking}/${packed.telemetry.contextFilesBeforePacking} files (${packed.telemetry.estimatedTokensAfterPacking} tokens)${
+              packed.excludedFiles.length > 0 ? ` | Excluded by budget: ${packed.excludedFiles.join(", ")}` : ""
+            }`
+          );
+        }
       }
     } catch (e: any) {
       console.warn("[AgentPipeline] Semantic retrieval warning:", e?.message || e);
