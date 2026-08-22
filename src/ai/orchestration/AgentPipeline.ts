@@ -28,6 +28,7 @@ import { ManifestValidator } from "../../services/manifest-validator";
 import { SemanticRetrievalEngine } from "../../services/semantic-retrieval.engine";
 import { buildGroundedSemanticQueries } from "../repository/RetrievalQueryBuilder";
 import { enrichFileContextWithSemanticResults } from "../repository/SemanticContextResolver";
+import { rerankSemanticResults } from "../repository/CodeAwareReranker";
 import { decrypt } from "../../utils/encryption";
 
 const prisma = new PrismaClient();
@@ -213,7 +214,28 @@ export class AgentPipeline {
         console.log(`[AgentPipeline] Grounded queries:`, semanticQueries);
       }
 
-      const semanticResults = await semanticEngine.searchMany(semanticQueries, 10, 10);
+      const semanticCandidates = await semanticEngine.searchMany(semanticQueries, 10, 10);
+
+      const semanticResults = rerankSemanticResults(semanticCandidates, {
+        targetPath: intentResult?.targetPath,
+        discoveredSymbols: executionMemory?.discoveredSymbols,
+        discoveredServices: executionMemory?.discoveredServices || [],
+        discoveredModels: executionMemory?.discoveredModels || [],
+        discoveredRoutes: executionMemory?.discoveredRoutes || [],
+      });
+
+      if (process.env.NODE_ENV !== "production") {
+        console.log(
+          `[AgentPipeline] Reranked ${semanticResults.length} semantic results:`,
+          semanticResults.map((r) => ({
+            filePath: r.chunk.filePath,
+            name: r.chunk.name,
+            hybridScore: r.hybridScore,
+            rerankScore: r.rerankScore,
+            reasons: r.rerankReasons,
+          }))
+        );
+      }
 
       // Enrich optimizedContext.fileContext with full repository file contents (never partial chunks)
       if (optimizedContext && optimizedContext.fileContext) {
