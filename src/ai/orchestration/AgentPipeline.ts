@@ -27,6 +27,7 @@ import { RepositorySnapshotData, loadPersistedRevision, savePersistedRevision } 
 import { ManifestValidator } from "../../services/manifest-validator";
 import { SemanticRetrievalEngine } from "../../services/semantic-retrieval.engine";
 import { buildGroundedSemanticQueries } from "../repository/RetrievalQueryBuilder";
+import { enrichFileContextWithSemanticResults } from "../repository/SemanticContextResolver";
 import { decrypt } from "../../utils/encryption";
 
 const prisma = new PrismaClient();
@@ -214,15 +215,15 @@ export class AgentPipeline {
 
       const semanticResults = await semanticEngine.searchMany(semanticQueries, 10, 10);
 
-      // Enrich optimizedContext.fileContext if top semantic vector matches are not present
+      // Enrich optimizedContext.fileContext with full repository file contents (never partial chunks)
       if (optimizedContext && optimizedContext.fileContext) {
-        for (const res of semanticResults) {
-          if (res.chunk?.filePath && res.chunk?.content && !optimizedContext.fileContext[res.chunk.filePath]) {
-            if (res.similarityScore > 0.4 || res.hybridScore > 0.35) {
-              optimizedContext.fileContext[res.chunk.filePath] = res.chunk.content;
-            }
-          }
-        }
+        enrichFileContextWithSemanticResults({
+          fileContext: optimizedContext.fileContext,
+          semanticResults,
+          rawSnapshotFiles,
+          similarityThreshold: 0.4,
+          hybridThreshold: 0.35,
+        });
       }
     } catch (e: any) {
       console.warn("[AgentPipeline] Semantic retrieval warning:", e?.message || e);
