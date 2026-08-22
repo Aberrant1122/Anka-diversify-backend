@@ -26,6 +26,7 @@ import { SubTaskExecutor } from "../../services/sub-task-executor";
 import { RepositorySnapshotData, loadPersistedRevision, savePersistedRevision } from "../repository/RepositorySnapshot";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { SemanticRetrievalEngine } from "../../services/semantic-retrieval.engine";
+import { buildGroundedSemanticQueries } from "../repository/RetrievalQueryBuilder";
 import { decrypt } from "../../utils/encryption";
 
 const prisma = new PrismaClient();
@@ -163,7 +164,7 @@ export class AgentPipeline {
       projectContext.summary?.summary,
     );
 
-    // Stage 4: Real Vector & Hybrid Keyword Semantic Retrieval
+    // Stage 4: Real Vector & Grounded Multi-Query Semantic Retrieval
     // Guard: skip re-indexing if the effective repository content has not changed
     // since the last pipeline run for this project (persisted revision freshness check).
     const s4Start = performance.now();
@@ -193,7 +194,25 @@ export class AgentPipeline {
         );
       }
 
-      const semanticResults = await semanticEngine.search(request.message, 10);
+      const discoveredSymbolNames = executionMemory?.discoveredSymbols
+        ? Array.from(executionMemory.discoveredSymbols.keys())
+        : [];
+
+      const semanticQueries = buildGroundedSemanticQueries({
+        message: request.message,
+        targetPath: intentResult?.targetPath,
+        discoveredSymbols: discoveredSymbolNames,
+        discoveredServices: executionMemory?.discoveredServices || [],
+        discoveredModels: executionMemory?.discoveredModels || [],
+        discoveredRoutes: executionMemory?.discoveredRoutes || [],
+      });
+
+      console.log(`[AgentPipeline] Semantic retrieval queries: ${semanticQueries.length}`);
+      if (process.env.NODE_ENV !== "production") {
+        console.log(`[AgentPipeline] Grounded queries:`, semanticQueries);
+      }
+
+      const semanticResults = await semanticEngine.searchMany(semanticQueries, 10, 10);
 
       // Enrich optimizedContext.fileContext if top semantic vector matches are not present
       if (optimizedContext && optimizedContext.fileContext) {

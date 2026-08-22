@@ -84,6 +84,63 @@ export function calculateTax(amount: number) { return amount * 0.1; }
   assertTrue(searchRes.length > 0, "Semantic search returns relevant chunks");
   assertEqual(searchRes[0].chunk.filePath, "src/services/auth.service.ts", "Top result maps to AuthService");
 
+  // 5. Grounded Multi-Query searchMany() Test
+  console.log("\n5️⃣  Grounded Multi-Query searchMany() Tests:");
+  const multiEngine = new SemanticRetrievalEngine();
+  const multiRepo = [
+    {
+      path: "src/services/auth.service.ts",
+      content: "export class AuthService { public async login(user: string) { return 'token'; } }",
+    },
+    {
+      path: "src/middleware/auth.middleware.ts",
+      content: "export function authMiddleware(req: any, res: any, next: any) { const token = req.headers.authorization; if (!token) throw new Error('Unauthorized'); next(); }",
+    },
+    {
+      path: "src/components/ThemeToggle.tsx",
+      content: "export function ThemeToggle() { return <button>Toggle</button>; }",
+    },
+  ];
+
+  await multiEngine.indexCodebase(multiRepo);
+
+  const multiQueries = ["login authentication", "token middleware"];
+  const multiRes = await multiEngine.searchMany(multiQueries, 10, 10);
+
+  assertTrue(multiRes.length >= 2, "searchMany returns relevant results for multiple queries");
+
+  const filePaths = multiRes.map((r) => r.chunk.filePath);
+  assertTrue(filePaths.includes("src/services/auth.service.ts"), "AuthService result is present");
+  assertTrue(filePaths.includes("src/middleware/auth.middleware.ts"), "Auth middleware result is present");
+
+  // Verify no duplicate chunks
+  const chunkIds = multiRes.map((r) => r.chunk.id);
+  const uniqueChunkIds = new Set(chunkIds);
+  assertEqual(chunkIds.length, uniqueChunkIds.size, "No duplicate chunks returned by searchMany");
+
+  // Verify sorted by hybridScore descending
+  let isSorted = true;
+  for (let i = 1; i < multiRes.length; i++) {
+    if (multiRes[i].hybridScore > multiRes[i - 1].hybridScore) {
+      isSorted = false;
+      break;
+    }
+  }
+  assertTrue(isSorted, "Results are sorted by hybridScore descending");
+
+  // Verify ThemeToggle does not outrank auth results
+  const authIndices = multiRes
+    .map((r, idx) => ({ path: r.chunk.filePath, idx }))
+    .filter((r) => r.path.includes("auth"));
+  const themeIndex = multiRes.findIndex((r) => r.chunk.filePath.includes("ThemeToggle"));
+
+  if (themeIndex !== -1 && authIndices.length > 0) {
+    const minAuthIndex = Math.min(...authIndices.map((a) => a.idx));
+    assertTrue(minAuthIndex < themeIndex, "ThemeToggle does not outrank strongly relevant authentication results");
+  } else {
+    assertTrue(true, "ThemeToggle filtered out or ranks below auth results");
+  }
+
   console.log("\n✨ ALL SEMANTIC RETRIEVAL UNIT TESTS PASSED!\n");
 }
 

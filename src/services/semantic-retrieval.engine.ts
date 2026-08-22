@@ -548,6 +548,59 @@ export class SemanticRetrievalEngine {
     return results.slice(0, topK);
   }
 
+  /**
+   * Perform multi-query semantic search across multiple grounded queries.
+   * Merges results and deduplicates chunks, preserving the highest hybridScore.
+   */
+  async searchMany(
+    queries: string[],
+    topK = 10,
+    perQueryK = 10
+  ): Promise<SemanticSearchResult[]> {
+    if (!Array.isArray(queries) || queries.length === 0 || this.vectorStore.length === 0) {
+      return [];
+    }
+
+    // 1. Remove empty queries and deduplicate
+    const seenQueries = new Set<string>();
+    const normalizedQueries: string[] = [];
+
+    for (const q of queries) {
+      if (typeof q === "string") {
+        const trimmed = q.trim();
+        if (trimmed && !seenQueries.has(trimmed)) {
+          seenQueries.add(trimmed);
+          normalizedQueries.push(trimmed);
+        }
+      }
+    }
+
+    // 2. Cap at maximum 4 queries
+    const cappedQueries = normalizedQueries.slice(0, 4);
+    if (cappedQueries.length === 0) return [];
+
+    // 3. For each query call existing this.search(query, perQueryK)
+    const mergedMap = new Map<string, SemanticSearchResult>();
+
+    for (const query of cappedQueries) {
+      const results = await this.search(query, perQueryK);
+      for (const res of results) {
+        const chunkId = res.chunk?.id || `${res.chunk?.filePath}:${res.chunk?.startLine}:${res.chunk?.name}`;
+        const existing = mergedMap.get(chunkId);
+        if (!existing || res.hybridScore > existing.hybridScore) {
+          mergedMap.set(chunkId, res);
+        }
+      }
+    }
+
+    // 4. Sort merged results by hybridScore descending
+    const mergedResults = Array.from(mergedMap.values());
+    mergedResults.sort((a, b) => b.hybridScore - a.hybridScore);
+
+    // 5. Return topK
+    return mergedResults.slice(0, topK);
+  }
+
   public getCacheSize(): number {
     return this.cache.size();
   }
