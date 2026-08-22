@@ -30,6 +30,8 @@ import { buildGroundedSemanticQueries } from "../repository/RetrievalQueryBuilde
 import { enrichFileContextWithSemanticResults } from "../repository/SemanticContextResolver";
 import { rerankSemanticResults } from "../repository/CodeAwareReranker";
 import { packFileContext } from "../context/ContextPacker";
+import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
+import { FileManifest } from "../../types";
 import { decrypt } from "../../utils/encryption";
 
 const prisma = new PrismaClient();
@@ -307,6 +309,7 @@ export class AgentPipeline {
 
     // Stage 6: Manifest Generation & Task Decomposition
     const s6Start = performance.now();
+    let approvedManifest: FileManifest | null = null;
     const manifestEnabled = process.env.ENABLE_MANIFEST_ENFORCEMENT !== "false";
 
     if (manifestEnabled) {
@@ -340,6 +343,10 @@ export class AgentPipeline {
             const res = await executor.executeSubTask(subTask, completedMap, projectContext, executionContract);
             completedMap.set(subTaskId, res);
           }
+          const agg = executor.aggregateResults(completedMap);
+          if (agg.success) {
+            approvedManifest = agg.aggregateManifest;
+          }
         } catch (e: any) {
           console.error("[AgentPipeline] Task decomposition error:", e?.message || e);
         }
@@ -361,6 +368,27 @@ export class AgentPipeline {
               validationErrors: valRes.errors as any,
             },
           });
+
+          if (!valRes.valid) {
+            const errorDetails = valRes.errors.map((e) => `• [${e.type}] ${e.message} (${e.suggestion})`).join("\n");
+            const failureExplanation = `[Manifest Validation Failed] The planned file manifest violated execution contract constraints:\n${errorDetails}`;
+            await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+            return {
+              explanation: failureExplanation,
+              changes: [],
+              commitMessage: "",
+              sessionId: session.id,
+              intent: intentResult.intent,
+              taskType: intentResult.taskType,
+              risk: intentResult.risk,
+              estimatedComplexity: intentResult.estimatedComplexity,
+              targetPath: intentResult.targetPath,
+              confidence: finalConfidence,
+            };
+          }
+
+          approvedManifest = manifest;
         } catch (e: any) {
           console.error("[AgentPipeline] Manifest generation error:", e?.message || e);
         }
@@ -378,6 +406,40 @@ export class AgentPipeline {
       executionContract,
     );
     const s7Time = performance.now() - s7Start;
+
+    // Execution Scope Enforcement Gate (Post-Generation / Pre-Disk)
+    const existingFileList = Array.isArray(effectiveSnapshot)
+      ? effectiveSnapshot.map((f: any) => (typeof f === "string" ? f : f.path || ""))
+      : (effectiveSnapshot?.keyFiles || []).map((f: any) => (typeof f === "string" ? f : f.path || ""));
+
+    const scopeCheck = enforceExecutionScope({
+      proposedChanges: roadmapAndDiff.changes,
+      manifest: approvedManifest,
+      contract: executionContract,
+      existingFilePaths: existingFileList,
+    });
+
+    if (!scopeCheck.valid) {
+      const errorDetails = scopeCheck.errors
+        .map((e) => `• [${e.reason}] ${e.path}: ${e.message}`)
+        .join("\n");
+      const failureExplanation = `[Execution Scope Violation] Generated file changes failed deterministic scope validation:\n${errorDetails}`;
+      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+      return {
+        explanation: failureExplanation,
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        intent: intentResult.intent,
+        taskType: intentResult.taskType,
+        risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity,
+        targetPath: intentResult.targetPath,
+        confidence: finalConfidence,
+        roadmap: roadmapAndDiff.roadmap,
+      };
+    }
 
     // Diff Contract Critic Pass
     const criticResult = executionContract.diffCriticEnabled
