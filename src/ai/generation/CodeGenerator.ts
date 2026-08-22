@@ -1,6 +1,11 @@
 import { getOpenAI } from "../shared/utils";
 import { AgentFileChange, ExecutionContract, RoadmapStep } from "../shared/types";
 import { FileManifest } from "../../types";
+import {
+  GeneratedChangeProposal,
+  resolveGenerationProposals,
+  ResolutionResult,
+} from "./GenerationProposalResolver";
 import { RoadmapGenerator } from "./RoadmapGenerator";
 import { ValidationPlanner } from "../validation/ValidationPlanner";
 import {
@@ -39,8 +44,32 @@ STRICT EXECUTION REQUIREMENTS:
 4. Do NOT create additional helper files, utilities, tests, or configurations unless explicitly declared in the plan above.
 5. Do NOT modify package.json, config files, routes, or other files unless explicitly declared above.
 6. If the implementation appears to require another file not listed in the plan: DO NOT invent or modify it. Stay strictly within the approved plan.
-7. Output every required manifest file that needs changes with 100% complete content.
-8. Use exact repository-relative paths as written above.
+7. Use exact repository-relative paths as written above.
+
+═══════════════════════════════════════════
+ACTION-SPECIFIC OUTPUT FORMAT
+═══════════════════════════════════════════
+
+For CREATE actions — output COMPLETE new file content:
+{ "path": "...", "action": "create", "content": "100% complete new file", "description": "..." }
+
+For DELETE actions — output deletion marker:
+{ "path": "...", "action": "delete", "isDeleted": true, "content": "", "description": "..." }
+
+For MODIFY actions — output ONLY targeted search/replace edits:
+{ "path": "...", "action": "modify", "description": "...", "edits": [ { "oldText": "exact existing source text", "newText": "replacement source text" } ] }
+
+STRICT MODIFY RULES:
+1. Do NOT output complete file content for modify. Use edits[] only.
+2. Each oldText must be copied EXACTLY from the provided full file context. Exact byte match required.
+3. oldText must contain enough surrounding source context to identify exactly one location in the file.
+4. Preserve indentation and line endings exactly in oldText.
+5. Prefer the smallest safe edit that achieves the change.
+6. Do NOT use line numbers.
+7. Do NOT use unified diff syntax.
+8. Do NOT use ellipses, placeholders, or comments like "...", "// existing code", or "unchanged code here" inside oldText or newText.
+9. Multiple independent changes to one file must be separate edits[] entries.
+10. Do NOT include unrelated formatting or refactoring changes.
 ══════════════════════════════════════════════════════════
 `;
 }
@@ -192,7 +221,12 @@ Respond ONLY with valid JSON:
       ? `${STANDALONE_HTML_CSS_JS_PROMPT}${contractGuardrail}${manifestSection}`
       : `${systemPrompt}\n\n${CODING_AGENT_PROMPT}\n\n${LAYER_CONSTRAINT_PROMPT}${contractGuardrail}${manifestSection}`;
 
-    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextContent || "(Standalone Application - No repository context required)"}${multiFileInstruction}\n\nREMINDER: Respond ONLY with valid JSON. Every file in your "changes" array MUST contain the COMPLETE 100% file content.`;
+    const hasManifest = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
+    const jsonFormatReminder = hasManifest
+      ? `\n\nREMINDER: Respond ONLY with valid JSON. For CREATE actions, output complete file content. For MODIFY actions, output targeted edits[] with exact oldText/newText pairs. For DELETE actions, output deletion markers. See STRICT MODIFY RULES above.`
+      : `\n\nREMINDER: Respond ONLY with valid JSON. Every file in your "changes" array MUST contain the COMPLETE 100% file content.`;
+
+    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextContent || "(Standalone Application - No repository context required)"}${multiFileInstruction}${jsonFormatReminder}`;
 
     const openai = getOpenAI();
     const completion = await openai.chat.completions.create({
@@ -207,9 +241,61 @@ Respond ONLY with valid JSON:
     });
 
     const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
-    let changes: AgentFileChange[] = Array.isArray(parsed.changes) ? parsed.changes : [];
+    const rawChanges: any[] = Array.isArray(parsed.changes) ? parsed.changes : [];
     const explanation = parsed.explanation || "Agent generated code diffs.";
     const commitMessage = parsed.commitMessage || `feat(${intentResult.intent.toLowerCase()}): implementation updates`;
+
+    // ── Resolve raw LLM proposals into AgentFileChange[] ──
+    const hasManifestContext = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
+
+    let changes: AgentFileChange[];
+
+    if (hasManifestContext && !isDeleteTask && !isStandaloneWeb) {
+      // Structured patch path: parse as GeneratedChangeProposal[]
+      const proposals: GeneratedChangeProposal[] = rawChanges.map((raw: any) => {
+        const action = (raw.action || "modify").toLowerCase();
+        if (action === "create") {
+          return {
+            path: raw.path,
+            action: "create" as const,
+            content: raw.content || "",
+            description: raw.description || "",
+          };
+        } else if (action === "delete") {
+          return {
+            path: raw.path,
+            action: "delete" as const,
+            content: "" as const,
+            description: raw.description || "",
+            isDeleted: true as const,
+          };
+        } else {
+          // modify
+          return {
+            path: raw.path,
+            action: "modify" as const,
+            edits: Array.isArray(raw.edits) ? raw.edits : [],
+            description: raw.description || "",
+          };
+        }
+      });
+
+      const resolution: ResolutionResult = resolveGenerationProposals(
+        proposals,
+        optimizedContext.fileContext,
+      );
+
+      if (!resolution.success) {
+        throw new Error(
+          `[PATCH_RESOLUTION_FAILED] ${resolution.error.code}: ${resolution.error.message}`,
+        );
+      }
+
+      changes = resolution.changes;
+    } else {
+      // Legacy path: standalone/delete/no-manifest — full-content changes
+      changes = rawChanges as AgentFileChange[];
+    }
 
     if (isDeleteTask && contract?.targetPaths) {
       const existingPathsInChanges = new Set(changes.map((c) => c.path.replace(/\\/g, "/").replace(/\/$/, "")));
