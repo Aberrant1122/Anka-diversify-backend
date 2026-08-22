@@ -13,6 +13,8 @@ import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { BuildErrorRepair } from "../repair/BuildErrorRepair";
 import { SecurityAuditor } from "../review/SecurityAuditor";
 import { ValidationDetector } from "../validation/ValidationDetector";
+import { ManifestGenerator } from "../../services/manifest-generator";
+import { ManifestValidator } from "../../services/manifest-validator";
 import { ChatRequest } from "../shared/types";
 
 // Mock PrismaClient to prevent DB connection attempts during integration testing
@@ -92,6 +94,17 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
     });
 
     jest.spyOn(ValidationPlanner, "detectValidationCommands").mockReturnValue([]);
+
+    process.env.OPENAI_API_KEY = "test-mock-api-key";
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+      files: [{ path: "src/index.ts", action: "modify", dependencies: [], description: "test change" }],
+      totalFiles: 1,
+      manifestVersion: "1.0.0",
+    });
+    jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({
+      valid: true,
+      errors: [],
+    });
   });
 
   afterEach(() => {

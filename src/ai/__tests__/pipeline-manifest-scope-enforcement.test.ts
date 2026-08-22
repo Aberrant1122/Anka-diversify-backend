@@ -11,6 +11,9 @@ import { CodeGenerator } from "../generation/CodeGenerator";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { ManifestGenerator } from "../../services/manifest-generator";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
+import { SelfHealingEngine } from "../repair/SelfHealingEngine";
+import { SecurityAuditor } from "../review/SecurityAuditor";
+import { ValidationDetector } from "../validation/ValidationDetector";
 import { ChatRequest } from "../shared/types";
 
 // Mock PrismaClient to prevent DB connection attempts
@@ -100,6 +103,24 @@ describe("Pipeline Manifest & Scope Enforcement Integration Tests", () => {
       searchSummary: "Summary",
       inspectedFiles: ["src/index.ts"],
     } as any);
+
+    jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockResolvedValue({
+      success: true,
+      attempts: 1,
+      finalChanges: [{ path: "src/index.ts", content: "console.log('updated');", description: "update", action: "modify" }],
+      errorLog: "",
+    } as any);
+
+    jest.spyOn(SecurityAuditor, "runReflectionAndSecurityAudit").mockResolvedValue({
+      securityPass: true,
+      summary: "Security pass",
+    } as any);
+
+    jest.spyOn(ValidationDetector, "runFeatureValidation").mockResolvedValue({
+      overallPassed: true,
+      checks: [],
+      failedChecks: [],
+    } as any);
   });
 
   afterEach(() => {
@@ -180,5 +201,35 @@ describe("Pipeline Manifest & Scope Enforcement Integration Tests", () => {
     expect(fsApplySpy).not.toHaveBeenCalled();
     // Verify disk content unchanged
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
+  });
+
+  test("CHANGE 7B: Approved manifest is passed directly into CodeGenerator.generateRoadmapAndDiffs", async () => {
+    const approvedManifest = {
+      files: [{ path: "src/index.ts", action: "modify" as const, dependencies: [], description: "update index" }],
+      totalFiles: 1,
+      manifestVersion: "1.0.0",
+    };
+
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue(approvedManifest);
+    jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({
+      valid: true,
+      errors: [],
+    });
+
+    const codeGenSpy = jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+      roadmap: [],
+      changes: [
+        { path: "src/index.ts", content: "console.log('updated');", description: "update", action: "modify" },
+      ],
+      explanation: "Changes generated",
+      commitMessage: "feat: update",
+      validationCommands: [],
+    });
+
+    await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+
+    expect(codeGenSpy).toHaveBeenCalled();
+    // Verify 6th parameter is approvedManifest
+    expect(codeGenSpy.mock.calls[0][5]).toEqual(approvedManifest);
   });
 });

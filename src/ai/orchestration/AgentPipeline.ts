@@ -396,6 +396,29 @@ export class AgentPipeline {
     }
     const s6Time = performance.now() - s6Start;
 
+    if (
+      manifestEnabled &&
+      !approvedManifest &&
+      executionContract.pipeline === "REPOSITORY" &&
+      executionContract.taskType !== "DOCS"
+    ) {
+      const failureExplanation = `[APPROVED_MANIFEST_REQUIRED] Execution halted: An approved file manifest is required for repository changes, but none was generated or validated.`;
+      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+      return {
+        explanation: failureExplanation,
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        intent: intentResult.intent,
+        taskType: intentResult.taskType,
+        risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity,
+        targetPath: intentResult.targetPath,
+        confidence: finalConfidence,
+      };
+    }
+
     // Stage 7: Coding Agent File Generation
     const s7Start = performance.now();
     const roadmapAndDiff = await CodeGenerator.generateRoadmapAndDiffs(
@@ -404,6 +427,7 @@ export class AgentPipeline {
       optimizedContext,
       systemPrompt,
       executionContract,
+      approvedManifest,
     );
     const s7Time = performance.now() - s7Start;
 
