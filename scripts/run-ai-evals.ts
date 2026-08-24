@@ -1,10 +1,17 @@
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
-import { AgentEvalCase, RealEvalRunOptions } from "../src/ai/evals/types";
-import { EvalRunner } from "../src/ai/evals/EvalRunner";
+import type { AgentEvalCase, RealEvalRunOptions } from "../src/ai/evals/types";
+import { EvalDatabaseFixture } from "../src/ai/evals/EvalDatabaseFixture";
 
+// 1. Load environment variables first
 dotenv.config();
+
+// 2. Align DATABASE_URL before importing any pipeline or Prisma modules
+if (process.env.EVAL_DATABASE_URL) {
+  EvalDatabaseFixture.verifySafeDatabase(process.env.EVAL_DATABASE_URL);
+  process.env.DATABASE_URL = process.env.EVAL_DATABASE_URL;
+}
 
 function parseArgs(): RealEvalRunOptions & { all?: boolean } {
   const args = process.argv.slice(2);
@@ -42,6 +49,9 @@ async function main() {
     console.error("Real-model evaluations require a valid OpenAI API key.\n");
     process.exit(1);
   }
+
+  // 3. Dynamically import EvalRunner ONLY AFTER environment is fully aligned
+  const { EvalRunner } = await import("../src/ai/evals/EvalRunner");
 
   const fixturesBaseDir = path.resolve(__dirname, "../src/ai/evals/fixtures");
   const availableFixtureDirs = fs

@@ -433,6 +433,10 @@ export class SemanticRetrievalEngine {
     this.cache = new EmbeddingCacheManager(cacheDir);
   }
 
+  public get providerName(): string {
+    return this.provider.name;
+  }
+
   /**
    * Index codebase snapshot using incremental caching.
    * Only calls embedding provider for chunks whose hash is NOT in the cache.
