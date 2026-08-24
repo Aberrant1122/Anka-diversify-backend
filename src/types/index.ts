@@ -460,6 +460,11 @@ export interface AgentResponse {
   layerViolations?: string[];
   buildVerified?: boolean;
   repaired?: boolean;
+  repairAttempted?: boolean;
+  repairAttempts?: number;
+  repairApplied?: boolean;
+  repairSuccess?: boolean;
+  repairTrigger?: "SHELL_VALIDATION_FAILURE" | "LLM_REVIEW_REJECTION" | "NONE";
   buildErrors?: string;
   verificationChecklist?: ChecklistItem[];
   lifecycleStage?: "Done" | "BuildFailed" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";

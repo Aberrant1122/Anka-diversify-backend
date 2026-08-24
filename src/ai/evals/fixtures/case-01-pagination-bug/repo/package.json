@@ -1,0 +1,7 @@
+{
+  "name": "case-01-pagination-bug",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/pagination.test.js"
+  }
+}

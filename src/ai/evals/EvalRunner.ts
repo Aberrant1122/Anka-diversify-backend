@@ -19,6 +19,7 @@ import { RepositoryScanner } from "../repository/RepositoryScanner";
 import { sha256 } from "../validation/FileVersionGuard";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { ModelObserver } from "./ModelObserver";
+import { EvalDatabaseFixture, ProvisionedEvalContext } from "./EvalDatabaseFixture";
 
 declare const jest: any;
 
@@ -134,13 +135,27 @@ export function classifyFailureStage(
 ): EvalFailureStage | undefined {
   if (taskSuccess) return undefined;
 
+  if (agentResponse?.infrastructureError) return "INFRASTRUCTURE";
   if (safeRejectionCode === "STALE_SOURCE_FILE") return "STALE_STATE";
   if (unauthorizedFiles.length > 0) return "SCOPE";
-  if (missingRequired.length > 0) return "MANIFEST";
+
+  const isExplicitManifestFailure =
+    agentResponse?.explanation?.includes("Manifest Validation Failed") ||
+    agentResponse?.explanation?.includes("APPROVED_MANIFEST_REQUIRED") ||
+    agentResponse?.manifestRejected;
+
+  if (isExplicitManifestFailure) return "MANIFEST";
+  if (agentResponse?.buildErrors && !agentResponse.buildVerified) return "REPAIR";
   if (!validationPassed) return "VALIDATION";
   if (!contentRulesPassed) return "GENERATION";
-  if (agentResponse?.buildErrors && !agentResponse.buildVerified) return "REPAIR";
-  if (agentResponse?.infrastructureError) return "INFRASTRUCTURE";
+
+  if (missingRequired.length > 0) {
+    if (agentResponse?.repaired || (agentResponse?.repairAttempts && agentResponse.repairAttempts > 0)) {
+      return "REPAIR";
+    }
+    return "MANIFEST";
+  }
+
   return "UNKNOWN";
 }
 
@@ -270,11 +285,15 @@ export class EvalRunner {
     const startTime = performance.now();
     const fixtureSourceDir = path.join(fixturesBaseDir, evalCase.fixtureDir, "repo");
     const tempWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), `anka-eval-${evalCase.id}-`));
-    const evalProjectId = `eval-${evalCase.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const evalProjectCacheDir = path.join(process.cwd(), ".anka-cache", "projects", evalProjectId);
+
+    let evalUserId = "eval-user";
+    let evalProjectId = `eval-${evalCase.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    let dbFixture: ProvisionedEvalContext | undefined;
 
     let stage4Metrics: Record<string, any> | undefined;
     let safeRejectionCode: string | undefined;
+    let pipelineError: any = null;
+    let agentResponse: any = null;
 
     const caseObserverEventsBefore = options?.observer ? options.observer.getEvents().length : 0;
 
@@ -288,10 +307,19 @@ export class EvalRunner {
         jest.spyOn(RepositoryScanner, "ensureLocalWorkspace").mockResolvedValue(tempWorkspace);
       }
 
-      // 2. Capture pre-run filesystem snapshot
+      // 2. In REAL_MODEL mode, provision legitimate ephemeral User & Project records
+      if (mode === "REAL_MODEL") {
+        dbFixture = await EvalDatabaseFixture.provision(evalCase.id, tempWorkspace);
+        evalUserId = dbFixture.userId;
+        evalProjectId = dbFixture.projectId;
+      }
+
+      const evalProjectCacheDir = path.join(process.cwd(), ".anka-cache", "projects", evalProjectId);
+
+      // 3. Capture pre-run filesystem snapshot
       const beforeSnapshot = captureFilesystemSnapshot(tempWorkspace);
 
-      // 3. Setup progress listener to capture Stage-4 RAG telemetry
+      // 4. Setup progress listener to capture Stage-4 RAG telemetry
       const onProgress = (event: AgentProgressEvent) => {
         if (event.step === 4 && event.stageMetrics) {
           stage4Metrics = event.stageMetrics;
@@ -303,20 +331,24 @@ export class EvalRunner {
         sessionId: `session-${evalProjectId}`,
       };
 
-      // 4. Run production AgentPipeline
-      const agentResponse = await AgentPipeline.runCodingAgent(
-        "eval-user",
-        evalProjectId,
-        request,
-        onProgress,
-      );
+      // 5. Run production AgentPipeline (catching any infrastructure or unhandled errors)
+      try {
+        agentResponse = await AgentPipeline.runCodingAgent(
+          evalUserId,
+          evalProjectId,
+          request,
+          onProgress,
+        );
+      } catch (err: any) {
+        pipelineError = err;
+      }
 
-      // 5. Capture post-run filesystem snapshot & compute diff
+      // 6. Capture post-run filesystem snapshot & compute diff
       const afterSnapshot = captureFilesystemSnapshot(tempWorkspace);
       const fsDiff = computeFilesystemDiff(beforeSnapshot, afterSnapshot);
 
-      // 6. Check for Safe Rejection if expected
-      if (evalCase.expected.expectedSafeRejection) {
+      // 7. Check for Safe Rejection if expected
+      if (evalCase.expected.expectedSafeRejection && agentResponse) {
         const expectedCode = evalCase.expected.expectedSafeRejection.code;
         const responseText = agentResponse.explanation || "";
         const buildErrorsText = agentResponse.buildErrors || "";
@@ -330,7 +362,7 @@ export class EvalRunner {
         }
       }
 
-      // 7. Verify Scope (unauthorized files check)
+      // 8. Verify Scope (unauthorized files check)
       const allowedSet = new Set(
         (evalCase.expected.allowedChangedFiles || evalCase.expected.requiredChangedFiles || []).map(normalizeRepoPath),
       );
@@ -347,15 +379,15 @@ export class EvalRunner {
         }
       }
 
-      // 8. Required files check
+      // 9. Required files check
       const requiredList = (evalCase.expected.requiredChangedFiles || []).map(normalizeRepoPath);
       const missingRequired = requiredList.filter((f) => !fsDiff.allChangedFiles.includes(f));
 
-      // 9. Run behavioral validation commands on workspace
+      // 10. Run behavioral validation commands on workspace
       let validationPassed = true;
       const validationErrors: string[] = [];
 
-      if (evalCase.expected.validationCommands && evalCase.expected.validationCommands.length > 0) {
+      if (!pipelineError && evalCase.expected.validationCommands && evalCase.expected.validationCommands.length > 0) {
         for (const cmd of evalCase.expected.validationCommands) {
           try {
             await execAsync(cmd, { cwd: tempWorkspace, timeout: 30000 });
@@ -366,9 +398,9 @@ export class EvalRunner {
         }
       }
 
-      // 10. Check content rules
+      // 11. Check content rules
       let contentRulesPassed = true;
-      if (evalCase.expected.contentRules && evalCase.expected.contentRules.length > 0) {
+      if (!pipelineError && evalCase.expected.contentRules && evalCase.expected.contentRules.length > 0) {
         for (const rule of evalCase.expected.contentRules) {
           const targetAbs = path.join(tempWorkspace, rule.path);
           let content = "";
@@ -399,40 +431,45 @@ export class EvalRunner {
         }
       }
 
-      // 11. Compute RAG metrics
+      // 12. Compute RAG metrics
       const ragMetrics = evalCase.ragGroundTruth
         ? computeRagMetrics(evalCase.ragGroundTruth.expectedRelevantFiles, stage4Metrics)
         : undefined;
 
-      // 12. Evaluate overall outcome
+      // 13. Evaluate overall outcome
       const durationMs = parseFloat((performance.now() - startTime).toFixed(1));
       const isSafeRejectionExpected = Boolean(evalCase.expected.expectedSafeRejection);
 
       let status: "PASS" | "FAIL" | "SAFE_REJECTION" = "FAIL";
       let taskSuccess = false;
 
-      if (isSafeRejectionExpected && safeRejectionCode) {
+      if (pipelineError) {
+        status = "FAIL";
+        taskSuccess = false;
+      } else if (isSafeRejectionExpected && safeRejectionCode) {
         // Safe rejection passed: agent safely halted and left workspace unchanged
         status = "SAFE_REJECTION";
         taskSuccess = fsDiff.allChangedFiles.length === 0;
-      } else if (!isSafeRejectionExpected) {
+      } else if (!isSafeRejectionExpected && agentResponse) {
         const scopePass = unauthorizedFiles.length === 0 && missingRequired.length === 0;
         const buildPass = agentResponse.buildVerified !== false && validationPassed && contentRulesPassed;
         taskSuccess = scopePass && buildPass;
         status = taskSuccess ? "PASS" : "FAIL";
       }
 
-      const failureStage = classifyFailureStage(
-        taskSuccess,
-        unauthorizedFiles,
-        missingRequired,
-        validationPassed,
-        contentRulesPassed,
-        agentResponse,
-        safeRejectionCode,
-      );
+      const failureStage: EvalFailureStage | undefined = pipelineError
+        ? "INFRASTRUCTURE"
+        : classifyFailureStage(
+            taskSuccess,
+            unauthorizedFiles,
+            missingRequired,
+            validationPassed,
+            contentRulesPassed,
+            agentResponse,
+            safeRejectionCode,
+          );
 
-      // 13. Extract Model Call Events if observer active
+      // 14. Extract Model Call Events if observer active
       const caseModelCalls = options?.observer
         ? options.observer.getEvents().slice(caseObserverEventsBefore)
         : undefined;
@@ -463,10 +500,13 @@ export class EvalRunner {
         mode,
         status,
         taskSuccess,
-        firstPassSuccess: taskSuccess && !agentResponse.repaired,
-        repaired: Boolean(agentResponse.repaired),
-        repairAttempts: agentResponse.repaired ? 1 : 0,
-        repairSuccess: agentResponse.repaired ? taskSuccess : undefined,
+        firstPassSuccess: taskSuccess && !Boolean(agentResponse?.repaired),
+        repaired: Boolean(agentResponse?.repaired),
+        repairAttempted: Boolean(agentResponse?.repairAttempted ?? agentResponse?.repaired),
+        repairAttempts: typeof agentResponse?.repairAttempts === "number" ? agentResponse.repairAttempts : (agentResponse?.repaired ? 1 : 0),
+        repairApplied: Boolean(agentResponse?.repairApplied),
+        repairSuccess: agentResponse?.repaired || agentResponse?.repairAttempted ? (agentResponse?.repairSuccess ?? taskSuccess) : undefined,
+        repairTrigger: agentResponse?.repairTrigger,
         failureStage,
         filesystemDiff: fsDiff,
         unauthorizedFiles,
@@ -485,15 +525,19 @@ export class EvalRunner {
         },
         actualTokenUsage,
         modelCalls: caseModelCalls,
-        errorDetails: validationErrors.join("\n") || undefined,
+        errorDetails: pipelineError ? pipelineError.message || String(pipelineError) : validationErrors.join("\n") || undefined,
       };
     } finally {
-      // Complete isolation teardown
+      // 15. Complete isolation teardown
+      if (dbFixture) {
+        await dbFixture.cleanup();
+      }
       if (fs.existsSync(tempWorkspace)) {
         fs.rmSync(tempWorkspace, { recursive: true, force: true });
       }
-      if (fs.existsSync(evalProjectCacheDir)) {
-        fs.rmSync(evalProjectCacheDir, { recursive: true, force: true });
+      const cacheDir = path.join(process.cwd(), ".anka-cache", "projects", evalProjectId);
+      if (fs.existsSync(cacheDir)) {
+        fs.rmSync(cacheDir, { recursive: true, force: true });
       }
     }
   }
@@ -617,11 +661,15 @@ export class EvalRunner {
 
     // Persist real model results if requested or in REAL_MODEL mode
     if (mode === "REAL_MODEL" || options?.saveResults) {
-      const outputDir = options?.outputDir || path.join(process.cwd(), "eval-results", "real");
-      fs.mkdirSync(outputDir, { recursive: true });
-      const safeTimestamp = timestamp.replace(/[:.]/g, "-");
-      const resultPath = path.join(outputDir, `${safeTimestamp}-${runId}.json`);
-      fs.writeFileSync(resultPath, JSON.stringify(summary, null, 2), "utf8");
+      try {
+        const outputDir = options?.outputDir || path.join(process.cwd(), "eval-results", "real");
+        fs.mkdirSync(outputDir, { recursive: true });
+        const safeTimestamp = timestamp.replace(/[:.]/g, "-");
+        const resultPath = path.join(outputDir, `${safeTimestamp}-${runId}.json`);
+        fs.writeFileSync(resultPath, JSON.stringify(summary, null, 2), "utf8");
+      } catch {
+        // Result save error handled gracefully
+      }
     }
 
     if (observer && !options?.saveResults) {

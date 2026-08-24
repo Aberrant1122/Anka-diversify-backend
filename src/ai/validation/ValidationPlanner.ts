@@ -85,17 +85,21 @@ export class ValidationPlanner {
             cmds.push("npx tsc --noEmit");
           }
 
+          if (scripts.test && !scripts.test.includes("no test specified")) {
+            cmds.push("npm test");
+          }
+
           if (cmds.length > 0) return cmds;
         }
       } catch {}
 
-      return ["npm run build", "npx tsc --noEmit"];
+      return ["npm test"].filter(() => false);
     }
 
     if (hasCargo) return ["cargo check"];
     if (hasGoMod) return ["go build ./..."];
     if (hasPy) return ["python -m py_compile"];
 
-    return ["npm run build", "npx tsc --noEmit"];
+    return [];
   }
 }

@@ -156,8 +156,11 @@ export interface EvalCaseResult {
   taskSuccess: boolean;
   firstPassSuccess: boolean;
   repaired: boolean;
+  repairAttempted?: boolean;
   repairAttempts: number;
+  repairApplied?: boolean;
   repairSuccess?: boolean;
+  repairTrigger?: "SHELL_VALIDATION_FAILURE" | "LLM_REVIEW_REJECTION" | "NONE";
   failureStage?: EvalFailureStage;
   filesystemDiff: FilesystemDiffResult;
   unauthorizedFiles: string[];

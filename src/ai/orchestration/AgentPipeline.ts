@@ -180,8 +180,14 @@ export class AgentPipeline {
 
     const projectCacheDir = path.join(process.cwd(), ".anka-cache", "projects", projectId);
 
+    let candidateChunks: any[] = [];
+    let rerankedResultsList: any[] = [];
+    let packedTelemetry: any = null;
+    let usedProviderName = "local_deterministic";
+
     try {
       const semanticEngine = new SemanticRetrievalEngine(undefined, projectCacheDir);
+      usedProviderName = semanticEngine.providerName;
       const rawSnapshotFiles = Array.isArray(effectiveSnapshot)
         ? effectiveSnapshot
         : effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || [];
@@ -219,6 +225,7 @@ export class AgentPipeline {
       }
 
       const semanticCandidates = await semanticEngine.searchMany(semanticQueries, 10, 10);
+      candidateChunks = semanticCandidates;
 
       const semanticResults = rerankSemanticResults(semanticCandidates, {
         targetPath: intentResult?.targetPath,
@@ -227,6 +234,7 @@ export class AgentPipeline {
         discoveredModels: executionMemory?.discoveredModels || [],
         discoveredRoutes: executionMemory?.discoveredRoutes || [],
       });
+      rerankedResultsList = semanticResults;
 
       if (process.env.NODE_ENV !== "production") {
         console.log(
@@ -264,6 +272,7 @@ export class AgentPipeline {
           maxTokens: 12000,
         });
 
+        packedTelemetry = packed;
         optimizedContext.fileContext = packed.fileContext;
 
         if (process.env.NODE_ENV !== "production" || packed.excludedFiles.length > 0) {
@@ -278,6 +287,39 @@ export class AgentPipeline {
       console.warn("[AgentPipeline] Semantic retrieval warning:", e?.message || e);
     }
     const s4Time = performance.now() - s4Start;
+
+    onProgress?.({
+      step: 4,
+      stageName: "SEMANTIC_RETRIEVAL",
+      label: "Semantic Retrieval & Reranking",
+      detail: `Reranked ${rerankedResultsList.length} chunks | Packed ${packedTelemetry?.telemetry?.contextFilesAfterPacking || Object.keys(optimizedContext?.fileContext || {}).length} files | Time: ${formatMs(s4Time)}`,
+      color: "text-indigo-400 border-indigo-500/30 bg-indigo-500/10",
+      badge: `STAGE 4 · ${formatMs(s4Time)}`,
+      progress: 55,
+      log: `[Stage 4] Semantic Retrieval complete:\n  Candidate chunks: ${candidateChunks.length}\n  Reranked results: ${rerankedResultsList.length}\n  Provider: ${usedProviderName}`,
+      durationMs: s4Time,
+      stageMetrics: {
+        embeddingProvider: usedProviderName,
+        rawSemanticCandidates: candidateChunks.map((c) => ({
+          filePath: c.chunk?.filePath || "",
+          name: c.chunk?.name || "",
+          similarity: c.similarityScore,
+          keywordScore: c.keywordScore,
+          hybridScore: c.hybridScore,
+        })),
+        rawRankedFiles: Array.from(new Set(candidateChunks.map((c) => c.chunk?.filePath).filter(Boolean))),
+        rerankedResults: rerankedResultsList.map((r) => ({
+          filePath: r.chunk?.filePath || "",
+          name: r.chunk?.name || "",
+          hybridScore: r.hybridScore,
+          rerankScore: r.rerankScore,
+          reasons: r.rerankReasons,
+        })),
+        rerankedFiles: Array.from(new Set(rerankedResultsList.map((r) => r.chunk?.filePath).filter(Boolean))),
+        includedFiles: packedTelemetry?.includedFiles || Object.keys(optimizedContext?.fileContext || {}),
+        excludedFiles: packedTelemetry?.excludedFiles || [],
+      },
+    });
 
     // Stage 5: Exact Context Optimization & Token Measurement
     const s5Start = performance.now();
@@ -707,7 +749,12 @@ export class AgentPipeline {
       securityPass: auditResult.securityPass,
       critiqueScore: auditResult.critiqueScore,
       buildVerified: gateSuccess,
-      repaired: repairResult.attempts > 1,
+      repaired: Boolean(repairResult.repaired ?? repairResult.attempts > 1),
+      repairAttempted: Boolean(repairResult.attempts > 1 || repairResult.repaired),
+      repairAttempts: repairResult.attempts || 0,
+      repairApplied: Boolean(repairResult.repairApplied),
+      repairSuccess: Boolean(repairResult.success),
+      repairTrigger: repairResult.repairTrigger || "NONE",
       buildErrors: [
         !repairResult.success && repairResult.errorLog ? repairResult.errorLog : "",
         !auditResult.securityPass ? "Security audit failed / flagged critical security violations." : "",

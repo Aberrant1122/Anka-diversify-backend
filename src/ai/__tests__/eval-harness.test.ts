@@ -15,6 +15,8 @@ import {
   EvalRunner,
 } from "../evals/EvalRunner";
 import { ModelObserver } from "../evals/ModelObserver";
+import { EvalDatabaseFixture } from "../evals/EvalDatabaseFixture";
+import { AgentPipeline } from "../orchestration/AgentPipeline";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { RepositoryScanner } from "../repository/RepositoryScanner";
 import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder";
@@ -25,35 +27,60 @@ import { CodeGenerator } from "../generation/CodeGenerator";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { SecurityAuditor } from "../review/SecurityAuditor";
 import { ValidationDetector } from "../validation/ValidationDetector";
+import { ValidationRunner } from "../validation/ValidationRunner";
 
 // Mock PrismaClient to prevent DB connection attempts
 jest.mock("@prisma/client", () => {
   return {
     PrismaClient: jest.fn().mockImplementation(() => ({
+      user: {
+        create: jest.fn().mockResolvedValue({ id: "eval-user-1", email: "eval@test.local" }),
+        findUnique: jest.fn().mockResolvedValue({ id: "eval-user-1", email: "eval@test.local" }),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       project: {
+        create: jest.fn().mockResolvedValue({ id: "eval-proj-1", name: "Eval Project" }),
         findUnique: jest.fn().mockResolvedValue({
           localPath: null,
           githubUrl: "https://github.com/mock/mock",
           githubToken: "mock-token",
         }),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
-      projectMemorySummary: {
-        findUnique: jest.fn().mockResolvedValue(null),
+      projectMember: {
+        create: jest.fn().mockResolvedValue({ id: "mem-1" }),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      aiChatSession: {
+        create: jest.fn().mockResolvedValue({ id: "sess-1", userId: "eval-user-1", projectId: "eval-proj-1" }),
+        findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       aiChatMessage: {
         findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn().mockResolvedValue({ id: "msg-1" }),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      projectMemorySummary: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       task: {
         findMany: jest.fn().mockResolvedValue([]),
       },
       phaseArtifact: {
         findFirst: jest.fn().mockResolvedValue(null),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       taskDecomposition: {
+        findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn().mockResolvedValue({}),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       agentManifest: {
         create: jest.fn().mockResolvedValue({}),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     })),
   };
@@ -1393,11 +1420,267 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
       expect(classifyFailureStage(false, [], [], true, true, undefined, "STALE_SOURCE_FILE")).toBe("STALE_STATE");
       expect(classifyFailureStage(false, ["src/unauthorized.ts"], [], true, true)).toBe("SCOPE");
       expect(classifyFailureStage(false, [], ["src/required.ts"], true, true)).toBe("MANIFEST");
+      expect(classifyFailureStage(false, [], ["src/required.ts"], true, true, { repairAttempts: 5, buildErrors: "repair failed", buildVerified: false })).toBe("REPAIR");
       expect(classifyFailureStage(false, [], [], false, true)).toBe("VALIDATION");
       expect(classifyFailureStage(false, [], [], true, false)).toBe("GENERATION");
       expect(classifyFailureStage(false, [], [], true, true, { buildErrors: "error TS1234", buildVerified: false })).toBe("REPAIR");
       expect(classifyFailureStage(false, [], [], true, true, { infrastructureError: true })).toBe("INFRASTRUCTURE");
+      expect(classifyFailureStage(false, [], [], true, true, { explanation: "[APPROVED_MANIFEST_REQUIRED] Execution halted" })).toBe("MANIFEST");
       expect(classifyFailureStage(false, [], [], true, true)).toBe("UNKNOWN");
+    });
+
+    test("Step 11A: Case 01 behavioral test fails on buggy fixture and passes on corrected implementation", async () => {
+      const case01Dir = path.join(fixturesBaseDir, "case-01-pagination-bug", "repo");
+      const testScriptPath = path.join(case01Dir, "test", "pagination.test.js");
+      expect(fs.existsSync(testScriptPath)).toBe(true);
+
+      // 1. Verify that current buggy code fails validation
+      const buggyRes = await ValidationRunner.validateWithShell([], case01Dir, ["npm test"]);
+      expect(buggyRes.success).toBe(false);
+      expect(buggyRes.errors).toContain("Assertion failed: getPageOffset(1, 10) expected 0");
+
+      // 2. Temporarily write corrected code and verify validation passes
+      const paginationPath = path.join(case01Dir, "src", "pagination.ts");
+      const originalBuggyContent = fs.readFileSync(paginationPath, "utf8");
+      const correctedContent = originalBuggyContent.replace("return page * limit;", "return (page - 1) * limit;");
+
+      try {
+        fs.writeFileSync(paginationPath, correctedContent, "utf8");
+        const fixedRes = await ValidationRunner.validateWithShell([], case01Dir, ["npm test"]);
+        expect(fixedRes.success).toBe(true);
+        expect(fixedRes.errors).toBe("");
+      } finally {
+        fs.writeFileSync(paginationPath, originalBuggyContent, "utf8");
+      }
+    });
+  });
+
+  // ── 4. Step 10D2A — Safe Real-Eval Database Provisioning & Resilience ────────
+
+  describe("Step 10D2A — Safe Real-Eval Database Provisioning & Resilience", () => {
+    test("Test A, B, C, D: EvalDatabaseFixture provisions user, project with localPath, and projectMember", async () => {
+      const tempWs = path.join(os.tmpdir(), "test-workspace-db-fixture");
+      const ctx = await EvalDatabaseFixture.provision("case-01-pagination-bug", tempWs, "run-test-1");
+
+      expect(ctx.userId).toContain("eval-user-");
+      expect(ctx.projectId).toContain("eval-project-case-01-pagination-bug-");
+      expect(ctx.localPath).toBe(tempWs);
+      expect(typeof ctx.cleanup).toBe("function");
+
+      await ctx.cleanup();
+    });
+
+    test("Test F & G: cleanup removes all ephemeral records and handles partial failures gracefully", async () => {
+      const mockPrisma = EvalDatabaseFixture.getPrisma();
+      const deleteUserSpy = jest.spyOn(mockPrisma.user, "deleteMany");
+      const deleteProjSpy = jest.spyOn(mockPrisma.project, "deleteMany");
+
+      await EvalDatabaseFixture.cleanupRecords(mockPrisma, "eval-user-123", "eval-project-123");
+
+      expect(deleteProjSpy).toHaveBeenCalledWith({ where: { id: "eval-project-123" } });
+      expect(deleteUserSpy).toHaveBeenCalledWith({ where: { id: "eval-user-123" } });
+    });
+
+    test("Test H: Unsafe database URL fails closed structurally", () => {
+      const savedEnv = process.env.NODE_ENV;
+      const savedUrl = process.env.DATABASE_URL;
+
+      try {
+        process.env.NODE_ENV = "production";
+        process.env.DATABASE_URL = "postgresql://admin:secret@prod-db.cloud.service:5432/live-prod-db";
+
+        expect(() => {
+          EvalDatabaseFixture.verifySafeDatabase();
+        }).toThrow(/Unsafe evaluation database target/);
+
+        // Test credentials containing 'dev' against external host fails closed
+        delete process.env.NODE_ENV;
+        process.env.DATABASE_URL = "postgresql://dev_user:dev_pass@prod-host.aws.cloud:5432/production_data";
+        expect(() => {
+          EvalDatabaseFixture.verifySafeDatabase();
+        }).toThrow(/Unsafe evaluation database target/);
+
+        // Test valid localhost database
+        process.env.DATABASE_URL = "postgresql://postgres:pass@localhost:5432/anka-diversity-os";
+        expect(() => {
+          EvalDatabaseFixture.verifySafeDatabase();
+        }).not.toThrow();
+      } finally {
+        if (savedEnv !== undefined) {
+          process.env.NODE_ENV = savedEnv;
+        } else {
+          delete process.env.NODE_ENV;
+        }
+        if (savedUrl !== undefined) {
+          process.env.DATABASE_URL = savedUrl;
+        } else {
+          delete process.env.DATABASE_URL;
+        }
+      }
+    });
+
+    test("Test I: DETERMINISTIC mode does NOT provision real eval database records", async () => {
+      const provisionSpy = jest.spyOn(EvalDatabaseFixture, "provision");
+      const caseJsonPath = path.join(fixturesBaseDir, "case-01-pagination-bug", "case.json");
+      const evalCase: AgentEvalCase = JSON.parse(fs.readFileSync(caseJsonPath, "utf8"));
+
+      jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+        taskType: "BUG_FIX",
+        risk: "LOW",
+        estimatedComplexity: "SMALL",
+        intent: "Fix offset",
+        targetPath: "src/pagination.ts",
+        confidence: 0.95,
+        requiresClarification: false,
+        reasoning: "Test",
+      } as any);
+
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+        totalFiles: 1,
+        manifestVersion: "1.0.0",
+      });
+
+      jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+        roadmap: [],
+        changes: [{ path: "src/pagination.ts", content: "export function getPageOffset(page: number, limit: number): number { return (page - 1) * limit; }\n", description: "fix", action: "modify" }],
+        explanation: "fix",
+        commitMessage: "fix",
+        validationCommands: [],
+      });
+
+      jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
+        if (fsManager && localPath) {
+          await fsManager.apply(changes, localPath);
+        }
+        return { success: true, attempts: 1, finalChanges: changes };
+      });
+
+      await EvalRunner.runCase(evalCase, fixturesBaseDir, { mode: "DETERMINISTIC" });
+
+      expect(provisionSpy).not.toHaveBeenCalled();
+      provisionSpy.mockRestore();
+    });
+
+    test("Test J, K, L, M: Pipeline exception still persists JSON result with failureStage = INFRASTRUCTURE", async () => {
+      const tempResultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-eval-infra-fail-test-"));
+      const caseJsonPath = path.join(fixturesBaseDir, "case-01-pagination-bug", "case.json");
+      const evalCase: AgentEvalCase = JSON.parse(fs.readFileSync(caseJsonPath, "utf8"));
+
+      // Simulate an unhandled infrastructure error in AgentPipeline
+      jest.spyOn(AgentPipeline, "runCodingAgent").mockRejectedValue(
+        new Error("Foreign key constraint violated: ai_chat_sessions_userId_fkey")
+      );
+
+      const summary = await EvalRunner.runSuite([evalCase], fixturesBaseDir, {
+        mode: "REAL_MODEL",
+        saveResults: true,
+        outputDir: tempResultsDir,
+      });
+
+      expect(summary.failedCases).toBe(1);
+      expect(summary.results[0].status).toBe("FAIL");
+      expect(summary.results[0].failureStage).toBe("INFRASTRUCTURE");
+      expect(summary.results[0].errorDetails).toContain("Foreign key constraint violated");
+
+      const files = fs.readdirSync(tempResultsDir).filter((f) => f.endsWith(".json"));
+      expect(files.length).toBe(1);
+
+      const saved = JSON.parse(fs.readFileSync(path.join(tempResultsDir, files[0]), "utf8"));
+      expect(saved.failedCases).toBe(1);
+      expect(saved.results[0].failureStage).toBe("INFRASTRUCTURE");
+
+      fs.rmSync(tempResultsDir, { recursive: true, force: true });
+    });
+
+    test("Test N: EVAL_DATABASE_URL targets custom eval database instead of DATABASE_URL", async () => {
+      const savedDbUrl = process.env.DATABASE_URL;
+      const savedEvalDbUrl = process.env.EVAL_DATABASE_URL;
+
+      try {
+        process.env.DATABASE_URL = "postgresql://user:pass@localhost:5432/main_db";
+        process.env.EVAL_DATABASE_URL = "postgresql://user:pass@localhost:5432/dedicated_eval_db";
+
+        // Reset singleton to force re-instantiation
+        (EvalDatabaseFixture as any).prismaInstance = null;
+        const prisma = EvalDatabaseFixture.getPrisma();
+
+        expect(prisma).toBeDefined();
+      } finally {
+        if (savedDbUrl !== undefined) process.env.DATABASE_URL = savedDbUrl;
+        else delete process.env.DATABASE_URL;
+
+        if (savedEvalDbUrl !== undefined) process.env.EVAL_DATABASE_URL = savedEvalDbUrl;
+        else delete process.env.EVAL_DATABASE_URL;
+
+        (EvalDatabaseFixture as any).prismaInstance = null;
+      }
+    });
+
+    test("Test O: cleanup removes all child and parent records across all reachable project-related tables", async () => {
+      const mockPrisma: any = {
+        aiChatSession: {
+          findMany: jest.fn().mockResolvedValue([{ id: "sess-1" }]),
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        aiChatMessage: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 2 }),
+        },
+        projectMemorySummary: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        agentManifest: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        taskDecomposition: {
+          findMany: jest.fn().mockResolvedValue([{ id: "decomp-1" }]),
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        subTaskExecution: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 3 }),
+        },
+        contextSnapshot: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        fileReservation: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        architectureDriftRecord: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        phaseArtifact: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        projectMember: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        project: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        user: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+      };
+
+      await EvalDatabaseFixture.cleanupRecords(mockPrisma as any, "eval-user-999", "eval-project-999");
+
+      expect(mockPrisma.aiChatMessage.deleteMany).toHaveBeenCalled();
+      expect(mockPrisma.aiChatSession.deleteMany).toHaveBeenCalled();
+      expect(mockPrisma.subTaskExecution.deleteMany).toHaveBeenCalledWith({
+        where: { decompositionId: { in: ["decomp-1"] } },
+      });
+      expect(mockPrisma.taskDecomposition.deleteMany).toHaveBeenCalledWith({
+        where: { projectId: "eval-project-999" },
+      });
+      expect(mockPrisma.contextSnapshot.deleteMany).toHaveBeenCalledWith({
+        where: { projectId: "eval-project-999" },
+      });
+      expect(mockPrisma.project.deleteMany).toHaveBeenCalledWith({
+        where: { id: "eval-project-999" },
+      });
+      expect(mockPrisma.user.deleteMany).toHaveBeenCalledWith({
+        where: { id: "eval-user-999" },
+      });
     });
   });
 });

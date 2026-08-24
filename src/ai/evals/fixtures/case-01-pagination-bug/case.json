@@ -11,6 +11,7 @@
   "expected": {
     "requiredChangedFiles": ["src/pagination.ts"],
     "allowedChangedFiles": ["src/pagination.ts"],
+    "validationCommands": ["npm test"],
     "contentRules": [
       {
         "path": "src/pagination.ts",

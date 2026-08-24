@@ -38,6 +38,9 @@ export class SelfHealingEngine {
     errorLog?: string;
     infrastructureError?: boolean;
     errorType?: string;
+    repairTrigger?: "SHELL_VALIDATION_FAILURE" | "LLM_REVIEW_REJECTION" | "NONE";
+    repairApplied?: boolean;
+    repaired?: boolean;
   }> {
     const isRepositoryMode = executionContract?.pipeline === "REPOSITORY";
 
@@ -60,6 +63,8 @@ export class SelfHealingEngine {
     let currentChanges = [...initialChanges];
     let previousErrors = "";
     let lastErrorType = "UNKNOWN";
+    let repairTrigger: "SHELL_VALIDATION_FAILURE" | "LLM_REVIEW_REJECTION" | "NONE" = "NONE";
+    let repairApplied = false;
     const tracker = new RepairSessionTracker();
 
     for (let attempt = 1; attempt <= MAX_REPAIR_RETRIES; attempt++) {
@@ -95,11 +100,12 @@ export class SelfHealingEngine {
             repairTimeMs: performance.now() - attemptStart,
             compileSuccess: true,
           });
-          return { finalChanges: [], attempts: attempt, success: true, errorType: classification.type };
+          return { finalChanges: [], attempts: attempt, success: true, errorType: classification.type, repairTrigger: "NONE", repairApplied: false, repaired: false };
         }
+        repairTrigger = "SHELL_VALIDATION_FAILURE";
         previousErrors = initialCheck.errors;
       } else if (!currentChanges.length) {
-        return { finalChanges: [], attempts: attempt, success: true, errorType: classification.type };
+        return { finalChanges: [], attempts: attempt, success: true, errorType: classification.type, repairTrigger: "NONE", repairApplied: false, repaired: false };
       } else {
         if (fsManager && localPath) {
           try {
@@ -113,6 +119,9 @@ export class SelfHealingEngine {
                 errorLog: err.message,
                 infrastructureError: true,
                 errorType: "INFRA",
+                repairTrigger,
+                repairApplied,
+                repaired: attempt > 1 || repairApplied,
               };
             }
           }
@@ -159,9 +168,18 @@ export class SelfHealingEngine {
             fs.writeFileSync(path.join(cacheDir, "repair-metrics.md"), summaryMd, "utf8");
           } catch {}
 
-          return { finalChanges: currentChanges, attempts: attempt, success: true, errorType: classification.type };
+          return {
+            finalChanges: currentChanges,
+            attempts: attempt,
+            success: true,
+            errorType: classification.type,
+            repairTrigger: attempt > 1 ? repairTrigger : "NONE",
+            repairApplied,
+            repaired: attempt > 1 || repairApplied,
+          };
         }
 
+        repairTrigger = localPath && commands.length > 0 ? "SHELL_VALIDATION_FAILURE" : "LLM_REVIEW_REJECTION";
         previousErrors = validation.errors;
       }
 
@@ -310,6 +328,7 @@ export class SelfHealingEngine {
                 }
               }
               currentChanges = merged;
+              repairApplied = true;
             } else {
               // Standalone fallback
               const legacyProposals = proposals as any[];
@@ -321,6 +340,7 @@ export class SelfHealingEngine {
                 if (!merged.find((m) => m.path === p)) merged.push(c as AgentFileChange);
               }
               currentChanges = merged;
+              repairApplied = true;
             }
           }
         } catch (parseErr: any) {
@@ -350,6 +370,9 @@ export class SelfHealingEngine {
       success: false,
       errorLog: previousErrors,
       errorType: lastErrorType,
+      repairTrigger,
+      repairApplied,
+      repaired: true,
     };
   }
 }
