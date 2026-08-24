@@ -6,6 +6,8 @@ import { promisify } from "util";
 import {
   AgentEvalCase,
   EvalCaseResult,
+  EvalFailureStage,
+  EvalMode,
   EvalSuiteSummary,
   FilesystemDiffResult,
   RagEvalMetrics,
@@ -16,10 +18,26 @@ import { AgentProgressEvent, ChatRequest } from "../shared/types";
 import { RepositoryScanner } from "../repository/RepositoryScanner";
 import { sha256 } from "../validation/FileVersionGuard";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
+import { ModelObserver } from "./ModelObserver";
 
 declare const jest: any;
 
 const execAsync = promisify(exec);
+
+// ─── Git Commit Detection ───────────────────────────────────────────────────
+
+/**
+ * Retrieves the current Git commit SHA, or null if Git metadata is unavailable.
+ */
+export async function getGitCommitSha(): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync("git rev-parse HEAD", { timeout: 5000 });
+    const trimmed = stdout.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
 
 // ─── Filesystem Snapshot & Diff ──────────────────────────────────────────────
 
@@ -98,6 +116,32 @@ export function computeFilesystemDiff(
     deletedFiles: deletedFiles.sort(),
     allChangedFiles,
   };
+}
+
+// ─── Failure Stage Classification ───────────────────────────────────────────
+
+/**
+ * Classifies the exact pipeline stage where a task failed.
+ */
+export function classifyFailureStage(
+  taskSuccess: boolean,
+  unauthorizedFiles: string[],
+  missingRequired: string[],
+  validationPassed: boolean,
+  contentRulesPassed: boolean,
+  agentResponse?: any,
+  safeRejectionCode?: string,
+): EvalFailureStage | undefined {
+  if (taskSuccess) return undefined;
+
+  if (safeRejectionCode === "STALE_SOURCE_FILE") return "STALE_STATE";
+  if (unauthorizedFiles.length > 0) return "SCOPE";
+  if (missingRequired.length > 0) return "MANIFEST";
+  if (!validationPassed) return "VALIDATION";
+  if (!contentRulesPassed) return "GENERATION";
+  if (agentResponse?.buildErrors && !agentResponse.buildVerified) return "REPAIR";
+  if (agentResponse?.infrastructureError) return "INFRASTRUCTURE";
+  return "UNKNOWN";
 }
 
 // ─── RAG Metric Calculation ──────────────────────────────────────────────────
@@ -217,7 +261,12 @@ export class EvalRunner {
   static async runCase(
     evalCase: AgentEvalCase,
     fixturesBaseDir: string,
+    options?: {
+      mode?: EvalMode;
+      observer?: ModelObserver;
+    },
   ): Promise<EvalCaseResult> {
+    const mode: EvalMode = options?.mode || "DETERMINISTIC";
     const startTime = performance.now();
     const fixtureSourceDir = path.join(fixturesBaseDir, evalCase.fixtureDir, "repo");
     const tempWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), `anka-eval-${evalCase.id}-`));
@@ -226,6 +275,8 @@ export class EvalRunner {
 
     let stage4Metrics: Record<string, any> | undefined;
     let safeRejectionCode: string | undefined;
+
+    const caseObserverEventsBefore = options?.observer ? options.observer.getEvents().length : 0;
 
     try {
       // 1. Copy fixture files into isolated temp workspace
@@ -371,15 +422,52 @@ export class EvalRunner {
         status = taskSuccess ? "PASS" : "FAIL";
       }
 
+      const failureStage = classifyFailureStage(
+        taskSuccess,
+        unauthorizedFiles,
+        missingRequired,
+        validationPassed,
+        contentRulesPassed,
+        agentResponse,
+        safeRejectionCode,
+      );
+
+      // 13. Extract Model Call Events if observer active
+      const caseModelCalls = options?.observer
+        ? options.observer.getEvents().slice(caseObserverEventsBefore)
+        : undefined;
+
+      let actualTokenUsage;
+      if (caseModelCalls && caseModelCalls.length > 0) {
+        let p = 0;
+        let c = 0;
+        let t = 0;
+        let foundUsage = false;
+        for (const call of caseModelCalls) {
+          if (typeof call.promptTokens === "number" || typeof call.completionTokens === "number") {
+            foundUsage = true;
+            p += call.promptTokens || 0;
+            c += call.completionTokens || 0;
+            t += call.totalTokens || (call.promptTokens || 0) + (call.completionTokens || 0);
+          }
+        }
+        if (foundUsage) {
+          actualTokenUsage = { promptTokens: p, completionTokens: c, totalTokens: t };
+        }
+      }
+
       return {
         caseId: evalCase.id,
         name: evalCase.name,
         category: evalCase.category,
+        mode,
         status,
         taskSuccess,
         firstPassSuccess: taskSuccess && !agentResponse.repaired,
         repaired: Boolean(agentResponse.repaired),
         repairAttempts: agentResponse.repaired ? 1 : 0,
+        repairSuccess: agentResponse.repaired ? taskSuccess : undefined,
+        failureStage,
         filesystemDiff: fsDiff,
         unauthorizedFiles,
         validationPassed,
@@ -395,6 +483,8 @@ export class EvalRunner {
           inputTokens: 0,
           outputTokens: 0,
         },
+        actualTokenUsage,
+        modelCalls: caseModelCalls,
         errorDetails: validationErrors.join("\n") || undefined,
       };
     } finally {
@@ -414,11 +504,26 @@ export class EvalRunner {
   static async runSuite(
     cases: AgentEvalCase[],
     fixturesBaseDir: string,
+    options?: {
+      mode?: EvalMode;
+      saveResults?: boolean;
+      outputDir?: string;
+    },
   ): Promise<EvalSuiteSummary> {
+    const mode: EvalMode = options?.mode || "DETERMINISTIC";
+    const runId = `eval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const timestamp = new Date().toISOString();
+    const gitCommit = await getGitCommitSha();
+
+    let observer: ModelObserver | undefined;
+    if (mode === "REAL_MODEL" || ModelObserver.getActive()) {
+      observer = ModelObserver.getActive() || ModelObserver.start();
+    }
+
     const results: EvalCaseResult[] = [];
 
     for (const evalCase of cases) {
-      const result = await this.runCase(evalCase, fixturesBaseDir);
+      const result = await this.runCase(evalCase, fixturesBaseDir, { mode, observer });
       results.push(result);
     }
 
@@ -465,8 +570,24 @@ export class EvalRunner {
 
     const embeddingProvider = results.find((r) => r.ragMetrics?.embeddingProvider)?.ragMetrics?.embeddingProvider || "local_deterministic";
 
-    return {
-      timestamp: new Date().toISOString(),
+    const modelProfile = observer
+      ? observer.buildModelProfile(embeddingProvider)
+      : {
+          providers: ["openai"],
+          modelsObserved: [],
+          embeddingProvider,
+          callCount: 0,
+          callsByModel: {},
+        };
+
+    const actualTokenUsage = observer ? observer.aggregateActualTokenUsage() : undefined;
+
+    const summary: EvalSuiteSummary = {
+      schemaVersion: "1.0.0",
+      runId,
+      timestamp,
+      gitCommit,
+      mode,
       totalCases,
       passedCases,
       failedCases,
@@ -483,6 +604,8 @@ export class EvalRunner {
       avgMrrDelta,
       avgRecallAt5Delta,
       avgContextInclusionRate,
+      modelProfile,
+      actualTokenUsage,
       ragAvgRecallAt5: rerankedAvgRecallAt5,
       ragAvgPrecisionAt5: ragCount > 0
         ? parseFloat((ragCases.reduce((a, b) => a + (b.ragMetrics?.reranked.precisionAt5 || 0), 0) / ragCount).toFixed(4))
@@ -491,5 +614,20 @@ export class EvalRunner {
       embeddingProvider,
       results,
     };
+
+    // Persist real model results if requested or in REAL_MODEL mode
+    if (mode === "REAL_MODEL" || options?.saveResults) {
+      const outputDir = options?.outputDir || path.join(process.cwd(), "eval-results", "real");
+      fs.mkdirSync(outputDir, { recursive: true });
+      const safeTimestamp = timestamp.replace(/[:.]/g, "-");
+      const resultPath = path.join(outputDir, `${safeTimestamp}-${runId}.json`);
+      fs.writeFileSync(resultPath, JSON.stringify(summary, null, 2), "utf8");
+    }
+
+    if (observer && !options?.saveResults) {
+      observer.stop();
+    }
+
+    return summary;
   }
 }

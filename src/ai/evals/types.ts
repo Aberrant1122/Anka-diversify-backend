@@ -1,3 +1,5 @@
+export type EvalMode = "DETERMINISTIC" | "REAL_MODEL";
+
 export type EvalCategory =
   | "BUG_FIX"
   | "CROSS_FILE"
@@ -12,6 +14,20 @@ export type EvalCategory =
   | "MISLEADING_FILENAMES"
   | "NESTED_SERVICE"
   | "IMPL_AND_TEST";
+
+export type EvalFailureStage =
+  | "INTENT"
+  | "RETRIEVAL"
+  | "CONTEXT"
+  | "MANIFEST"
+  | "GENERATION"
+  | "PATCH_RESOLUTION"
+  | "SCOPE"
+  | "STALE_STATE"
+  | "VALIDATION"
+  | "REPAIR"
+  | "INFRASTRUCTURE"
+  | "UNKNOWN";
 
 export interface ExpectedContentRule {
   path: string;
@@ -105,15 +121,44 @@ export interface FilesystemDiffResult {
   allChangedFiles: string[];
 }
 
+export interface ModelCallEvent {
+  stage?: string;
+  operation?: string;
+  provider: "openai";
+  model: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  durationMs: number;
+  timestamp: string;
+}
+
+export interface ModelProfile {
+  providers: string[];
+  modelsObserved: string[];
+  embeddingProvider: string;
+  callCount: number;
+  callsByModel: Record<string, number>;
+}
+
+export interface ActualTokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface EvalCaseResult {
   caseId: string;
   name: string;
   category: EvalCategory;
+  mode: EvalMode;
   status: "PASS" | "FAIL" | "SAFE_REJECTION";
   taskSuccess: boolean;
   firstPassSuccess: boolean;
   repaired: boolean;
   repairAttempts: number;
+  repairSuccess?: boolean;
+  failureStage?: EvalFailureStage;
   filesystemDiff: FilesystemDiffResult;
   unauthorizedFiles: string[];
   validationPassed: boolean;
@@ -129,11 +174,17 @@ export interface EvalCaseResult {
     inputTokens: number;
     outputTokens: number;
   };
+  actualTokenUsage?: ActualTokenUsage;
+  modelCalls?: ModelCallEvent[];
   errorDetails?: string;
 }
 
 export interface EvalSuiteSummary {
+  schemaVersion: string;
+  runId: string;
   timestamp: string;
+  gitCommit: string | null;
+  mode: EvalMode;
   totalCases: number;
   passedCases: number;
   failedCases: number;
@@ -153,11 +204,23 @@ export interface EvalSuiteSummary {
   avgRecallAt5Delta: number;
   avgContextInclusionRate: number;
 
+  // Model Profile & Observed Usage
+  modelProfile: ModelProfile;
+  actualTokenUsage?: ActualTokenUsage;
+
   // Backward-compatible accessors
   ragAvgRecallAt5?: number;
   ragAvgPrecisionAt5?: number;
   ragAvgMrr?: number;
-
   embeddingProvider: string;
+
   results: EvalCaseResult[];
+}
+
+export interface RealEvalRunOptions {
+  caseIds?: string[];
+  runsPerCase?: number;
+  maxCases?: number;
+  saveResults?: boolean;
+  outputDir?: string;
 }

@@ -13,7 +13,8 @@
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
-    "setup-s3": "npx ts-node scripts/setup-s3.ts"
+    "setup-s3": "npx ts-node scripts/setup-s3.ts",
+    "eval:real": "ts-node scripts/run-ai-evals.ts"
   },
   "keywords": [],
   "author": "",

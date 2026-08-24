@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 import {
   AgentEvalCase,
   EvalSuiteSummary,
@@ -9,8 +10,11 @@ import {
   computeFilesystemDiff,
   computeRankingMetrics,
   computeRagMetrics,
+  classifyFailureStage,
+  getGitCommitSha,
   EvalRunner,
 } from "../evals/EvalRunner";
+import { ModelObserver } from "../evals/ModelObserver";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { RepositoryScanner } from "../repository/RepositoryScanner";
 import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder";
@@ -1121,6 +1125,279 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
           expect(res.ragMetrics.context).toBeDefined();
         }
       }
+    });
+  });
+
+  // ── 3. Step 10D1 — Real-Model Mode Infrastructure & Telemetry (Tests A–M) ────
+
+  describe("Step 10D1 — Real-Model Mode Infrastructure & Telemetry", () => {
+    test("Test A: EvalMode defaults to DETERMINISTIC when unspecified", async () => {
+      const caseJsonPath = path.join(fixturesBaseDir, "case-01-pagination-bug", "case.json");
+      const evalCase: AgentEvalCase = JSON.parse(fs.readFileSync(caseJsonPath, "utf8"));
+
+      jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+        taskType: "BUG_FIX",
+        risk: "LOW",
+        estimatedComplexity: "SMALL",
+        intent: "Fix pagination offset",
+        targetPath: "src/pagination.ts",
+        confidence: 0.95,
+        requiresClarification: false,
+        reasoning: "Task",
+      } as any);
+
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+        totalFiles: 1,
+        manifestVersion: "1.0.0",
+      });
+
+      jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+        roadmap: [],
+        changes: [{ path: "src/pagination.ts", content: "export function getPageOffset(page: number, limit: number): number { return (page - 1) * limit; }\n", description: "fix", action: "modify" }],
+        explanation: "fix",
+        commitMessage: "fix",
+        validationCommands: [],
+      });
+
+      jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
+        if (fsManager && localPath) {
+          await fsManager.apply(changes, localPath);
+        }
+        return { success: true, attempts: 1, finalChanges: changes };
+      });
+
+      const result = await EvalRunner.runCase(evalCase, fixturesBaseDir);
+      expect(result.mode).toBe("DETERMINISTIC");
+    });
+
+    test("Test B & C: DETERMINISTIC Mode 1 never requires OPENAI_API_KEY and retains stubs without network calls", async () => {
+      const savedKey = process.env.OPENAI_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+
+      const caseJsonPath = path.join(fixturesBaseDir, "case-01-pagination-bug", "case.json");
+      const evalCase: AgentEvalCase = JSON.parse(fs.readFileSync(caseJsonPath, "utf8"));
+
+      jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+        taskType: "BUG_FIX",
+        risk: "LOW",
+        estimatedComplexity: "SMALL",
+        intent: "Fix offset",
+        targetPath: "src/pagination.ts",
+        confidence: 0.95,
+        requiresClarification: false,
+        reasoning: "Deterministic stub",
+      } as any);
+
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+        totalFiles: 1,
+        manifestVersion: "1.0.0",
+      });
+
+      jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+        roadmap: [],
+        changes: [{ path: "src/pagination.ts", content: "export function getPageOffset(page: number, limit: number): number { return (page - 1) * limit; }\n", description: "fix", action: "modify" }],
+        explanation: "fix",
+        commitMessage: "fix",
+        validationCommands: [],
+      });
+
+      jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
+        if (fsManager && localPath) {
+          await fsManager.apply(changes, localPath);
+        }
+        return { success: true, attempts: 1, finalChanges: changes };
+      });
+
+      const result = await EvalRunner.runCase(evalCase, fixturesBaseDir, { mode: "DETERMINISTIC" });
+      expect(result.status).toBe("PASS");
+      expect(result.mode).toBe("DETERMINISTIC");
+
+      process.env.OPENAI_API_KEY = savedKey;
+    });
+
+    test("Test E, F, G, H, I: ModelObserver records distinct model names, actual token usage, and embedding provider", () => {
+      const observer = new ModelObserver();
+
+      observer.recordEvent({
+        provider: "openai",
+        model: "gpt-4o",
+        promptTokens: 500,
+        completionTokens: 250,
+        totalTokens: 750,
+        durationMs: 450,
+        timestamp: new Date().toISOString(),
+      });
+
+      observer.recordEvent({
+        provider: "openai",
+        model: "gpt-4o-mini",
+        promptTokens: 120,
+        completionTokens: 60,
+        totalTokens: 180,
+        durationMs: 180,
+        timestamp: new Date().toISOString(),
+      });
+
+      observer.recordEvent({
+        provider: "openai",
+        model: "text-embedding-3-small",
+        promptTokens: 45,
+        totalTokens: 45,
+        durationMs: 90,
+        timestamp: new Date().toISOString(),
+      });
+
+      const profile = observer.buildModelProfile("text-embedding-3-small");
+      expect(profile.modelsObserved).toEqual(["gpt-4o", "gpt-4o-mini", "text-embedding-3-small"]);
+      expect(profile.callCount).toBe(3);
+      expect(profile.callsByModel["gpt-4o"]).toBe(1);
+      expect(profile.callsByModel["gpt-4o-mini"]).toBe(1);
+      expect(profile.callsByModel["text-embedding-3-small"]).toBe(1);
+      expect(profile.embeddingProvider).toBe("text-embedding-3-small");
+
+      const usage = observer.aggregateActualTokenUsage();
+      expect(usage).toBeDefined();
+      expect(usage?.promptTokens).toBe(665);
+      expect(usage?.completionTokens).toBe(310);
+      expect(usage?.totalTokens).toBe(975);
+    });
+
+    test("Test J: Machine-readable result files are saved to unique filenames without overwriting previous runs", async () => {
+      const tempResultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-eval-results-test-"));
+      const caseJsonPath = path.join(fixturesBaseDir, "case-01-pagination-bug", "case.json");
+      const evalCase: AgentEvalCase = JSON.parse(fs.readFileSync(caseJsonPath, "utf8"));
+
+      jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+        taskType: "BUG_FIX",
+        risk: "LOW",
+        estimatedComplexity: "SMALL",
+        intent: "Fix offset",
+        targetPath: "src/pagination.ts",
+        confidence: 0.95,
+        requiresClarification: false,
+        reasoning: "Test",
+      } as any);
+
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+        totalFiles: 1,
+        manifestVersion: "1.0.0",
+      });
+
+      jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+        roadmap: [],
+        changes: [{ path: "src/pagination.ts", content: "export function getPageOffset(page: number, limit: number): number { return (page - 1) * limit; }\n", description: "fix", action: "modify" }],
+        explanation: "fix",
+        commitMessage: "fix",
+        validationCommands: [],
+      });
+
+      jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
+        if (fsManager && localPath) {
+          await fsManager.apply(changes, localPath);
+        }
+        return { success: true, attempts: 1, finalChanges: changes };
+      });
+
+      const summary1 = await EvalRunner.runSuite([evalCase], fixturesBaseDir, {
+        mode: "REAL_MODEL",
+        saveResults: true,
+        outputDir: tempResultsDir,
+      });
+
+      const summary2 = await EvalRunner.runSuite([evalCase], fixturesBaseDir, {
+        mode: "REAL_MODEL",
+        saveResults: true,
+        outputDir: tempResultsDir,
+      });
+
+      const files = fs.readdirSync(tempResultsDir).filter((f) => f.endsWith(".json"));
+      expect(files.length).toBe(2);
+      expect(summary1.runId).not.toBe(summary2.runId);
+
+      // Verify content structure
+      const saved1 = JSON.parse(fs.readFileSync(path.join(tempResultsDir, files[0]), "utf8"));
+      expect(saved1.schemaVersion).toBe("1.0.0");
+      expect(saved1.mode).toBe("REAL_MODEL");
+      expect(saved1.modelProfile).toBeDefined();
+
+      fs.rmSync(tempResultsDir, { recursive: true, force: true });
+    });
+
+    test("Test K: Git commit metadata retrieval gracefully returns string or null without throwing", async () => {
+      const sha = await getGitCommitSha();
+      if (sha !== null) {
+        expect(typeof sha).toBe("string");
+        expect(sha.length).toBeGreaterThan(0);
+      } else {
+        expect(sha).toBeNull();
+      }
+    });
+
+    test("Test L: Isolation teardown removes temp workspace and cache directory cleanly", async () => {
+      const caseJsonPath = path.join(fixturesBaseDir, "case-01-pagination-bug", "case.json");
+      const evalCase: AgentEvalCase = JSON.parse(fs.readFileSync(caseJsonPath, "utf8"));
+
+      let seenWorkspace: string | undefined;
+      const originalMkdir = fs.mkdtempSync;
+      jest.spyOn(fs, "mkdtempSync").mockImplementation((prefix: string) => {
+        const dir = originalMkdir(prefix);
+        if (prefix.includes("anka-eval-")) {
+          seenWorkspace = dir;
+        }
+        return dir;
+      });
+
+      jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+        taskType: "BUG_FIX",
+        risk: "LOW",
+        estimatedComplexity: "SMALL",
+        intent: "Fix offset",
+        targetPath: "src/pagination.ts",
+        confidence: 0.95,
+        requiresClarification: false,
+        reasoning: "Test",
+      } as any);
+
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix" }],
+        totalFiles: 1,
+        manifestVersion: "1.0.0",
+      });
+
+      jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+        roadmap: [],
+        changes: [{ path: "src/pagination.ts", content: "export function getPageOffset(page: number, limit: number): number { return (page - 1) * limit; }\n", description: "fix", action: "modify" }],
+        explanation: "fix",
+        commitMessage: "fix",
+        validationCommands: [],
+      });
+
+      jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
+        if (fsManager && localPath) {
+          await fsManager.apply(changes, localPath);
+        }
+        return { success: true, attempts: 1, finalChanges: changes };
+      });
+
+      await EvalRunner.runCase(evalCase, fixturesBaseDir);
+
+      expect(seenWorkspace).toBeDefined();
+      expect(fs.existsSync(seenWorkspace!)).toBe(false);
+    });
+
+    test("Test M: classifyFailureStage deterministically identifies all failure stages", () => {
+      expect(classifyFailureStage(true, [], [], true, true)).toBeUndefined();
+      expect(classifyFailureStage(false, [], [], true, true, undefined, "STALE_SOURCE_FILE")).toBe("STALE_STATE");
+      expect(classifyFailureStage(false, ["src/unauthorized.ts"], [], true, true)).toBe("SCOPE");
+      expect(classifyFailureStage(false, [], ["src/required.ts"], true, true)).toBe("MANIFEST");
+      expect(classifyFailureStage(false, [], [], false, true)).toBe("VALIDATION");
+      expect(classifyFailureStage(false, [], [], true, false)).toBe("GENERATION");
+      expect(classifyFailureStage(false, [], [], true, true, { buildErrors: "error TS1234", buildVerified: false })).toBe("REPAIR");
+      expect(classifyFailureStage(false, [], [], true, true, { infrastructureError: true })).toBe("INFRASTRUCTURE");
+      expect(classifyFailureStage(false, [], [], true, true)).toBe("UNKNOWN");
     });
   });
 });
