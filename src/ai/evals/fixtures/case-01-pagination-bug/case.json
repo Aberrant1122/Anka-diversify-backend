@@ -1,0 +1,21 @@
+{
+  "id": "case-01-pagination-bug",
+  "name": "Fix offset calculation in pagination helper",
+  "category": "BUG_FIX",
+  "description": "Fix bug in getPageOffset where page 1 returns offset 10 instead of offset 0",
+  "userRequest": "Fix bug in src/pagination.ts: getPageOffset should compute offset using (page - 1) * limit so that page 1 returns 0.",
+  "fixtureDir": "case-01-pagination-bug",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": ["src/pagination.ts"]
+  },
+  "expected": {
+    "requiredChangedFiles": ["src/pagination.ts"],
+    "allowedChangedFiles": ["src/pagination.ts"],
+    "contentRules": [
+      {
+        "path": "src/pagination.ts",
+        "contains": ["(page - 1) * limit"]
+      }
+    ]
+  }
+}

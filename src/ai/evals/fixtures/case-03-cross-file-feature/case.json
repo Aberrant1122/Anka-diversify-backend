@@ -1,0 +1,25 @@
+{
+  "id": "case-03-cross-file-feature",
+  "name": "Add rateLimitMs option across config and middleware",
+  "category": "CROSS_FILE",
+  "description": "Configure rateLimitMs in server config and update middleware default",
+  "userRequest": "Add rateLimitMs: 500 to config in src/config/server.ts and update default fallback to 500 in src/middleware/rateLimiter.ts.",
+  "fixtureDir": "case-03-cross-file-feature",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": ["src/config/server.ts", "src/middleware/rateLimiter.ts"]
+  },
+  "expected": {
+    "requiredChangedFiles": ["src/config/server.ts", "src/middleware/rateLimiter.ts"],
+    "allowedChangedFiles": ["src/config/server.ts", "src/middleware/rateLimiter.ts"],
+    "contentRules": [
+      {
+        "path": "src/config/server.ts",
+        "contains": ["rateLimitMs: 500"]
+      },
+      {
+        "path": "src/middleware/rateLimiter.ts",
+        "contains": ["config.rateLimitMs ?? 500"]
+      }
+    ]
+  }
+}

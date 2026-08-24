@@ -1,0 +1,25 @@
+{
+  "id": "case-06-duplicate-symbol",
+  "name": "Target specific AuthService implementation among duplicate symbol names",
+  "category": "DUPLICATE_SYMBOL",
+  "description": "Update AuthService in src/auth/AuthService.ts while leaving admin and legacy AuthService untouched",
+  "userRequest": "In src/auth/AuthService.ts, update validateSession to require token.startsWith('v2_auth_').",
+  "fixtureDir": "case-06-duplicate-symbol",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": ["src/auth/AuthService.ts"]
+  },
+  "expected": {
+    "requiredChangedFiles": ["src/auth/AuthService.ts"],
+    "allowedChangedFiles": ["src/auth/AuthService.ts"],
+    "forbiddenChangedFiles": [
+      "src/admin/AuthService.ts",
+      "src/legacy/AuthService.ts"
+    ],
+    "contentRules": [
+      {
+        "path": "src/auth/AuthService.ts",
+        "contains": ["token.startsWith(\"v2_auth_\")"]
+      }
+    ]
+  }
+}

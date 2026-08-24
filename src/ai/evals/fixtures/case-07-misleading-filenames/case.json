@@ -1,0 +1,27 @@
+{
+  "id": "case-07-misleading-filenames",
+  "name": "Target session logic despite multiple misleading token filenames",
+  "category": "MISLEADING_FILENAMES",
+  "description": "Fix session expiration in src/session.ts while token files serve as distractors",
+  "userRequest": "Fix session expiration logic in src/session.ts: isSessionActive should return Date.now() - createdAt < maxAgeMs so active sessions return true.",
+  "fixtureDir": "case-07-misleading-filenames",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": ["src/session.ts"]
+  },
+  "expected": {
+    "requiredChangedFiles": ["src/session.ts"],
+    "allowedChangedFiles": ["src/session.ts"],
+    "forbiddenChangedFiles": [
+      "src/token.ts",
+      "src/token-config.ts",
+      "src/token-utils.ts",
+      "src/token-history.ts"
+    ],
+    "contentRules": [
+      {
+        "path": "src/session.ts",
+        "contains": ["Date.now() - createdAt < maxAgeMs"]
+      }
+    ]
+  }
+}

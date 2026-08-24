@@ -1,0 +1,32 @@
+{
+  "id": "case-10-impl-and-test",
+  "name": "Co-retrieval of implementation service and associated test file",
+  "category": "IMPL_AND_TEST",
+  "description": "Align getSessionTtlSeconds in src/services/session.ts with test expectation in session.test.ts",
+  "userRequest": "Update getSessionTtlSeconds in src/services/session.ts to return 7200 to match the expectation in session.test.ts.",
+  "fixtureDir": "case-10-impl-and-test",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": [
+      "src/services/session.ts",
+      "src/services/__tests__/session.test.ts"
+    ]
+  },
+  "expected": {
+    "requiredChangedFiles": [
+      "src/services/session.ts"
+    ],
+    "allowedChangedFiles": [
+      "src/services/session.ts"
+    ],
+    "forbiddenChangedFiles": [
+      "src/services/logger.ts",
+      "src/config/app.ts"
+    ],
+    "contentRules": [
+      {
+        "path": "src/services/session.ts",
+        "contains": ["return 7200;"]
+      }
+    ]
+  }
+}

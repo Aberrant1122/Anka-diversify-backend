@@ -1,0 +1,38 @@
+{
+  "id": "case-08-multi-file-bug-fix",
+  "name": "Coordinated change across payment gateway interface and checkout caller",
+  "category": "BUG_FIX",
+  "description": "Add timeoutMs to gateway options and supply it during checkout invocation",
+  "userRequest": "Add timeoutMs: 3000 to GatewayOptions in src/payment/gateway.ts and pass timeoutMs: 3000 in createGateway in src/payment/checkout.ts.",
+  "fixtureDir": "case-08-multi-file-bug-fix",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": [
+      "src/payment/gateway.ts",
+      "src/payment/checkout.ts"
+    ]
+  },
+  "expected": {
+    "requiredChangedFiles": [
+      "src/payment/gateway.ts",
+      "src/payment/checkout.ts"
+    ],
+    "allowedChangedFiles": [
+      "src/payment/gateway.ts",
+      "src/payment/checkout.ts"
+    ],
+    "forbiddenChangedFiles": [
+      "src/payment/currency.ts",
+      "src/user/account.ts"
+    ],
+    "contentRules": [
+      {
+        "path": "src/payment/gateway.ts",
+        "contains": ["timeoutMs?: number"]
+      },
+      {
+        "path": "src/payment/checkout.ts",
+        "contains": ["timeoutMs: 3000"]
+      }
+    ]
+  }
+}

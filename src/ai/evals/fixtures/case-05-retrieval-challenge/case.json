@@ -1,0 +1,28 @@
+{
+  "id": "case-05-retrieval-challenge",
+  "name": "Targeted fix among multiple similar authentication and token services",
+  "category": "RETRIEVAL_CHALLENGE",
+  "description": "Locate token.service.ts among multiple auth services and fix inverted isTokenExpired check",
+  "userRequest": "Fix expired access tokens not being rejected: isTokenExpired in token.service.ts should return Date.now() >= exp * 1000.",
+  "fixtureDir": "case-05-retrieval-challenge",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": ["src/token.service.ts"]
+  },
+  "expected": {
+    "requiredChangedFiles": ["src/token.service.ts"],
+    "allowedChangedFiles": ["src/token.service.ts"],
+    "forbiddenChangedFiles": [
+      "src/auth.service.ts",
+      "src/auth.controller.ts",
+      "src/auth.middleware.ts",
+      "src/session.service.ts",
+      "src/user.service.ts"
+    ],
+    "contentRules": [
+      {
+        "path": "src/token.service.ts",
+        "contains": ["Date.now() >= exp * 1000"]
+      }
+    ]
+  }
+}

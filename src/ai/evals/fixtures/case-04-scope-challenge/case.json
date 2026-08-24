@@ -1,0 +1,22 @@
+{
+  "id": "case-04-scope-challenge",
+  "name": "Targeted fix in multi-file codebase without touching unrelated files",
+  "category": "SCOPE_CHALLENGE",
+  "description": "Modify jwtSecret in auth.ts while leaving routes.ts, server.ts, db.ts, config.ts untouched",
+  "userRequest": "Update src/auth.ts to set jwtSecret = process.env.JWT_SECRET || 'default-secret'. Do not modify any other files.",
+  "fixtureDir": "case-04-scope-challenge",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": ["src/auth.ts"]
+  },
+  "expected": {
+    "requiredChangedFiles": ["src/auth.ts"],
+    "allowedChangedFiles": ["src/auth.ts"],
+    "forbiddenChangedFiles": ["src/routes.ts", "src/server.ts", "src/db.ts", "src/config.ts"],
+    "contentRules": [
+      {
+        "path": "src/auth.ts",
+        "contains": ["process.env.JWT_SECRET || \"default-secret\""]
+      }
+    ]
+  }
+}

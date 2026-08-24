@@ -1,0 +1,21 @@
+{
+  "id": "case-02-type-repair",
+  "name": "Fix TypeScript type mismatch in user service",
+  "category": "COMPILE_REPAIR",
+  "description": "Fix UserDTO return type in user.service.ts by adding role property",
+  "userRequest": "Fix type error in src/services/user.service.ts: formatUser must return a UserDTO with role: 'user'.",
+  "fixtureDir": "case-02-type-repair",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": ["src/services/user.service.ts", "src/models/user.ts"]
+  },
+  "expected": {
+    "requiredChangedFiles": ["src/services/user.service.ts"],
+    "allowedChangedFiles": ["src/services/user.service.ts", "src/models/user.ts"],
+    "contentRules": [
+      {
+        "path": "src/services/user.service.ts",
+        "contains": ["role: \"user\""]
+      }
+    ]
+  }
+}

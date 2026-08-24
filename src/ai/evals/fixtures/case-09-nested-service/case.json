@@ -1,0 +1,32 @@
+{
+  "id": "case-09-nested-service",
+  "name": "Target deeply nested validation service among shallower helper files",
+  "category": "NESTED_SERVICE",
+  "description": "Update token length rule in deeply nested token-validation.service.ts",
+  "userRequest": "In src/modules/auth/services/token-validation.service.ts, update isTokenValid to require token.length >= 32.",
+  "fixtureDir": "case-09-nested-service",
+  "ragGroundTruth": {
+    "expectedRelevantFiles": [
+      "src/modules/auth/services/token-validation.service.ts"
+    ]
+  },
+  "expected": {
+    "requiredChangedFiles": [
+      "src/modules/auth/services/token-validation.service.ts"
+    ],
+    "allowedChangedFiles": [
+      "src/modules/auth/services/token-validation.service.ts"
+    ],
+    "forbiddenChangedFiles": [
+      "src/modules/auth/auth.ts",
+      "src/services/validation.ts",
+      "src/utils/helpers.ts"
+    ],
+    "contentRules": [
+      {
+        "path": "src/modules/auth/services/token-validation.service.ts",
+        "contains": ["token.length >= 32"]
+      }
+    ]
+  }
+}
