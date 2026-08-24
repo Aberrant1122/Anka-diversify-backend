@@ -1,5 +1,6 @@
 import { AgentFileChange } from "../shared/types";
 import { applyPatchToFile, FilePatchEdit, PatchErrorCode } from "../patch/PatchApplicator";
+import { sha256 } from "../validation/FileVersionGuard";
 
 // ─── Generation Proposal Types (internal to CodeGenerator) ──────────────────
 
@@ -46,6 +47,11 @@ export interface ProposalResolutionError {
 export interface ResolutionSuccess {
   success: true;
   changes: AgentFileChange[];
+  /**
+   * SHA-256 hex of the authoritative source content used for each MODIFY resolution.
+   * Keyed by canonical POSIX path. Only MODIFY files are included.
+   */
+  expectedSourceHashes: Record<string, string>;
 }
 
 export interface ResolutionFailure {
@@ -79,9 +85,11 @@ function normalizePath(p: string): string {
  */
 export function resolveGenerationProposals(
   proposals: readonly GeneratedChangeProposal[],
+  // eslint-disable-next-line @typescript-eslint/no-shadow
   fileContext: Readonly<Record<string, string>>,
 ): ResolutionResult {
   const changes: AgentFileChange[] = [];
+  const expectedSourceHashes: Record<string, string> = {};
 
   for (let i = 0; i < proposals.length; i++) {
     const proposal = proposals[i];
@@ -145,6 +153,9 @@ export function resolveGenerationProposals(
           };
         }
 
+        // Record expected source hash for stale-file detection
+        expectedSourceHashes[normalizedProposalPath] = sha256(originalContent);
+
         // Apply patch
         const patchResult = applyPatchToFile(originalContent, proposal.edits);
 
@@ -171,5 +182,5 @@ export function resolveGenerationProposals(
     }
   }
 
-  return { success: true, changes };
+  return { success: true, changes, expectedSourceHashes };
 }

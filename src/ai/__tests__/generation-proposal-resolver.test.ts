@@ -296,4 +296,44 @@ describe("GenerationProposalResolver — Deterministic Proposal Resolution", () 
     expect(fileContext).toEqual(contextCopy);
     expect(proposals).toEqual(proposalsCopy);
   });
+
+  // ── TEST M: Resolver records expectedSourceHashes for MODIFY only ──
+  test("TEST M: Resolver records expectedSourceHashes for MODIFY files and not CREATE/DELETE", () => {
+    const fileContent = "const timeout = 5000;\n";
+    const fileContext = makeFileContext({
+      "src/auth.ts": fileContent,
+      "src/delete-me.ts": "legacy",
+    });
+
+    const proposals: GeneratedChangeProposal[] = [
+      {
+        path: "src/auth.ts",
+        action: "modify",
+        edits: [{ oldText: "const timeout = 5000;", newText: "const timeout = 10000;" }],
+        description: "Update timeout",
+      },
+      {
+        path: "src/new.ts",
+        action: "create",
+        content: "new",
+        description: "New file",
+      },
+      {
+        path: "src/delete-me.ts",
+        action: "delete",
+        content: "",
+        description: "Delete file",
+        isDeleted: true,
+      },
+    ];
+
+    const result = resolveGenerationProposals(proposals, fileContext);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.expectedSourceHashes).toBeDefined();
+      expect(Object.keys(result.expectedSourceHashes)).toEqual(["src/auth.ts"]);
+      expect(result.expectedSourceHashes["src/auth.ts"]).toHaveLength(64);
+    }
+  });
 });

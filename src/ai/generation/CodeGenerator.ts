@@ -167,6 +167,7 @@ Respond ONLY with valid JSON:
     explanation: string;
     commitMessage: string;
     validationCommands: string[];
+    expectedSourceHashes?: Record<string, string>;
   }> {
     const isStandaloneWeb = contract?.pipeline === "STANDALONE" || contract?.environment === "HTML_CSS_JS";
     const isDeleteTask = contract?.taskType === "DELETE_FILE" || contract?.taskType === "DELETE_FOLDER";
@@ -249,6 +250,7 @@ Respond ONLY with valid JSON:
     const hasManifestContext = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
 
     let changes: AgentFileChange[];
+    let expectedSourceHashes: Record<string, string> | undefined;
 
     if (hasManifestContext && !isDeleteTask && !isStandaloneWeb) {
       // Structured patch path: parse as GeneratedChangeProposal[]
@@ -292,6 +294,7 @@ Respond ONLY with valid JSON:
       }
 
       changes = resolution.changes;
+      expectedSourceHashes = resolution.expectedSourceHashes;
     } else {
       // Legacy path: standalone/delete/no-manifest — full-content changes
       changes = rawChanges as AgentFileChange[];
@@ -333,6 +336,7 @@ Respond ONLY with valid JSON:
       explanation,
       commitMessage,
       validationCommands,
+      expectedSourceHashes,
     };
   }
 }

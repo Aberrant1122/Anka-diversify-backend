@@ -31,6 +31,7 @@ import { enrichFileContextWithSemanticResults } from "../repository/SemanticCont
 import { rerankSemanticResults } from "../repository/CodeAwareReranker";
 import { packFileContext } from "../context/ContextPacker";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
+import { verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
 import { FileManifest } from "../../types";
 import { decrypt } from "../../utils/encryption";
 
@@ -469,6 +470,37 @@ export class AgentPipeline {
     const criticResult = executionContract.diffCriticEnabled
       ? ContractGuardrails.runDiffContractCritic(roadmapAndDiff.changes, executionContract)
       : { accepted: roadmapAndDiff.changes, rejected: [], log: "[Diff Critic] Skipped" };
+
+    // File Version Guard Gate (Pre-Disk / Stale Source Protection)
+    if (
+      roadmapAndDiff.expectedSourceHashes &&
+      Object.keys(roadmapAndDiff.expectedSourceHashes).length > 0 &&
+      effectiveLocalPath
+    ) {
+      const versionCheck = await verifyFileVersionsFromDisk(
+        roadmapAndDiff.expectedSourceHashes,
+        effectiveLocalPath,
+      );
+
+      if (!versionCheck.valid) {
+        const failureExplanation = `[${versionCheck.error.code}] File version mismatch on "${versionCheck.error.path}": ${versionCheck.error.message}`;
+        await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+        return {
+          explanation: failureExplanation,
+          changes: [],
+          commitMessage: "",
+          sessionId: session.id,
+          intent: intentResult.intent,
+          taskType: intentResult.taskType,
+          risk: intentResult.risk,
+          estimatedComplexity: intentResult.estimatedComplexity,
+          targetPath: intentResult.targetPath,
+          confidence: finalConfidence,
+          roadmap: roadmapAndDiff.roadmap,
+        };
+      }
+    }
 
     // Stage 8: Self-Healing Build Repair
     const s8Start = performance.now();
