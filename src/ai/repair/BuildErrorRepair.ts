@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { getOpenAI } from "../shared/utils";
-import { AgentFileChange } from "../shared/types";
+import { AgentFileChange, ExecutionContract } from "../shared/types";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { buildSelfHealingRepairPrompt } from "../prompts/repair";
@@ -14,8 +14,14 @@ export class BuildErrorRepair {
     originalMessage: string,
     errorLog: string,
     fsManager?: FileSystemStateManager,
+    executionContract?: ExecutionContract | null,
   ): Promise<{ finalChanges: AgentFileChange[]; success: boolean; errorLog?: string }> {
     if (!changes.length || !errorLog) {
+      return { finalChanges: changes, success: false, errorLog };
+    }
+
+    // AI Step 9A: Disable legacy full-file repair fallback for REPOSITORY pipeline
+    if (executionContract?.pipeline === "REPOSITORY") {
       return { finalChanges: changes, success: false, errorLog };
     }
 

@@ -549,6 +549,8 @@ export class AgentPipeline {
         fsManager,
         projectId,
         onProgress,
+        approvedManifest,
+        executionContract,
       );
 
       if (!repairResult.success && !repairResult.infrastructureError && effectiveLocalPath && effectiveValidationCommands.length > 0) {
@@ -559,6 +561,7 @@ export class AgentPipeline {
           request.message,
           repairResult.errorLog || "",
           fsManager,
+          executionContract,
         );
 
         if (buildRepairRes.success) {

@@ -1,94 +1,95 @@
+import { DiagnosticError } from "../../services/surgical-repair.engine";
+import { FileManifest, ExecutionContract } from "../../types";
+
 export const SELF_HEALING_REPAIR_PROMPT = `You are a Specialized Self-Healing Code Repair Agent.
 A prior code generation attempt produced compiler, linter, or execution errors when running shell validation checks.
 
-INPUT:
-- Raw terminal error traces.
-- Current file changes.
-- Previous error logs.
-
 TASK:
-Analyze the exact line numbers and error messages, apply surgical patches to fix compiler/type/lint errors, and preserve existing functionality.
+Analyze the terminal error trace and diagnostics, then output surgical repairs strictly matching the approved manifest plan.
 
-CRITICAL STANDALONE MANDATE:
-- For standalone web applications (index.html, style.css, script.js), NEVER delete or omit index.html or style.css during repair retries. You MUST output ALL 3 files in your 'changes' array.
+CRITICAL INSTRUCTIONS:
+1. Repair ONLY files declared in the APPROVED FILE PLAN.
+2. Every action must match the approved manifest declaration ("modify", "create", or "delete").
+3. For MODIFY actions, output structured "edits" array ONLY. Do NOT output full file content for modify operations.
+4. "oldText" must match the EXACT text from the CURRENT file content provided in this prompt (exact byte match).
+5. Ensure "oldText" contains enough surrounding context so it is unique within the file.
+6. Do NOT use line numbers, unified diffs, ellipses, or placeholder comments.
+7. Preserve existing behavior outside the targeted error fix. Do not perform unrelated refactors.
+8. For CREATE actions, output the full "content" of the new file.
+9. For DELETE actions, set "action": "delete", "isDeleted": true, and "content": "".
 
-Respond ONLY with valid JSON:
+RESPONSE FORMAT (JSON ONLY):
 {
   "repaired": boolean,
   "patchExplanation": "What was fixed in response to the terminal errors",
   "changes": [
     {
       "path": "relative/path/to/file.ts",
-      "content": "corrected complete file content",
-      "description": "surgical repair applied"
+      "action": "modify",
+      "description": "Short explanation of surgical fix",
+      "edits": [
+        {
+          "oldText": "exact current source text to replace",
+          "newText": "replacement text"
+        }
+      ]
     }
   ]
 }`;
 
-export interface RepairPromptInput {
+export interface StructuredRepairPromptInput {
   errorLog: string;
-  changes?: any[];
+  diagnostics?: DiagnosticError[];
+  currentFiles?: Record<string, string>;
+  approvedManifest?: FileManifest | null;
+  contract?: ExecutionContract | null;
   originalMessage?: string;
   attempt?: number;
   maxRetries?: number;
+  changes?: any[];
 }
 
-/**
- * Builds the system prompt for the self-healing repair agent,
- * embedding the actual terminal/compiler error trace directly when provided.
- */
-export function buildRepairSystemPrompt(errorLog?: string): string {
-  if (!errorLog) {
-    return SELF_HEALING_REPAIR_PROMPT;
+export function buildRepairSystemPrompt(input?: StructuredRepairPromptInput): string {
+  let prompt = SELF_HEALING_REPAIR_PROMPT;
+
+  if (input?.approvedManifest && Array.isArray(input.approvedManifest.files)) {
+    const fileList = input.approvedManifest.files
+      .map((f) => `• ${f.path} (${f.action.toUpperCase()}): ${f.description || "No description"}`)
+      .join("\n");
+    prompt += `\n\nAPPROVED FILE PLAN (CANNOT BE EXCEEDED):\n${fileList}`;
   }
 
-  return `You are a Specialized Self-Healing Code Repair Agent.
-A prior code generation attempt produced compiler, linter, or execution errors when running shell validation checks.
-
-ACTUAL TERMINAL / COMPILER ERROR TRACE TO FIX:
-══════════════════════════════════════════════════════════
-${errorLog}
-══════════════════════════════════════════════════════════
-
-TASK:
-Analyze the exact line numbers and error messages in the error trace above, apply surgical patches to fix compiler/type/lint errors, and preserve existing functionality.
-
-CRITICAL STANDALONE MANDATE:
-- For standalone web applications (index.html, style.css, script.js), NEVER delete or omit index.html or style.css during repair retries. You MUST output ALL 3 files in your 'changes' array.
-
-Respond ONLY with valid JSON:
-{
-  "repaired": boolean,
-  "patchExplanation": "What was fixed in response to the terminal errors",
-  "changes": [
-    {
-      "path": "relative/path/to/file.ts",
-      "content": "corrected complete file content",
-      "description": "surgical repair applied"
-    }
-  ]
-}`;
+  return prompt;
 }
 
-/**
- * Builds the user prompt containing proposed file changes, original request,
- * and the actual terminal error trace.
- */
-export function buildRepairUserPrompt(input: RepairPromptInput): string {
+export function buildRepairUserPrompt(input: StructuredRepairPromptInput): string {
   const attemptText = input.attempt && input.maxRetries ? ` (REPAIR ATTEMPT ${input.attempt}/${input.maxRetries})` : "";
-  const changesText = input.changes && input.changes.length > 0 ? JSON.stringify(input.changes, null, 2) : "None";
-  const reqText = input.originalMessage ? `ORIGINAL REQUEST: ${input.originalMessage}\n\n` : "";
+  const reqText = input.originalMessage ? `ORIGINAL USER REQUEST:\n${input.originalMessage}\n\n` : "";
 
-  return `${reqText}CURRENT PROPOSED CHANGES:\n${changesText}\n\nACTUAL TERMINAL ERROR TRACE${attemptText}:\n${input.errorLog}\n\nFix all build errors, type mismatches, missing imports, or runtime errors shown above. Return JSON with "changes" array containing corrected file contents.`;
+  let diagsText = "";
+  if (input.diagnostics && input.diagnostics.length > 0) {
+    const lines = input.diagnostics.map(
+      (d) => `• [${d.code || "ERROR"}] ${d.file}:${d.line}${d.column ? `:${d.column}` : ""} - ${d.message}${d.symbolName ? ` (Symbol: ${d.symbolName})` : ""}`,
+    );
+    diagsText = `STRUCTURED DIAGNOSTICS DETECTED:\n${lines.join("\n")}\n\n`;
+  }
+
+  let filesText = "";
+  if (input.currentFiles && Object.keys(input.currentFiles).length > 0) {
+    const fileBlocks = Object.entries(input.currentFiles).map(
+      ([p, content]) => `══════════════════════════════════════════════════════════\nCURRENT FILE CONTENT: ${p}\n══════════════════════════════════════════════════════════\n${content}`,
+    );
+    filesText = `CURRENT TARGET FILE CONTENTS (COPY EXACT oldText FROM HERE):\n${fileBlocks.join("\n\n")}\n\n`;
+  } else if (input.changes && input.changes.length > 0) {
+    filesText = `CURRENT CHANGES:\n${JSON.stringify(input.changes, null, 2)}\n\n`;
+  }
+
+  return `${reqText}${diagsText}${filesText}ACTUAL TERMINAL ERROR TRACE${attemptText}:\n${input.errorLog}\n\nFix all build/type/lint errors shown above. Return JSON with structured "changes" using edits[] for MODIFY actions.`;
 }
 
-/**
- * Builds both system and user prompts with the actual error log injected.
- */
-export function buildSelfHealingRepairPrompt(input: RepairPromptInput): { system: string; user: string } {
+export function buildSelfHealingRepairPrompt(input: StructuredRepairPromptInput): { system: string; user: string } {
   return {
-    system: buildRepairSystemPrompt(input.errorLog),
+    system: buildRepairSystemPrompt(input),
     user: buildRepairUserPrompt(input),
   };
 }
-
