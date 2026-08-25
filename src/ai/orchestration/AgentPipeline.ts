@@ -43,6 +43,7 @@ export class AgentPipeline {
     projectId: string,
     request: ChatRequest,
     onProgress?: (event: AgentProgressEvent) => void,
+    options?: { effectiveLocalPath?: string },
   ): Promise<AgentResponse> {
     const session = await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
     const projectContext = await RepositoryContextBuilder.buildProjectContext(projectId);
@@ -59,7 +60,8 @@ export class AgentPipeline {
     await MemoryPersistence.saveMessage(session.id, "user", request.message);
 
     const snapshot = projectContext.repoSnapshot;
-    const effectiveLocalPath = await RepositoryScanner.ensureLocalWorkspace(projectId, project?.localPath, snapshot);
+    const requestedPath = options?.effectiveLocalPath || (request.context as any)?.effectiveLocalPath || project?.localPath;
+    const effectiveLocalPath = await RepositoryScanner.ensureLocalWorkspace(projectId, requestedPath, snapshot);
     const effectiveSnapshot = RepositoryScanner.getEffectiveSnapshot(snapshot, effectiveLocalPath);
     const currentRevisionHash = effectiveSnapshot.revision?.contentHash;
 

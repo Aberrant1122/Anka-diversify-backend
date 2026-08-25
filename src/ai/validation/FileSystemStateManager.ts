@@ -9,6 +9,50 @@ export class RepairInfrastructureError extends Error {
   }
 }
 
+const FORBIDDEN_PATH_SEGMENTS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+]);
+
+/**
+ * Asserts that a target path does not escape the worktree root and does not
+ * touch protected repository metadata or build artifacts.
+ */
+export function assertSafeWorktreePath(targetPath: string, worktreeRoot: string): string {
+  if (!targetPath || typeof targetPath !== "string") {
+    throw new RepairInfrastructureError("Target file path must be a non-empty string.");
+  }
+  if (!worktreeRoot || typeof worktreeRoot !== "string") {
+    throw new RepairInfrastructureError("Worktree root path must be a non-empty string.");
+  }
+
+  const normalizedTarget = targetPath.replace(/\\/g, "/");
+  const segments = normalizedTarget.split("/").map((s) => s.trim()).filter(Boolean);
+
+  for (const seg of segments) {
+    if (FORBIDDEN_PATH_SEGMENTS.has(seg.toLowerCase())) {
+      throw new RepairInfrastructureError(
+        `Path safety violation: modifying protected directory or file "${seg}" is forbidden in path "${targetPath}".`
+      );
+    }
+  }
+
+  const resolvedRoot = path.resolve(worktreeRoot);
+  const resolvedTarget = path.resolve(worktreeRoot, targetPath);
+
+  const relative = path.relative(resolvedRoot, resolvedTarget);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new RepairInfrastructureError(
+      `Path traversal violation: target path "${targetPath}" escapes the worktree root "${worktreeRoot}".`
+    );
+  }
+
+  return resolvedTarget;
+}
+
 export class FileSystemStateManager {
   private originalState: Map<string, string | null> = new Map();
 
@@ -24,7 +68,7 @@ export class FileSystemStateManager {
       const normalizedPath = change.path.replace(/\\/g, "/");
       if (this.originalState.has(normalizedPath)) continue;
 
-      const absPath = path.join(localPath, change.path);
+      const absPath = assertSafeWorktreePath(change.path, localPath);
       try {
         if (fs.existsSync(absPath)) {
           const content = await fs.promises.readFile(absPath, "utf8");
@@ -62,7 +106,7 @@ export class FileSystemStateManager {
 
     for (const change of changes) {
       if (!change.path) continue;
-      const abs = path.join(localPath, change.path);
+      const abs = assertSafeWorktreePath(change.path, localPath);
 
       try {
         if (change.action === "delete" || change.isDeleted) {
@@ -74,6 +118,7 @@ export class FileSystemStateManager {
           await fs.promises.writeFile(abs, change.content || "", "utf8");
         }
       } catch (err: any) {
+        if (err instanceof RepairInfrastructureError) throw err;
         throw new RepairInfrastructureError(`Failed writing file "${change.path}" to "${localPath}": ${err?.message || err}`, err);
       }
     }
@@ -86,7 +131,7 @@ export class FileSystemStateManager {
     if (!localPath || this.originalState.size === 0) return;
 
     for (const [relativePath, originalContent] of this.originalState.entries()) {
-      const absPath = path.join(localPath, relativePath);
+      const absPath = assertSafeWorktreePath(relativePath, localPath);
       try {
         if (originalContent === null) {
           if (fs.existsSync(absPath)) {
