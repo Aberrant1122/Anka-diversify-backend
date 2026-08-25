@@ -71,9 +71,26 @@ export class AgentPipeline {
     const s1Time = performance.now() - s1Start;
 
     const snapshotFileList = (effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || (Array.isArray(effectiveSnapshot) ? effectiveSnapshot : [])) as Array<any>;
-    const repoFileNames = snapshotFileList.map((f: any) => (typeof f === "string" ? f : f.path || ""));
+    const repoFileNames = snapshotFileList.map((f: any) => (typeof f === "string" ? f : f?.path || ""));
 
-    const executionContract: ExecutionContract = buildExecutionContract(intentResult, request.message, repoFileNames);
+    let rawCandidateFiles: string[] = [];
+    if (Array.isArray(effectiveSnapshot?.fileTree) && effectiveSnapshot.fileTree.length > 0) {
+      rawCandidateFiles = effectiveSnapshot.fileTree;
+    } else if (Array.isArray(effectiveSnapshot?.keyFiles) && effectiveSnapshot.keyFiles.length > 0) {
+      rawCandidateFiles = effectiveSnapshot.keyFiles.map((f: any) => (typeof f === "string" ? f : f?.path || ""));
+    } else if (Array.isArray(repoFileNames) && repoFileNames.length > 0) {
+      rawCandidateFiles = repoFileNames;
+    }
+
+    const canonicalExistingFiles = Array.from(
+      new Set(
+        rawCandidateFiles
+          .filter((f) => typeof f === "string" && f.trim().length > 0)
+          .map((f) => f.replace(/\\/g, "/").replace(/^\.\//, ""))
+      )
+    );
+
+    const executionContract: ExecutionContract = buildExecutionContract(intentResult, request.message, canonicalExistingFiles);
 
     onProgress?.({
       step: 1,
@@ -356,6 +373,11 @@ export class AgentPipeline {
     const manifestEnabled = process.env.ENABLE_MANIFEST_ENFORCEMENT !== "false";
 
     if (manifestEnabled) {
+      const planningContext = {
+        ...projectContext,
+        existingFiles: canonicalExistingFiles,
+      };
+
       const shouldDecompose =
         intentResult.taskType === "NEW_FEATURE" &&
         (intentResult.estimatedComplexity === "LARGE" || intentResult.estimatedComplexity === "COMPLEX");
@@ -363,7 +385,7 @@ export class AgentPipeline {
       if (shouldDecompose) {
         try {
           const decomposer = new TaskDecomposer(getOpenAI());
-          const graph = await decomposer.decomposeTask(request.message, projectContext, intentResult);
+          const graph = await decomposer.decomposeTask(request.message, planningContext, intentResult);
 
           await prisma.taskDecomposition.create({
             data: {
@@ -383,7 +405,7 @@ export class AgentPipeline {
             const subTask = graph.nodes.find((n) => n.id === subTaskId);
             if (!subTask) continue;
 
-            const res = await executor.executeSubTask(subTask, completedMap, projectContext, executionContract);
+            const res = await executor.executeSubTask(subTask, completedMap, planningContext, executionContract);
             completedMap.set(subTaskId, res);
           }
           const agg = executor.aggregateResults(completedMap);
@@ -396,10 +418,9 @@ export class AgentPipeline {
       } else {
         try {
           const generator = new ManifestGenerator(getOpenAI());
-          const manifest = await generator.generateManifest(request.message, projectContext, executionContract);
+          const manifest = await generator.generateManifest(request.message, planningContext, executionContract);
 
-          const existingFileList = Array.isArray(effectiveSnapshot) ? effectiveSnapshot.map((f: any) => f.path) : [];
-          const validator = new ManifestValidator(executionContract, existingFileList);
+          const validator = new ManifestValidator(executionContract, canonicalExistingFiles);
           const valRes = validator.validate(manifest);
 
           await prisma.agentManifest.create({
