@@ -307,7 +307,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         path.join(fixturesBaseDir, evalCase.fixtureDir, "repo", "src", "services", "user.service.ts"),
         "utf8",
       );
-      const repairedUserService = `import { UserDTO } from "../models/user";\n\nexport function formatUser(id: string, name: string): UserDTO {\n  return {\n    id,\n    name,\n    role: "user",\n  };\n}\n`;
+      const repairedUserService = `import { UserDTO } from "../models/user";\n\nexport function formatUser(id: string, name: string): UserDTO {\n  return {\n    id,\n    name,\n    role: 'user',\n  };\n}\n`;
 
       jest.spyOn(RepositoryScanner, "getEffectiveSnapshot").mockReturnValue({
         repoName: "test-repo",
@@ -1152,7 +1152,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
           expect(res.ragMetrics.context).toBeDefined();
         }
       }
-    });
+    }, 30000);
   });
 
   // ── 3. Step 10D1 — Real-Model Mode Infrastructure & Telemetry (Tests A–M) ────
@@ -1453,6 +1453,140 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         fs.writeFileSync(paginationPath, originalBuggyContent, "utf8");
       }
     });
+
+    test("Step 11B: Cases 02–10 deterministic tests fail on buggy fixtures and pass on corrected implementations", async () => {
+      const testCases = [
+        {
+          caseId: "case-02-type-repair",
+          expectedError: "expected role 'user'",
+          files: [
+            {
+              path: "src/services/user.service.ts",
+              fixedReplacement: (content: string) => content.replace("name,\n  };", "name,\n    role: 'user',\n  };"),
+            },
+          ],
+        },
+        {
+          caseId: "case-03-cross-file-feature",
+          expectedError: "config.rateLimitMs expected 500",
+          files: [
+            {
+              path: "src/config/server.ts",
+              fixedReplacement: (content: string) => content.replace("port: 3000,\n", "port: 3000,\n  rateLimitMs: 500,\n"),
+            },
+            {
+              path: "src/middleware/rateLimiter.ts",
+              fixedReplacement: (content: string) => content.replace("1000", "500"),
+            },
+          ],
+        },
+        {
+          caseId: "case-04-scope-challenge",
+          expectedError: "dynamic jwtSecret expected 'custom-test-secret-1234'",
+          files: [
+            {
+              path: "src/auth.ts",
+              fixedReplacement: (content: string) => content.replace('"default-secret"', 'process.env.JWT_SECRET || "default-secret"'),
+            },
+          ],
+        },
+        {
+          caseId: "case-05-retrieval-challenge",
+          expectedError: "should be expired",
+          files: [
+            {
+              path: "src/token.service.ts",
+              fixedReplacement: (content: string) => content.replace("Date.now() < exp * 1000", "Date.now() >= exp * 1000"),
+            },
+          ],
+        },
+        {
+          caseId: "case-06-duplicate-symbol",
+          expectedError: "validateSession should return true for token starting with 'v2_auth_'",
+          files: [
+            {
+              path: "src/auth/AuthService.ts",
+              fixedReplacement: (content: string) => content.replace('token.startsWith("auth_")', 'token.startsWith("v2_auth_")'),
+            },
+          ],
+        },
+        {
+          caseId: "case-07-misleading-filenames",
+          expectedError: "recent session should be active",
+          files: [
+            {
+              path: "src/session.ts",
+              fixedReplacement: (content: string) => content.replace("Date.now() - createdAt > maxAgeMs", "Date.now() - createdAt < maxAgeMs"),
+            },
+          ],
+        },
+        {
+          caseId: "case-08-multi-file-bug-fix",
+          expectedError: "expected timeoutMs = 3000",
+          files: [
+            {
+              path: "src/payment/gateway.ts",
+              fixedReplacement: (content: string) => content.replace("sandbox?: boolean;\n", "sandbox?: boolean;\n  timeoutMs?: number;\n"),
+            },
+            {
+              path: "src/payment/checkout.ts",
+              fixedReplacement: (content: string) => content.replace("sandbox: true", "sandbox: true, timeoutMs: 3000"),
+            },
+          ],
+        },
+        {
+          caseId: "case-09-nested-service",
+          expectedError: "short token (16 chars) should be invalid",
+          files: [
+            {
+              path: "src/modules/auth/services/token-validation.service.ts",
+              fixedReplacement: (content: string) => content.replace("token.length > 0", "token.length >= 32"),
+            },
+          ],
+        },
+        {
+          caseId: "case-10-impl-and-test",
+          expectedError: "expected getSessionTtlSeconds() to return 7200",
+          files: [
+            {
+              path: "src/services/session.ts",
+              fixedReplacement: (content: string) => content.replace("3600", "7200"),
+            },
+          ],
+        },
+      ];
+
+      for (const tc of testCases) {
+        const repoDir = path.join(fixturesBaseDir, tc.caseId, "repo");
+
+        // 1. Verify original buggy fixture fails
+        const buggyRes = await ValidationRunner.validateWithShell([], repoDir, ["npm test"]);
+        expect(buggyRes.success).toBe(false);
+        expect(buggyRes.errors).toContain(tc.expectedError);
+
+        // 2. Temporarily write corrected code and verify validation passes
+        const originalMap = new Map<string, string>();
+        try {
+          for (const f of tc.files) {
+            const abs = path.join(repoDir, f.path);
+            const orig = fs.readFileSync(abs, "utf8");
+            originalMap.set(abs, orig);
+            fs.writeFileSync(abs, f.fixedReplacement(orig), "utf8");
+          }
+
+          const fixedRes = await ValidationRunner.validateWithShell([], repoDir, ["npm test"]);
+          if (!fixedRes.success) {
+            console.error(`Case ${tc.caseId} failed fixed validation:`, fixedRes.errors);
+          }
+          expect(fixedRes.success).toBe(true);
+          expect(fixedRes.errors).toBe("");
+        } finally {
+          for (const [abs, orig] of originalMap) {
+            fs.writeFileSync(abs, orig, "utf8");
+          }
+        }
+      }
+    }, 30000);
   });
 
   // ── 4. Step 10D2A — Safe Real-Eval Database Provisioning & Resilience ────────

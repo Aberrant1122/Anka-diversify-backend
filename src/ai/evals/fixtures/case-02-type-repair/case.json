@@ -11,11 +11,6 @@
   "expected": {
     "requiredChangedFiles": ["src/services/user.service.ts"],
     "allowedChangedFiles": ["src/services/user.service.ts", "src/models/user.ts"],
-    "contentRules": [
-      {
-        "path": "src/services/user.service.ts",
-        "contains": ["role: \"user\""]
-      }
-    ]
+    "validationCommands": ["npm test"]
   }
 }
