@@ -1,0 +1,7 @@
+{
+  "name": "case-05-retrieval-challenge",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/token.test.js"
+  }
+}

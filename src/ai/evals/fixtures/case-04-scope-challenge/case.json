@@ -12,6 +12,7 @@
     "requiredChangedFiles": ["src/auth.ts"],
     "allowedChangedFiles": ["src/auth.ts"],
     "forbiddenChangedFiles": ["src/routes.ts", "src/server.ts", "src/db.ts", "src/config.ts"],
+    "validationCommands": ["npm test"],
     "contentRules": [
       {
         "path": "src/auth.ts",

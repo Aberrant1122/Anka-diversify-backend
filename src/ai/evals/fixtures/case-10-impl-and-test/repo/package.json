@@ -1,0 +1,7 @@
+{
+  "name": "case-10-impl-and-test",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/runner.js"
+  }
+}

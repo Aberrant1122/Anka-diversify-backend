@@ -1,0 +1,7 @@
+{
+  "name": "case-08-multi-file-bug-fix",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/payment.test.js"
+  }
+}

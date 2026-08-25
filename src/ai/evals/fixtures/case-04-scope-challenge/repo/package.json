@@ -1,0 +1,7 @@
+{
+  "name": "case-04-scope-challenge",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/auth.test.js"
+  }
+}

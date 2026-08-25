@@ -18,6 +18,7 @@
       "src/session.service.ts",
       "src/user.service.ts"
     ],
+    "validationCommands": ["npm test"],
     "contentRules": [
       {
         "path": "src/token.service.ts",

@@ -1,0 +1,7 @@
+{
+  "name": "case-02-type-repair",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/user.test.js"
+  }
+}

@@ -15,6 +15,7 @@
       "src/admin/AuthService.ts",
       "src/legacy/AuthService.ts"
     ],
+    "validationCommands": ["npm test"],
     "contentRules": [
       {
         "path": "src/auth/AuthService.ts",

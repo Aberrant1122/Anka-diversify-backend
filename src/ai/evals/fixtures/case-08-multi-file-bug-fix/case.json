@@ -24,6 +24,7 @@
       "src/payment/currency.ts",
       "src/user/account.ts"
     ],
+    "validationCommands": ["npm test"],
     "contentRules": [
       {
         "path": "src/payment/gateway.ts",

@@ -1,0 +1,7 @@
+{
+  "name": "case-03-cross-file-feature",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/ratelimit.test.js"
+  }
+}

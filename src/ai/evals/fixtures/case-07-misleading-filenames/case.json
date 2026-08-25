@@ -17,6 +17,7 @@
       "src/token-utils.ts",
       "src/token-history.ts"
     ],
+    "validationCommands": ["npm test"],
     "contentRules": [
       {
         "path": "src/session.ts",

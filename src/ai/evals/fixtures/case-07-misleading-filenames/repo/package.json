@@ -1,0 +1,7 @@
+{
+  "name": "case-07-misleading-filenames",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/session.test.js"
+  }
+}

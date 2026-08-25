@@ -1,0 +1,7 @@
+{
+  "name": "case-06-duplicate-symbol",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/auth.test.js"
+  }
+}

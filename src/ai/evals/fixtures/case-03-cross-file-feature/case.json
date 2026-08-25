@@ -11,6 +11,7 @@
   "expected": {
     "requiredChangedFiles": ["src/config/server.ts", "src/middleware/rateLimiter.ts"],
     "allowedChangedFiles": ["src/config/server.ts", "src/middleware/rateLimiter.ts"],
+    "validationCommands": ["npm test"],
     "contentRules": [
       {
         "path": "src/config/server.ts",

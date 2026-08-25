@@ -1,0 +1,7 @@
+{
+  "name": "case-09-nested-service",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test/nested-token.test.js"
+  }
+}

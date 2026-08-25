@@ -22,6 +22,7 @@
       "src/services/logger.ts",
       "src/config/app.ts"
     ],
+    "validationCommands": ["npm test"],
     "contentRules": [
       {
         "path": "src/services/session.ts",
