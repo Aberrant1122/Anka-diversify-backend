@@ -285,9 +285,120 @@ describe("PatchApplicator — Deterministic Search/Replace Patch Engine", () => 
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.content).toBe("line1\r\nreplaced_value\r\nline3\r\nline4\r\n");
-      // Verify CRLF is preserved exactly
       const crlfCount = (result.content.match(/\r\n/g) || []).length;
       expect(crlfCount).toBe(4);
+    }
+  });
+
+  // ── TEST P: Canonical EOL Matching (LF oldText vs CRLF source) ───────────
+  test("TEST P: LF oldText against semantically identical CRLF source succeeds through canonical EOL matching and preserves CRLF", () => {
+    const originalCrlf = "import React from 'react';\r\n\r\nexport default function Page() {\r\n  return <div>Hello</div>;\r\n}\r\n";
+    const lfEdits: FilePatchEdit[] = [
+      {
+        oldText: "export default function Page() {\n  return <div>Hello</div>;\n}",
+        newText: "export default function Page() {\n  return <div>Hello World</div>;\n}",
+      },
+    ];
+
+    const result = applyPatchToFile(originalCrlf, lfEdits);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.content).toContain("Hello World");
+      expect(result.content).toBe(
+        "import React from 'react';\r\n\r\nexport default function Page() {\r\n  return <div>Hello World</div>;\r\n}\r\n"
+      );
+    }
+  });
+
+  // ── TEST Q: Space difference strictly fails (No whitespace fuzzing) ───────
+  test("TEST Q: Space differences strictly fail with PATCH_TARGET_NOT_FOUND", () => {
+    const original = "const  x  =  1;\n";
+    const edits: FilePatchEdit[] = [
+      { oldText: "const x = 1;", newText: "const x = 2;" },
+    ];
+
+    const result = applyPatchToFile(original, edits);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe("PATCH_TARGET_NOT_FOUND");
+    }
+  });
+
+  // ── TEST R: Quote differences strictly fail ──────────────────────────────
+  test("TEST R: Quote style differences strictly fail with PATCH_TARGET_NOT_FOUND", () => {
+    const original = `import Button from './Button';\n`;
+    const edits: FilePatchEdit[] = [
+      { oldText: `import Button from "./Button";`, newText: `import Button from "./NewButton";` },
+    ];
+
+    const result = applyPatchToFile(original, edits);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe("PATCH_TARGET_NOT_FOUND");
+    }
+  });
+
+  // ── TEST S: Indentation differences strictly fail ─────────────────────────
+  test("TEST S: Indentation differences strictly fail with PATCH_TARGET_NOT_FOUND", () => {
+    const original = "function test() {\n    return 42;\n}\n";
+    const edits: FilePatchEdit[] = [
+      { oldText: "function test() {\n  return 42;\n}", newText: "function test() {\n  return 100;\n}" },
+    ];
+
+    const result = applyPatchToFile(original, edits);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe("PATCH_TARGET_NOT_FOUND");
+    }
+  });
+
+  // ── TEST T: Next App Router Regression Fixture (LF and CRLF) ──────────────
+  test("TEST T: Real Next App Router page.tsx regression fixture resolves with LF and CRLF", () => {
+    const nextAppPageLf = [
+      'import Image from "next/image";',
+      "",
+      "export default function Home() {",
+      "  return (",
+      '    <main className="flex min-h-screen flex-col items-center justify-between p-24">',
+      '      <div className="z-10 w-full max-w-5xl items-center justify-between font-mono text-sm lg:flex">',
+      "        <p>Get started</p>",
+      "      </div>",
+      "    </main>",
+      "  );",
+      "}",
+      "",
+    ].join("\n");
+
+    const nextAppPageCrlf = nextAppPageLf.replace(/\n/g, "\r\n");
+
+    const patchEdit: FilePatchEdit = {
+      oldText: [
+        '      <div className="z-10 w-full max-w-5xl items-center justify-between font-mono text-sm lg:flex">',
+        "        <p>Get started</p>",
+        "      </div>",
+      ].join("\n"),
+      newText: [
+        '      <div className="z-10 w-full max-w-5xl items-center justify-between font-mono text-sm lg:flex">',
+        "        <Calculator />",
+        "      </div>",
+      ].join("\n"),
+    };
+
+    // Test 1: LF source with LF patch
+    const resLf = applyPatchToFile(nextAppPageLf, [patchEdit]);
+    expect(resLf.success).toBe(true);
+    if (resLf.success) {
+      expect(resLf.content).toContain("<Calculator />");
+      expect(resLf.content).not.toContain("\r\n");
+    }
+
+    // Test 2: CRLF source with LF patch (canonical EOL exact match)
+    const resCrlf = applyPatchToFile(nextAppPageCrlf, [patchEdit]);
+    expect(resCrlf.success).toBe(true);
+    if (resCrlf.success) {
+      expect(resCrlf.content).toContain("<Calculator />");
+      expect(resCrlf.content).toContain("\r\n");
     }
   });
 });

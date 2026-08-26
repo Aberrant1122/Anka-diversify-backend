@@ -6,8 +6,8 @@ const prisma = new PrismaClient();
 const SKIP_DIRS = ["node_modules", ".git", ".next", "dist", "build", ".cache", "coverage", "__pycache__", ".venv", "vendor"];
 const SKIP_EXTS = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".map", ".lock", ".bin", ".exe", ".dll", ".so", ".dylib", ".zip", ".tar", ".gz"];
 const KEY_FILE_NAMES = ["README.md", "package.json", "tsconfig.json", "prisma/schema.prisma", ".env.example", "docker-compose.yml", "Makefile", "pyproject.toml", "requirements.txt", "go.mod", "Cargo.toml", "pom.xml"];
-const ENTRY_PATTERN = /^(src\/)?(index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs)$/;
-const MAX_KEY_FILES = 15;
+const ENTRY_PATTERN = /^(src\/)?(index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs)$|^(src\/)?(app|pages)\/.*(page|layout|route|index)\.(ts|js|tsx|jsx)$|^(src\/)?components\/.*\.(ts|js|tsx|jsx)$/;
+const MAX_KEY_FILES = 30;
 const MAX_FILE_CONTENT = 3000; // chars per file
 const MAX_FILE_TREE = 500;
 

@@ -5,6 +5,7 @@ import { ChatRequest } from "../types";
 import { PrismaClient } from "@prisma/client";
 import { decrypt } from "../utils/encryption";
 import { listActiveReservations } from "../services/file-reservation-service";
+import { RepositoryMaterializationService } from "../services/repository-materialization.service";
 
 const prisma = new PrismaClient();
 
@@ -458,6 +459,9 @@ export class AiController {
       if (primaryChanges.length > 0) {
         const result = await ProjectGitHubService.pushChanges(project.githubUrl, primaryChanges, commitMessage, token);
         pushes.push({ repositoryId: null, name: "primary", ...result });
+        if (result?.sha) {
+          await RepositoryMaterializationService.syncManagedCloneToCommit(projectId, result.sha);
+        }
       }
 
       for (const [repositoryId, repoChanges] of secondaryChangesByRepo.entries()) {

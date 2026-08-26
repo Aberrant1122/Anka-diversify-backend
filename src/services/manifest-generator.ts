@@ -1,6 +1,15 @@
 import OpenAI from "openai";
 import { FileManifest, ExecutionContract, SubTask } from "../types";
 import { MANIFEST_GENERATION_PROMPT } from "./prompts";
+import { detectRepositoryArchitecture, RepositoryArchitectureSummary } from "../ai/planning/RepositoryArchitectureDetector";
+
+export interface ManifestPlanningContext {
+  existingFiles?: string[];
+  repoSnapshot?: any;
+  architecture?: RepositoryArchitectureSummary;
+  relevantFiles?: Array<{ path: string; content: string }>;
+  [key: string]: any;
+}
 
 export class ManifestGenerator {
   private openai: OpenAI;
@@ -19,11 +28,12 @@ export class ManifestGenerator {
    */
   public async generateManifest(
     userRequest: string,
-    repositoryContext: { existingFiles?: string[]; repoSnapshot?: any },
+    repositoryContext: ManifestPlanningContext,
     contract: ExecutionContract,
     subTaskScope?: SubTask
   ): Promise<FileManifest> {
     const existingFileList = repositoryContext.existingFiles || [];
+    const arch = repositoryContext.architecture || detectRepositoryArchitecture(existingFileList);
 
     let contextText = `USER REQUEST:\n${userRequest}\n\n`;
     contextText += `EXECUTION CONTRACT CONSTRAINTS:\n`;
@@ -35,6 +45,27 @@ export class ManifestGenerator {
     contextText += `- Allowed Actions: ${contract.allowedActions.join(", ")}\n`;
     contextText += `- Forbidden Actions: ${contract.forbiddenActions.join(", ")}\n\n`;
 
+    contextText += `VERIFIED REPOSITORY ARCHITECTURE:\n`;
+    contextText += `- Framework: ${arch.framework}\n`;
+    contextText += `- Router: ${arch.router}\n`;
+    contextText += `- Existing Entry Points: ${arch.existingEntryPoints.join(", ") || "(none)"}\n`;
+    contextText += `- Planning Guidelines:\n`;
+    for (const g of arch.guidelines) {
+      contextText += `  * ${g}\n`;
+    }
+    if (arch.installedPackages && arch.installedPackages.length > 0) {
+      contextText += `- Installed External Packages: [${arch.installedPackages.join(", ")}]\n`;
+      contextText += `- Dependency Rule: You MUST NOT declare uninstalled external packages in dependencies[]. Only use installed packages or standard Node modules.\n`;
+    }
+    contextText += `\n`;
+
+    if (repositoryContext.relevantFiles && repositoryContext.relevantFiles.length > 0) {
+      contextText += `RELEVANT EXISTING FILES IN REPOSITORY:\n`;
+      for (const f of repositoryContext.relevantFiles.slice(0, 8)) {
+        contextText += `--- ${f.path} ---\n${f.content.slice(0, 1500)}\n\n`;
+      }
+    }
+
     if (subTaskScope) {
       contextText += `SUB-TASK SCOPE:\n`;
       contextText += `- SubTask ID: ${subTaskScope.id}\n`;
@@ -43,10 +74,10 @@ export class ManifestGenerator {
       contextText += `- Dependencies: ${subTaskScope.dependencies.join(", ")}\n\n`;
     }
 
-    contextText += `EXISTING REPOSITORY FILES (SAMPLE):\n`;
-    contextText += existingFileList.slice(0, 50).map((f) => `- ${f}`).join("\n");
-    if (existingFileList.length > 50) {
-      contextText += `\n... and ${existingFileList.length - 50} more files.`;
+    contextText += `ALL EXISTING REPOSITORY FILES:\n`;
+    contextText += existingFileList.slice(0, 60).map((f) => `- ${f}`).join("\n");
+    if (existingFileList.length > 60) {
+      contextText += `\n... and ${existingFileList.length - 60} more files.`;
     }
 
     try {

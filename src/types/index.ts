@@ -469,6 +469,94 @@ export interface AgentResponse {
   verificationChecklist?: ChecklistItem[];
   lifecycleStage?: "Done" | "BuildFailed" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
   pipelineMeasurementText?: string;
+  patchCorrectionAttempted?: boolean;
+  patchCorrectionSucceeded?: boolean;
+  patchCorrectionAttempts?: number;
+  worktreePath?: string;
+  branchName?: string;
+  baseCommitSha?: string;
+  validationCommands?: string[];
+  dependencyPreparationAttempted?: boolean;
+  dependencyPreparationSucceeded?: boolean;
+  packageManager?: string | null;
+  installCommand?: string | null;
+  dependencyPreparationDurationMs?: number;
+  errorType?: string;
+  baselineFailure?: boolean;
+  buildVerificationBlocked?: boolean;
+  packageName?: string;
+  requestedVersion?: string;
+  healthStatus?: string;
+  baselineDependencyInstall?: "PASS" | "FAIL";
+  baselineBuild?: "PASS" | "FAIL";
+  baselineReady?: boolean;
+  buildReady?: boolean;
+  agentIntroduced?: boolean;
+  origin?: "BASELINE" | "CURRENT_TASK";
+  baselineFailures?: Array<{ type: string; origin: "BASELINE"; fileOrPackage?: string; rawErrors?: string }>;
+  taskBuildAttempts?: number;
+  taskRepairCycles?: number;
+  taskFailures?: Array<{ type: string; origin: "CURRENT_TASK"; rawErrors?: string }>;
+  taskVerified?: boolean;
+  repositoryClean?: boolean;
+  baselineDiagnosticCount?: number;
+  targetedBaselineDiagnostics?: BaselineDiagnostic[];
+  resolvedTargetDiagnostics?: BaselineDiagnostic[];
+  remainingBaselineDiagnostics?: BaselineDiagnostic[];
+  newTaskDiagnostics?: BaselineDiagnostic[];
+  securityRiskLevel?: string;
+  securityVulnerabilities?: Array<{ file: string; issue: string; severity: string }>;
+  securityRecommendations?: string[];
+  rootBuildFailure?: RootBuildFailure;
+  currentFailure?: string;
+  validationDetails?: ValidationDetails;
+  modelRepairAttempts?: number;
+  patchesAppliedCount?: number;
+  buildAttemptsCount?: number;
+}
+
+export interface BaselineDiagnostic {
+  errorType: string;
+  filePath?: string;
+  line?: number;
+  column?: number;
+  errorCode?: string;
+  message: string;
+  symbolName?: string;
+  fingerprint: string;
+  origin: "BASELINE" | "CURRENT_TASK";
+  rawTrace?: string;
+}
+
+export interface RootBuildFailure {
+  command?: string;
+  exitCode?: number;
+  errorType?: string;
+  stdout?: string;
+  stderr?: string;
+  filePath?: string;
+  line?: number;
+  column?: number;
+}
+
+export interface ValidationDetails {
+  rootFailure?: RootBuildFailure;
+  currentFailure?: string;
+  repairAttempts?: Array<{
+    attempt: number;
+    proposalResult?: string;
+    patchResult?: string;
+    validationResult?: string;
+  }>;
+  finalFailure?: string;
+  modelRepairAttempts: number;
+  patchesApplied: number;
+  buildAttempts: number;
+  distinctFailuresResolvedCount?: number;
+  noProgressCyclesCount?: number;
+  repeatedProposalsBlockedCount?: number;
+  finalStatus?: "BUILD_CLEAN" | "FAILED" | string;
+  resolvedFailureSequence?: string[];
 }
 
 export interface AgentProgressEvent {
@@ -524,9 +612,12 @@ export interface FileManifest {
 export type ValidationErrorType =
   | "schema"
   | "import_resolution"
+  | "external-dependency-missing"
   | "file_limit"
   | "orphan"
-  | "path_constraint";
+  | "path_constraint"
+  | "router-architecture"
+  | "modify-source-missing";
 
 export interface ValidationError {
   /** Type of validation error */

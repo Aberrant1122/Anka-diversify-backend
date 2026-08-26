@@ -4,7 +4,14 @@ import os from "os";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { AgentPipeline } from "../ai/orchestration/AgentPipeline";
-import { AgentProgressEvent, AgentResponse, ChatRequest } from "../types";
+import { AgentFileChange, AgentProgressEvent, AgentResponse, ChatRequest, BaselineDiagnostic } from "../types";
+import { WorktreeDependencyService, DependencyPreparationResult } from "./worktree-dependency.service";
+import { DependencyRepairService, ALLOWED_DEPENDENCY_FILES } from "./dependency-repair.service";
+import { ValidationPlanner } from "../ai/validation/ValidationPlanner";
+import { ValidationRunner } from "../ai/validation/ValidationRunner";
+import { ErrorClassifier } from "../ai/validation/ErrorClassifier";
+import { BaselineRepairCoordinator } from "./baseline-repair.coordinator";
+import { BaselineDeltaVerifier, BaselineDeltaResult } from "./baseline-delta.verifier";
 
 const execAsync = promisify(exec);
 
@@ -74,6 +81,18 @@ export class GitWorktreeService {
       return path.resolve(root);
     } catch (err: any) {
       throw new Error(`NOT_A_GIT_REPOSITORY: Path "${resolvedPath}" is not a valid Git repository: ${err?.message || err}`);
+    }
+  }
+
+  /**
+   * Tests whether a local directory belongs to a Git repository using Git itself.
+   */
+  static async isGitRepository(directoryPath: string): Promise<boolean> {
+    try {
+      await this.resolveRepositoryRoot(directoryPath);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -249,6 +268,245 @@ export class GitWorktreeService {
     const { userId, projectId, repositoryPath, runId, request, onProgress } = options;
 
     const prepared = await this.prepareRepositoryRun({ repositoryPath, runId });
+    console.log(`[ANKA_EXEC] worktree=${prepared.worktreePath}`);
+
+    // 2. Prepare dependencies inside isolated worktree
+    const depPrep = await WorktreeDependencyService.prepareDependencies(prepared.worktreePath);
+    if (!depPrep.success) {
+      const errorType = depPrep.errorType || "INFRASTRUCTURE";
+      const isRepairableDep =
+        errorType === "INVALID_PACKAGE_DEPENDENCY" ||
+        errorType === "PEER_DEPENDENCY_CONFLICT" ||
+        errorType === "LOCKFILE_OUT_OF_SYNC";
+
+      const isDepRepairIntent = DependencyRepairService.isDependencyRepairIntent(request.message || "");
+
+      if (isRepairableDep && isDepRepairIntent) {
+        console.log(`[DEP_REPAIR] Entering constrained dependency repair mode. errorType=${errorType}`);
+        const repairResult = await DependencyRepairService.runConstrainedDependencyRepair({
+          worktreePath: prepared.worktreePath,
+          depPrep,
+          userMessage: request.message || "",
+        });
+
+        if (repairResult.success) {
+          const diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
+
+          // Verify allowed files constraint strictly: ONLY allowed dependency files
+          const illegalFiles = diffInfo.changedFiles.filter((f) => !ALLOWED_DEPENDENCY_FILES.has(path.basename(f)));
+          if (illegalFiles.length > 0) {
+            await this.rollbackWorktree(prepared.worktreePath, prepared.baseCommitSha);
+            const failureExplanation = `[DEPENDENCY_REPAIR_VIOLATION] Dependency repair mode modified forbidden non-dependency files: ${illegalFiles.join(", ")}`;
+            return {
+              runId,
+              branchName: prepared.branchName,
+              baseCommitSha: prepared.baseCommitSha,
+              worktreePath: prepared.worktreePath,
+              changedFiles: [],
+              diffSummary: "No file differences (dependency repair violated allowed scope).",
+              validationPassed: false,
+              validationCommands: [depPrep.installCommand || "npm ci"],
+              validationErrors: failureExplanation,
+              agentResponse: {
+                explanation: failureExplanation,
+                changes: [],
+                commitMessage: "",
+                sessionId: request.sessionId || "",
+                buildVerified: false,
+                healthStatus: "BASELINE_REPOSITORY_UNHEALTHY",
+                errorType: "SCOPE_VIOLATION",
+              },
+            };
+          }
+
+          console.log(`[DEP_REPAIR] Dependency repair succeeded. baselineHealthy=true`);
+          return {
+            runId,
+            branchName: prepared.branchName,
+            baseCommitSha: prepared.baseCommitSha,
+            worktreePath: prepared.worktreePath,
+            changedFiles: diffInfo.changedFiles,
+            diffSummary: diffInfo.diffSummary,
+            validationPassed: true,
+            validationCommands: [depPrep.installCommand || "npm ci --no-audit --no-fund"],
+            agentResponse: {
+              explanation: repairResult.explanation,
+              changes: repairResult.changes,
+              commitMessage: repairResult.commitMessage || "fix(deps): repair invalid baseline dependencies",
+              sessionId: request.sessionId || "",
+              buildVerified: true,
+              dependencyPreparationAttempted: true,
+              dependencyPreparationSucceeded: true,
+              packageManager: depPrep.packageManager,
+              installCommand: depPrep.installCommand,
+              dependencyPreparationDurationMs: repairResult.durationMs,
+              worktreePath: prepared.worktreePath,
+              branchName: prepared.branchName,
+              baseCommitSha: prepared.baseCommitSha,
+              baselineFailure: false,
+              buildVerificationBlocked: false,
+              healthStatus: "HEALTHY",
+            },
+          };
+        }
+      }
+
+      // Default: Rollback and return BASELINE_REPOSITORY_UNHEALTHY for unrelated source tasks or failed repair
+      await this.rollbackWorktree(prepared.worktreePath, prepared.baseCommitSha);
+
+      const isInvalidPkg = errorType === "INVALID_PACKAGE_DEPENDENCY";
+      let failureExplanation = "";
+      if (isInvalidPkg) {
+        failureExplanation = `[BASELINE_REPOSITORY_UNHEALTHY] [INVALID_PACKAGE_DEPENDENCY] Baseline dependency preparation failed in repository: ${depPrep.error}${depPrep.packageName ? ` (Package: ${depPrep.packageName}, Version: ${depPrep.requestedVersion || "unknown"})` : ""}`;
+      } else {
+        failureExplanation = `[BASELINE_REPOSITORY_UNHEALTHY] [${errorType}] Baseline dependency preparation failed in repository: ${depPrep.error}`;
+      }
+
+      console.log(`[REPO_HEALTH] baselineHealthy=false`);
+      console.log(`[REPO_HEALTH] errorType=${errorType}`);
+      if (depPrep.packageName) console.log(`[REPO_HEALTH] packageName=${depPrep.packageName}`);
+      if (depPrep.requestedVersion) console.log(`[REPO_HEALTH] requestedVersion=${depPrep.requestedVersion}`);
+      console.log(`[REPO_HEALTH] baselineFailure=true`);
+      console.log(`[REPO_HEALTH] buildVerificationBlocked=true`);
+
+      return {
+        runId,
+        branchName: prepared.branchName,
+        baseCommitSha: prepared.baseCommitSha,
+        worktreePath: prepared.worktreePath,
+        changedFiles: [],
+        diffSummary: `No file differences (baseline repository dependency preparation failed: ${errorType}).`,
+        validationPassed: false,
+        validationCommands: depPrep.installCommand ? [depPrep.installCommand] : [],
+        validationErrors: failureExplanation,
+        agentResponse: {
+          explanation: failureExplanation,
+          changes: [],
+          commitMessage: "",
+          sessionId: request.sessionId || "",
+          buildVerified: false,
+          dependencyPreparationAttempted: depPrep.attempted,
+          dependencyPreparationSucceeded: false,
+          packageManager: depPrep.packageManager,
+          installCommand: depPrep.installCommand,
+          dependencyPreparationDurationMs: depPrep.durationMs,
+          worktreePath: prepared.worktreePath,
+          branchName: prepared.branchName,
+          baseCommitSha: prepared.baseCommitSha,
+          errorType,
+          baselineFailure: true,
+          buildVerificationBlocked: true,
+          packageName: depPrep.packageName,
+          requestedVersion: depPrep.requestedVersion,
+          healthStatus: "BASELINE_REPOSITORY_UNHEALTHY",
+        },
+      };
+    }
+
+    // 3. Verify untouched repository baseline build before running AgentPipeline
+    const baselineCommands = ValidationPlanner.detectValidationCommands(prepared.worktreePath);
+    let baselineBuildPassed = true;
+    let baselineBuildError = "";
+    let baselineRepairedChanges: AgentFileChange[] = [];
+    let baselineDiagnostics: BaselineDiagnostic[] = [];
+    let targetedBaselineDiagnostics: BaselineDiagnostic[] = [];
+    let isBaselineDeltaTask = false;
+
+    if (baselineCommands.length > 0) {
+      console.log(`[BASELINE_BUILD] Verifying untouched baseline build with: ${baselineCommands.join(", ")}`);
+      const initialBuild = await ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands);
+      if (!initialBuild.success) {
+        baselineBuildPassed = false;
+        baselineBuildError = initialBuild.errors;
+
+        const classified = ErrorClassifier.classify(initialBuild.errors);
+        classified.origin = "BASELINE";
+
+        console.warn(`[BASELINE_BUILD] Untouched baseline build failed (origin=BASELINE, type=${classified.type}). Attempting baseline repair coordinator...`);
+
+        // Route to BaselineRepairCoordinator ONLY if explicit dependency repair intent
+        const isExplicitDepRepair = DependencyRepairService.isDependencyRepairIntent(request.message || "");
+        if (classified.type === "MISSING_DEP" && isExplicitDepRepair) {
+          const repairRes = await BaselineRepairCoordinator.repairBaselineBuildFailure(
+            prepared.worktreePath,
+            baselineCommands,
+            initialBuild.errors,
+            depPrep.packageManager
+          );
+
+          if (repairRes.success && repairRes.baselineReady) {
+            baselineBuildPassed = true;
+            baselineBuildError = "";
+            baselineRepairedChanges = repairRes.changes;
+            console.log(`[BASELINE_BUILD] Baseline repair succeeded. baselineReady=true`);
+          }
+        }
+
+        if (!baselineBuildPassed) {
+          baselineDiagnostics = BaselineDeltaVerifier.extractDiagnostics(baselineBuildError, "BASELINE");
+          const taskMatch = BaselineDeltaVerifier.matchUserTaskToBaseline(request.message || "", baselineDiagnostics);
+
+          if (taskMatch.isMatch) {
+            isBaselineDeltaTask = true;
+            targetedBaselineDiagnostics = taskMatch.targetedDiagnostics;
+            console.log(`[BASELINE_DELTA] User request targets ${taskMatch.targetedDiagnostics.length} pre-existing baseline diagnostic(s). Allowing constrained task repair.`);
+          } else {
+            await this.rollbackWorktree(prepared.worktreePath, prepared.baseCommitSha);
+            const failureExplanation = `[BASELINE_REPOSITORY_UNHEALTHY] [${classified.type}] Untouched baseline repository build failed before code generation: ${baselineBuildError}`;
+
+            console.log(`[REPO_HEALTH] baselineHealthy=false`);
+            console.log(`[REPO_HEALTH] buildReady=false`);
+            console.log(`[REPO_HEALTH] baselineReady=false`);
+            console.log(`[REPO_HEALTH] origin=BASELINE`);
+            console.log(`[REPO_HEALTH] errorType=${classified.type}`);
+            console.log(`[REPO_HEALTH] baselineFailure=true`);
+            console.log(`[REPO_HEALTH] agentIntroduced=false`);
+
+            return {
+              runId,
+              branchName: prepared.branchName,
+              baseCommitSha: prepared.baseCommitSha,
+              worktreePath: prepared.worktreePath,
+              changedFiles: [],
+              diffSummary: `No file differences (baseline repository build failed: ${classified.type}).`,
+              validationPassed: false,
+              validationCommands: baselineCommands,
+              validationErrors: failureExplanation,
+              agentResponse: {
+                explanation: failureExplanation,
+                changes: [],
+                commitMessage: "",
+                sessionId: request.sessionId || "",
+                buildVerified: false,
+                healthStatus: "BASELINE_REPOSITORY_UNHEALTHY",
+                errorType: classified.type,
+                origin: "BASELINE",
+                baselineFailure: true,
+                agentIntroduced: false,
+                buildReady: false,
+                baselineDependencyInstall: "PASS",
+                baselineBuild: "FAIL",
+                baselineReady: false,
+                baselineFailures: [
+                  {
+                    type: classified.type,
+                    origin: "BASELINE",
+                    rawErrors: baselineBuildError,
+                  },
+                ],
+              },
+            };
+          }
+        }
+      }
+    }
+
+    console.log(`[REPO_HEALTH] baselineHealthy=${baselineBuildPassed}`);
+    console.log(`[REPO_HEALTH] dependenciesReady=true`);
+    console.log(`[REPO_HEALTH] buildReady=${baselineBuildPassed}`);
+    console.log(`[REPO_HEALTH] baselineReady=${baselineBuildPassed}`);
+    console.log(`[REPO_HEALTH] baselineDependencyInstall=PASS`);
+    console.log(`[REPO_HEALTH] baselineBuild=${baselineBuildPassed ? "PASS" : "FAIL"}`);
 
     let agentResponse: AgentResponse;
     let executionError: any = null;
@@ -259,7 +517,12 @@ export class GitWorktreeService {
         projectId,
         request,
         onProgress,
-        { effectiveLocalPath: prepared.worktreePath }
+        {
+          effectiveLocalPath: prepared.worktreePath,
+          baselineDiagnostics,
+          targetedBaselineDiagnostics,
+          isBaselineDeltaTask,
+        }
       );
     } catch (err: any) {
       executionError = err;
@@ -267,8 +530,51 @@ export class GitWorktreeService {
       throw err;
     }
 
+    if (prepared.worktreePath && agentResponse.changes && agentResponse.changes.length > 0) {
+      const allowedPaths = new Set(agentResponse.changes.map((c) => c.path.replace(/\\/g, "/")));
+      if (!allowedPaths.has("package.json")) {
+        try {
+          await execAsync("git checkout HEAD -- package.json package-lock.json", { cwd: prepared.worktreePath });
+        } catch {}
+      }
+    }
+
     const diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
-    const validationPassed = Boolean(agentResponse.buildVerified !== false && !executionError);
+
+    let validationPassed = false;
+    let deltaResult: BaselineDeltaResult | null = null;
+
+    if (baselineCommands.length > 0 && isBaselineDeltaTask) {
+      if (agentResponse.taskVerified) {
+        validationPassed = true;
+        agentResponse.buildVerified = true;
+        agentResponse.healthStatus = agentResponse.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY";
+      } else {
+        const postBuild = await ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands);
+        const postChangeDiagnostics = BaselineDeltaVerifier.extractDiagnostics(postBuild.errors, "CURRENT_TASK");
+        deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
+          baselineDiagnostics,
+          postChangeDiagnostics,
+          targetedBaselineDiagnostics
+        );
+
+        if (deltaResult.taskVerified) {
+          validationPassed = true;
+          agentResponse.buildVerified = true;
+          agentResponse.taskVerified = true;
+          agentResponse.repositoryClean = deltaResult.repositoryClean;
+          agentResponse.healthStatus = deltaResult.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY";
+          if (!deltaResult.repositoryClean) {
+            agentResponse.explanation = BaselineDeltaVerifier.formatDeltaExplanation(deltaResult);
+          }
+        } else {
+          validationPassed = false;
+          agentResponse.buildVerified = false;
+        }
+      }
+    } else {
+      validationPassed = Boolean(agentResponse.buildVerified !== false && !executionError);
+    }
 
     if (!validationPassed) {
       await this.rollbackWorktree(prepared.worktreePath, prepared.baseCommitSha);
@@ -282,9 +588,34 @@ export class GitWorktreeService {
       changedFiles: diffInfo.changedFiles,
       diffSummary: diffInfo.diffSummary,
       validationPassed,
-      validationCommands: (agentResponse as any).validationCommands || [],
+      validationCommands: agentResponse.validationCommands || baselineCommands,
       validationErrors: !validationPassed ? agentResponse.explanation : undefined,
-      agentResponse,
+      agentResponse: {
+        ...agentResponse,
+        changes: [...baselineRepairedChanges, ...(agentResponse.changes || [])],
+        dependencyPreparationAttempted: depPrep.attempted,
+        dependencyPreparationSucceeded: depPrep.success,
+        packageManager: depPrep.packageManager,
+        installCommand: depPrep.installCommand,
+        dependencyPreparationDurationMs: depPrep.durationMs,
+        worktreePath: prepared.worktreePath,
+        branchName: prepared.branchName,
+        baseCommitSha: prepared.baseCommitSha,
+        healthStatus: agentResponse.healthStatus || (validationPassed ? "HEALTHY" : "BASELINE_REPOSITORY_UNHEALTHY"),
+        baselineDependencyInstall: "PASS",
+        baselineBuild: baselineBuildPassed ? "PASS" : "FAIL",
+        baselineReady: baselineBuildPassed,
+        buildReady: baselineBuildPassed,
+        origin: validationPassed ? (deltaResult && !deltaResult.repositoryClean ? "BASELINE" : undefined) : "CURRENT_TASK",
+        agentIntroduced: Boolean(!validationPassed && (deltaResult ? deltaResult.newTaskDiagnostics.length > 0 : !agentResponse.buildVerified)),
+        taskVerified: deltaResult ? deltaResult.taskVerified : (agentResponse.taskVerified ?? validationPassed),
+        repositoryClean: deltaResult ? deltaResult.repositoryClean : (agentResponse.repositoryClean ?? validationPassed),
+        baselineDiagnosticCount: deltaResult?.baselineDiagnosticCount ?? agentResponse.baselineDiagnosticCount,
+        targetedBaselineDiagnostics: deltaResult?.targetedBaselineDiagnostics ?? agentResponse.targetedBaselineDiagnostics,
+        resolvedTargetDiagnostics: deltaResult?.resolvedTargetDiagnostics ?? agentResponse.resolvedTargetDiagnostics,
+        remainingBaselineDiagnostics: deltaResult?.remainingBaselineDiagnostics ?? agentResponse.remainingBaselineDiagnostics,
+        newTaskDiagnostics: deltaResult?.newTaskDiagnostics ?? agentResponse.newTaskDiagnostics,
+      },
     };
   }
 }

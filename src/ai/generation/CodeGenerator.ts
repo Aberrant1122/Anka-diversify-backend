@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { getOpenAI } from "../shared/utils";
 import { AgentFileChange, ExecutionContract, RoadmapStep } from "../shared/types";
 import { FileManifest } from "../../types";
@@ -6,6 +7,7 @@ import {
   resolveGenerationProposals,
   ResolutionResult,
 } from "./GenerationProposalResolver";
+import { PatchCorrectionEngine, PatchCorrectionTelemetry } from "./PatchCorrectionEngine";
 import { RoadmapGenerator } from "./RoadmapGenerator";
 import { ValidationPlanner } from "../validation/ValidationPlanner";
 import {
@@ -15,6 +17,9 @@ import {
 } from "../prompts/coding";
 import { STANDALONE_HTML_CSS_JS_PROMPT } from "../prompts/standalone";
 import { buildContractGuardrailSection } from "../prompts/validation";
+import { SecurityPolicy } from "../security/SecurityPolicy";
+import { ImportValidator } from "../validation/ImportValidator";
+import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
 
 /**
  * Builds a deterministic, concise prompt section instructing the LLM to stay strictly within the approved FileManifest.
@@ -57,14 +62,14 @@ For DELETE actions — output deletion marker:
 { "path": "...", "action": "delete", "isDeleted": true, "content": "", "description": "..." }
 
 For MODIFY actions — output ONLY targeted search/replace edits:
-{ "path": "...", "action": "modify", "description": "...", "edits": [ { "oldText": "exact existing source text", "newText": "replacement source text" } ] }
+{ "path": "...", "action": "modify", "description": "...", "edits": [ { "oldText": "exact existing source text copied verbatim", "newText": "replacement source text" } ] }
 
 STRICT MODIFY RULES:
 1. Do NOT output complete file content for modify. Use edits[] only.
-2. Each oldText must be copied EXACTLY from the provided full file context. Exact byte match required.
-3. oldText must contain enough surrounding source context to identify exactly one location in the file.
-4. Preserve indentation and line endings exactly in oldText.
-5. Prefer the smallest safe edit that achieves the change.
+2. Each oldText must be copied EXACTLY from the provided full file context / FULL AUTHORITATIVE CONTENT block. Exact byte match required.
+3. Do NOT paraphrase, reformat, change quotes, or alter whitespace when selecting oldText.
+4. Select the smallest unique, structurally meaningful block (e.g. specific JSX element, function, or import statement) needed for the edit.
+5. oldText must contain enough surrounding source context to identify exactly one location in the file (no ambiguous duplicates).
 6. Do NOT use line numbers.
 7. Do NOT use unified diff syntax.
 8. Do NOT use ellipses, placeholders, or comments like "...", "// existing code", or "unchanged code here" inside oldText or newText.
@@ -161,6 +166,8 @@ Respond ONLY with valid JSON:
     systemPrompt: string,
     contract?: ExecutionContract,
     approvedManifest?: FileManifest | null,
+    authoritativeModifySources?: Record<string, { path: string; content: string; sha256: string }>,
+    mergedSourceMap?: Record<string, string>,
   ): Promise<{
     roadmap: RoadmapStep[];
     changes: AgentFileChange[];
@@ -193,14 +200,22 @@ Respond ONLY with valid JSON:
       } catch {}
     }
 
-    const contextContent = Object.entries(optimizedContext.fileContext)
-      .map(([p, c]) => `=== FULL FILE: ${p} ===\n${c}`)
-      .concat(
-        Object.entries(optimizedContext.skeletonContext).map(
-          ([p, c]) => `=== SKELETON DEPENDENCY: ${p} ===\n${c}`,
-        ),
-      )
-      .join("\n\n");
+    const modifySourceBlocks = Object.entries(authoritativeModifySources || {}).map(([p, s]) => {
+      return `═══════════════════════════════════════════════════\nAUTHORIZED MODIFY SOURCE\nFILE: ${p}\nSHA256: ${s.sha256}\nFULL AUTHORITATIVE CONTENT:\n═══════════════════════════════════════════════════\n${s.content}`;
+    });
+
+    const supportingBlocks = Object.entries(optimizedContext?.fileContext || {})
+      .filter(([p]) => !authoritativeModifySources || !authoritativeModifySources[p])
+      .map(([p, c]) => {
+        const fileSha = crypto.createHash("sha256").update(String(c)).digest("hex");
+        return `═══════════════════════════════════════════════════\nSUPPORTING REPOSITORY CONTEXT\nFILE: ${p}\nSHA256: ${fileSha}\nFULL CONTENT:\n═══════════════════════════════════════════════════\n${c}`;
+      });
+
+    const skeletonBlocks = Object.entries(optimizedContext?.skeletonContext || {}).map(
+      ([p, c]) => `=== SKELETON DEPENDENCY: ${p} ===\n${c}`
+    );
+
+    const contextContent = [...modifySourceBlocks, ...supportingBlocks, ...skeletonBlocks].join("\n\n");
 
     let multiFileInstruction = "";
     if (isDeleteTask) {
@@ -216,11 +231,72 @@ Respond ONLY with valid JSON:
       }
     }
 
+    const effectiveResolutionSourceMap: Record<string, string> =
+      mergedSourceMap ||
+      (authoritativeModifySources
+        ? Object.fromEntries(Object.entries(authoritativeModifySources).map(([p, s]) => [p, s.content]))
+        : null) ||
+      optimizedContext?.fileContext ||
+      {};
+
+    const isAppRouter =
+      Object.keys(effectiveResolutionSourceMap).some((p) => p.startsWith("app/") || p.includes("/app/")) ||
+      Boolean(approvedManifest?.files && approvedManifest.files.some((f) => f.path.startsWith("app/") || f.path.includes("/app/")));
+
+    let installedPackages: string[] = [];
+    let hasTailwind = false;
+    const pkgJsonRaw =
+      effectiveResolutionSourceMap["package.json"] ||
+      Object.entries(effectiveResolutionSourceMap).find(([p]) => p.endsWith("package.json"))?.[1];
+
+    if (pkgJsonRaw) {
+      const arch = detectRepositoryArchitecture(Object.keys(effectiveResolutionSourceMap), pkgJsonRaw);
+      installedPackages = arch.installedPackages;
+      hasTailwind = arch.hasTailwind;
+    }
+
+    const stylingSection = !hasTailwind && !isStandaloneWeb
+      ? `\n\n══════════════════════════════════════════════════════════
+CSS & STYLING ARCHITECTURE RULES
+══════════════════════════════════════════════════════════
+1. Tailwind CSS is NOT installed in this repository.
+2. Do NOT write Tailwind utility classes as raw CSS selectors (e.g. NEVER write '.dark:bg-gray-900', '.text-sm', or '.flex' inside .css files).
+3. In stylesheets (.css / .module.css / global.css), use standard, valid CSS class names (e.g. .calculator-container, .display-screen, .action-btn).
+4. For dark mode, use valid CSS selectors like '.dark .calculator-container' or '@media (prefers-color-scheme: dark)'.
+══════════════════════════════════════════════════════════`
+      : "";
+
+    const packagesSection = installedPackages.length > 0
+      ? `\n\n══════════════════════════════════════════════════════════
+AVAILABLE EXTERNAL PACKAGES (from repository package.json)
+══════════════════════════════════════════════════════════
+${installedPackages.map((p) => `• ${p}`).join("\n")}
+
+CRITICAL IMPORT MANDATE:
+You MUST NOT import external npm packages outside this verified list.
+Standard Node.js built-in modules (path, fs, crypto, etc.) are allowed.
+Prefer native JS/framework functionality rather than inventing a dependency.
+══════════════════════════════════════════════════════════`
+      : "";
+
+    const appRouterSection = isAppRouter
+      ? `\n\n══════════════════════════════════════════════════════════
+NEXT.JS APP ROUTER & CLIENT COMPONENT RULES
+══════════════════════════════════════════════════════════
+1. This project uses Next.js App Router (app/*).
+2. CLIENT COMPONENTS: Any component file (.tsx/.jsx) that uses React interactive hooks (useState, useEffect, useReducer, useRef interactively), browser event handlers (onClick, onChange, onSubmit), or browser APIs (window, document, localStorage) MUST start with:
+"use client";
+at line 1 before any imports.
+3. SERVER COMPONENTS: Components that do not use client hooks or events should remain Server Components (do NOT add "use client" unnecessarily).
+4. SECURITY: Never evaluate raw user input with eval(), new Function(), or dynamic execution APIs.
+══════════════════════════════════════════════════════════`
+      : "";
+
     const manifestSection = buildApprovedFilePlanSection(approvedManifest);
     const contractGuardrail = contract ? buildContractGuardrailSection(contract) : "";
     const effectiveCodingPrompt = isStandaloneWeb
       ? `${STANDALONE_HTML_CSS_JS_PROMPT}${contractGuardrail}${manifestSection}`
-      : `${systemPrompt}\n\n${CODING_AGENT_PROMPT}\n\n${LAYER_CONSTRAINT_PROMPT}${contractGuardrail}${manifestSection}`;
+      : `${systemPrompt}\n\n${CODING_AGENT_PROMPT}\n\n${LAYER_CONSTRAINT_PROMPT}${packagesSection}${stylingSection}${appRouterSection}${contractGuardrail}${manifestSection}`;
 
     const hasManifest = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
     const jsonFormatReminder = hasManifest
@@ -282,15 +358,101 @@ Respond ONLY with valid JSON:
         }
       });
 
-      const resolution: ResolutionResult = resolveGenerationProposals(
+      let resolution: ResolutionResult = resolveGenerationProposals(
         proposals,
-        optimizedContext.fileContext,
+        effectiveResolutionSourceMap,
       );
 
+      const patchTelemetry: PatchCorrectionTelemetry = {
+        patchCorrectionAttempted: false,
+        patchCorrectionSucceeded: false,
+        patchCorrectionAttempts: 0,
+      };
+
       if (!resolution.success) {
-        throw new Error(
-          `[PATCH_RESOLUTION_FAILED] ${resolution.error.code}: ${resolution.error.message}`,
-        );
+        const err = resolution.error;
+        const isEligibleForCorrection =
+          (err.code === "PATCH_TARGET_NOT_FOUND" || err.code === "AMBIGUOUS_PATCH_TARGET") &&
+          typeof err.proposalIndex === "number" &&
+          proposals[err.proposalIndex]?.action === "modify";
+
+        if (isEligibleForCorrection) {
+          const failedProposal = proposals[err.proposalIndex] as {
+            path: string;
+            action: "modify";
+            edits: any[];
+            description: string;
+          };
+
+          const normalizedPath = failedProposal.path.replace(/\\/g, "/");
+          let originalContent: string | undefined = effectiveResolutionSourceMap[normalizedPath];
+
+          if (originalContent === undefined) {
+            for (const [cp, cc] of Object.entries(effectiveResolutionSourceMap)) {
+              if (cp.replace(/\\/g, "/") === normalizedPath) {
+                originalContent = typeof cc === "string" ? cc : String(cc || "");
+                break;
+              }
+            }
+          }
+
+          if (originalContent !== undefined) {
+            patchTelemetry.patchCorrectionAttempted = true;
+            patchTelemetry.patchCorrectionAttempts = 1;
+            patchTelemetry.failedFilePath = failedProposal.path;
+            patchTelemetry.errorCode = err.code;
+
+            console.log(
+              `[CodeGenerator] Patch resolution failed with [${err.code}] on "${failedProposal.path}". Triggering bounded exact patch correction (Attempt 1/1)...`
+            );
+
+            const correction = await PatchCorrectionEngine.correctPatch({
+              filePath: failedProposal.path,
+              currentContent: originalContent,
+              userMessage: message,
+              manifestAction: "modify",
+              failedEdits: failedProposal.edits,
+              errorCode: err.code as "PATCH_TARGET_NOT_FOUND" | "AMBIGUOUS_PATCH_TARGET",
+              errorMessage: err.message,
+            });
+
+            if (correction.succeeded && correction.correctedEdits && correction.correctedEdits.length > 0) {
+              patchTelemetry.patchCorrectionSucceeded = true;
+              console.log(
+                `[CodeGenerator] Bounded exact patch correction succeeded for "${failedProposal.path}" with ${correction.correctedEdits.length} edit(s). Re-verifying exact resolution...`
+              );
+
+              const correctedProposals = proposals.map((p, idx) => {
+                if (idx === err.proposalIndex) {
+                  return {
+                    ...p,
+                    edits: correction.correctedEdits!,
+                  };
+                }
+                return p;
+              });
+
+              resolution = resolveGenerationProposals(
+                correctedProposals,
+                effectiveResolutionSourceMap,
+              );
+            } else {
+              console.warn(
+                `[CodeGenerator] Bounded exact patch correction failed for "${failedProposal.path}": ${correction.error || "Unknown error"}`
+              );
+            }
+          }
+        }
+
+        if (!resolution.success) {
+          throw new Error(
+            `[PATCH_RESOLUTION_FAILED] ${resolution.error.code}: ${resolution.error.message}${
+              patchTelemetry.patchCorrectionAttempted
+                ? ` (Bounded correction attempt 1/1 failed)`
+                : ""
+            }`,
+          );
+        }
       }
 
       changes = resolution.changes;
@@ -325,8 +487,117 @@ Respond ONLY with valid JSON:
       }
     }
 
-    // If standalone web mode is active, ensure we do not inject hardcoded templates.
-    // We strictly rely on AI-generated file changes based on repo analysis and user instructions.
+    // ── Deterministic Precheck 1: Dynamic Execution Security Precheck (SecurityPolicy) ──
+    const baselineMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(optimizedContext.fileContext)) {
+      if (typeof v === "string") baselineMap[k] = v;
+    }
+
+    const secCheck = SecurityPolicy.checkChanges(changes, baselineMap);
+    if (!secCheck.safe) {
+      for (const violation of secCheck.violations) {
+        const change = changes.find((c) => c.path === violation.path);
+        if (!change) continue;
+
+        console.warn(`[CodeGenerator] Detected unsafe dynamic execution in "${change.path}". Triggering bounded secure correction...`);
+
+        try {
+          const secCorrection = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+              {
+                role: "system",
+                content: `You are a Secure Code Repair Assistant. The proposed code introduces unsafe dynamic code execution (${violation.message}) which is strictly forbidden. Rewrite the code using explicit allowlisted operators (+, -, *, /, %, sqrt, power, sin, cos, tan, log, ln, pi, e) or a safe deterministic parser without eval, new Function, or mathjs.evaluate. Respond ONLY with valid JSON: { "content": "..." }`,
+              },
+              {
+                role: "user",
+                content: `FILE: ${change.path}\nPROPOSED CODE:\n${change.content}\nORIGINAL REQUEST: ${message}`,
+              },
+            ],
+            temperature: 0.0,
+            response_format: { type: "json_object" },
+          });
+
+          const parsedSec = JSON.parse(secCorrection.choices[0]?.message?.content || "{}");
+          if (typeof parsedSec.content === "string" && parsedSec.content.length > 0) {
+            const recheck = SecurityPolicy.checkCode(parsedSec.content, change.path);
+            if (recheck.safe) {
+              change.content = parsedSec.content;
+            } else {
+              throw new Error(`[UNSAFE_DYNAMIC_CODE_EXECUTION] Generated code in "${change.path}" violated security policy: ${recheck.violations.map((v) => v.message).join("; ")}`);
+            }
+          } else {
+            throw new Error(`[UNSAFE_DYNAMIC_CODE_EXECUTION] Generated code in "${change.path}" violated security policy: ${violation.message}`);
+          }
+        } catch (secErr: any) {
+          throw new Error(secErr.message || `[UNSAFE_DYNAMIC_CODE_EXECUTION] Generated code in "${change.path}" violated security policy.`);
+        }
+      }
+    }
+
+    // ── Deterministic Precheck 2: Next.js Client Component Directive Precheck ──
+    if (isAppRouter) {
+      for (const change of changes) {
+        if (change.action === "delete" || change.isDeleted) continue;
+        if (!/\.(tsx|jsx|ts|js)$/.test(change.path)) continue;
+
+        const usesClientHooks =
+          /\buse(State|Effect|Reducer|LayoutEffect|ImperativeHandle|SyncExternalStore)\s*(<|\()/.test(change.content) ||
+          /\bfrom\s*["']react["']\b.*useState/.test(change.content);
+
+        const hasClientDirective = /^(?:\s*\/\/[^\n]*\n|\s*\/\*[\s\S]*?\*\/\s*)*['"]use client['"]/m.test(change.content);
+
+        if (usesClientHooks && !hasClientDirective) {
+          console.log(`[CodeGenerator] Auto-adding "use client" directive to "${change.path}" (uses client React hooks in App Router).`);
+          change.content = `"use client";\n\n` + change.content;
+        }
+      }
+    }
+
+    // ── Deterministic Precheck 3: Undeclared External Dependency Precheck (ImportValidator) ──
+    if (installedPackages.length > 0) {
+      const importCheck = ImportValidator.validateChangesImports(changes, installedPackages);
+      if (!importCheck.valid) {
+        for (const violation of importCheck.errors) {
+          const change = changes.find((c) => c.path === violation.path);
+          if (!change) continue;
+
+          console.warn(`[CodeGenerator] Detected undeclared external dependency in "${change.path}". Triggering bounded dependency correction...`);
+
+          try {
+            const depCorrection = await openai.chat.completions.create({
+              model: "gpt-4o",
+              messages: [
+                {
+                  role: "system",
+                  content: `You are a Dependency-Safe Code Repair Assistant. The proposed code imported uninstalled external package "${violation.packageRoot}". You are STRICTLY FORBIDDEN from importing packages outside the verified installed packages: [${installedPackages.join(", ")}]. Standard Node.js built-in modules are allowed. Rewrite the code using ONLY available packages or native JavaScript/TypeScript standard APIs. Respond ONLY with valid JSON: { "content": "..." }`,
+                },
+                {
+                  role: "user",
+                  content: `FILE: ${change.path}\nPROPOSED CODE:\n${change.content}\nORIGINAL REQUEST: ${message}`,
+                },
+              ],
+              temperature: 0.0,
+              response_format: { type: "json_object" },
+            });
+
+            const parsedDep = JSON.parse(depCorrection.choices[0]?.message?.content || "{}");
+            if (typeof parsedDep.content === "string" && parsedDep.content.length > 0) {
+              const recheck = ImportValidator.validateCodeImports(parsedDep.content, change.path, installedPackages);
+              if (recheck.valid) {
+                change.content = parsedDep.content;
+              } else {
+                throw new Error(`[UNDECLARED_EXTERNAL_DEPENDENCY] Generated code in "${change.path}" imported uninstalled package: ${recheck.errors.map((e) => e.message).join("; ")}`);
+              }
+            } else {
+              throw new Error(`[UNDECLARED_EXTERNAL_DEPENDENCY] Generated code in "${change.path}" imported uninstalled package: ${violation.message}`);
+            }
+          } catch (depErr: any) {
+            throw new Error(depErr.message || `[UNDECLARED_EXTERNAL_DEPENDENCY] Generated code in "${change.path}" imported uninstalled package "${violation.packageRoot}".`);
+          }
+        }
+      }
+    }
 
     const validationCommands = ValidationPlanner.detectValidationCommands(null, optimizedContext, contract);
 

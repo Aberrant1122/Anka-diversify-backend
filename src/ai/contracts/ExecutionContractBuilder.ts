@@ -65,24 +65,7 @@ const CONTRACT_RULES: Record<TaskType, ContractRules> = {
   },
 };
 
-function extractTargetPathsFromMessage(message: string): string[] {
-  const paths: string[] = [];
-
-  const quotedMatches = message.matchAll(/["']([\w\-./\\]+)["']/g);
-  for (const m of quotedMatches) {
-    if (m[1] && (/[\w\-./\\]+\.[\w]+/.test(m[1]) || /[\w\-.]+\/[\w\-.]+/.test(m[1]))) {
-      paths.push(m[1].replace(/\\/g, "/").replace(/^\//, ""));
-    }
-  }
-
-  const unquotedMatches = message.matchAll(/\b([\w\-./\\]+\.(?:html|css|js|ts|tsx|jsx|json|py|md))\b/gi);
-  for (const m of unquotedMatches) {
-    const p = m[1].replace(/\\/g, "/").replace(/^\//, "");
-    if (!paths.includes(p)) paths.push(p);
-  }
-
-  return Array.from(new Set(paths));
-}
+import { TargetPathExtractor } from "./TargetPathExtractor";
 
 function resolveContextScope(
   taskType: TaskType,
@@ -135,16 +118,12 @@ export function buildExecutionContract(
   const { taskType, risk, estimatedComplexity } = classification;
   const rules = CONTRACT_RULES[taskType] || CONTRACT_RULES.NEW_FEATURE;
 
-  const rawTargetPaths: string[] = [];
-  if (classification.targetPath) {
-    rawTargetPaths.push(classification.targetPath.replace(/\\/g, "/").replace(/^\//, ""));
-  }
-  const extractedPaths = extractTargetPathsFromMessage(message);
-  for (const p of extractedPaths) {
-    if (!rawTargetPaths.includes(p)) rawTargetPaths.push(p);
-  }
+  const targetPaths = TargetPathExtractor.extract(message, {
+    repoFiles: repoFileNames,
+    taskType,
+    classifierTarget: classification.targetPath,
+  });
 
-  const targetPaths = Array.from(new Set(rawTargetPaths));
   const contextScope = resolveContextScope(taskType, targetPaths, repoFileNames);
   const searchScope = [...contextScope];
   const route = routeTask(message, classification, repoFileNames);

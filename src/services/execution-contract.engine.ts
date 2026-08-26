@@ -78,37 +78,7 @@ const CONTRACT_RULES: Record<TaskType, ContractRules> = {
   },
 };
 
-// ── Target Path Extractor ─────────────────────────────────────────────────────
-
-/**
- * Extract target paths from the message if the classifier didn't provide complete ones.
- * Looks for quoted paths ('index.html', 'style.css'), bare file extensions, or folder names.
- */
-function extractTargetPathsFromMessage(message: string): string[] {
-  const paths: string[] = [];
-
-  // Match all quoted filenames or paths: 'index.html', "style.css", `script.js`
-  const quotedMatches = message.matchAll(/["']([\w\-./\\]+)["']/g);
-  for (const m of quotedMatches) {
-    if (m[1] && (/[\w\-./\\]+\.[\w]+/.test(m[1]) || /[\w\-.]+\/[\w\-.]+/.test(m[1]))) {
-      paths.push(m[1].replace(/\\/g, "/").replace(/^\//, ""));
-    }
-  }
-
-  // Match unquoted paths with extensions
-  const unquotedMatches = message.matchAll(/\b([\w\-./\\]+\.(?:html|css|js|ts|tsx|jsx|json|py|md))\b/gi);
-  for (const m of unquotedMatches) {
-    paths.push(m[1].replace(/\\/g, "/").replace(/^\//, ""));
-  }
-
-  // Match bare folder names: "Remove lib folder" → "lib"
-  if (paths.length === 0) {
-    const bareMatch = message.match(/(?:remove|delete|rm|clean|clear)\s+["']?([\w\-]+)(?:\s+(?:folder|directory|dir|path))?["']?/i);
-    if (bareMatch) paths.push(bareMatch[1]);
-  }
-
-  return [...new Set(paths)];
-}
+import { TargetPathExtractor } from "../ai/contracts/TargetPathExtractor";
 
 /**
  * Build a contextScope that is wide enough for the task type.
@@ -166,30 +136,11 @@ export function buildExecutionContract(
 ): ExecutionContract {
   const rules = CONTRACT_RULES[classification.taskType];
 
-  // Determine target paths
-  const extractedPaths = extractTargetPathsFromMessage(message);
-  const rawTargetPaths: string[] = [];
-
-  if (classification.targetPath) {
-    if (typeof classification.targetPath === "string") {
-      rawTargetPaths.push(classification.targetPath);
-    } else if (Array.isArray(classification.targetPath)) {
-      const arr = classification.targetPath as any[];
-      for (const item of arr) {
-        if (typeof item === "string") rawTargetPaths.push(item);
-      }
-    }
-  }
-
-  if (extractedPaths.length > 0) {
-    rawTargetPaths.push(...extractedPaths);
-  }
-
-  const targetPaths: string[] = [...new Set(
-    rawTargetPaths
-      .map((p) => String(p).trim().replace(/\\/g, "/").replace(/\/$/, ""))
-      .filter((p) => p.length > 0),
-  )];
+  const targetPaths = TargetPathExtractor.extract(message, {
+    repoFiles: repositoryFiles || [],
+    taskType: classification.taskType,
+    classifierTarget: classification.targetPath,
+  });
 
   const primaryTarget = targetPaths[0];
 

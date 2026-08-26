@@ -13,10 +13,12 @@ CRITICAL INSTRUCTIONS:
 3. For MODIFY actions, output structured "edits" array ONLY. Do NOT output full file content for modify operations.
 4. "oldText" must match the EXACT text from the CURRENT file content provided in this prompt (exact byte match).
 5. Ensure "oldText" contains enough surrounding context so it is unique within the file.
-6. Do NOT use line numbers, unified diffs, ellipses, or placeholder comments.
-7. Preserve existing behavior outside the targeted error fix. Do not perform unrelated refactors.
-8. For CREATE actions, output the full "content" of the new file.
-9. For DELETE actions, set "action": "delete", "isDeleted": true, and "content": "".
+6. Every edit MUST make a real modification (oldText and newText must NOT be identical). No-op edits are rejected.
+7. Do NOT use line numbers, unified diffs, ellipses, or placeholder comments.
+8. Preserve existing behavior outside the targeted error fix. Do not perform unrelated refactors.
+9. For CREATE actions, output the full "content" of the new file.
+10. For DELETE actions, set "action": "delete", "isDeleted": true, and "content": "".
+11. SECURITY MANDATE: Never use eval(), new Function(), or unrestricted dynamic code execution on user input. For calculations, use explicit mathematical operators or safe deterministic parsers.
 
 RESPONSE FORMAT (JSON ONLY):
 {

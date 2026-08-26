@@ -5,6 +5,8 @@ import { promisify } from "util";
 import { getOpenAI } from "../shared/utils";
 import { AgentFileChange } from "../shared/types";
 
+import { ValidationEnvironmentPolicy } from "./ValidationEnvironmentPolicy";
+
 const execAsync = promisify(exec);
 
 export class ValidationRunner {
@@ -12,7 +14,7 @@ export class ValidationRunner {
     _changes: AgentFileChange[],
     localPath: string | null | undefined,
     commands: string[],
-  ): Promise<{ success: boolean; errors: string }> {
+  ): Promise<{ success: boolean; errors: string; warnings?: string[] }> {
     if (!localPath) {
       return { success: false, errors: "Validation failed: localPath is missing, null, or undefined." };
     }
@@ -27,14 +29,24 @@ export class ValidationRunner {
     }
 
     const errors: string[] = [];
+    const warnings: string[] = [];
+
     for (const cmd of commands.slice(0, 2)) {
+      const env = ValidationEnvironmentPolicy.getSanitizedEnv(cmd);
       try {
-        const { stdout, stderr } = await execAsync(cmd, { cwd: localPath, timeout: 60000 });
-        const out = String(stdout || "") + "\n" + String(stderr || "");
-        if (/error TS|Error:|✖|FAILED|Failed to compile|SyntaxError/i.test(out)) {
-          errors.push(`${cmd}:\n${out.slice(0, 3000)}`);
+        const { stdout, stderr } = await execAsync(cmd, {
+          cwd: localPath,
+          env,
+          timeout: 60000,
+        });
+
+        // When execAsync succeeds, the command exited with code 0
+        const stderrStr = String(stderr || "").trim();
+        if (stderrStr) {
+          warnings.push(`${cmd} warning:\n${stderrStr.slice(0, 1500)}`);
         }
       } catch (err: any) {
+        // execAsync threw an error -> non-zero exit code or timeout
         const stdoutStr = err.stdout ? String(err.stdout) : "";
         const stderrStr = err.stderr ? String(err.stderr) : "";
         const msgStr = err.message ? String(err.message) : "";
@@ -43,7 +55,9 @@ export class ValidationRunner {
       }
     }
 
-    return errors.length === 0 ? { success: true, errors: "" } : { success: false, errors: errors.join("\n\n") };
+    return errors.length === 0
+      ? { success: true, errors: "", warnings }
+      : { success: false, errors: errors.join("\n\n"), warnings };
   }
 
   static async selfReviewChanges(changes: AgentFileChange[]): Promise<{ success: boolean; errors: string }> {

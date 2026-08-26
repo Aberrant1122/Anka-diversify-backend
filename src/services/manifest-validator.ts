@@ -6,23 +6,42 @@ import {
   ExecutionContract,
 } from "../types";
 import path from "path";
+import {
+  isAllowedBuiltinOrInstalled,
+  extractPackageRoot,
+  detectRepositoryArchitecture,
+} from "../ai/planning/RepositoryArchitectureDetector";
 
 export interface RepositoryContext {
   existingFiles: string[];
+  installedPackages?: string[];
+  packageVersions?: Record<string, string>;
+  packageJsonContent?: string | object;
 }
 
 export class ManifestValidator {
   private contract: ExecutionContract;
   private existingFiles: Set<string>;
+  private installedPackages: Set<string>;
 
   constructor(contract: ExecutionContract, repoContext?: RepositoryContext | string[]) {
     this.contract = contract;
     if (Array.isArray(repoContext)) {
       this.existingFiles = new Set(repoContext.map((f) => this.normalizePath(f)));
+      this.installedPackages = new Set();
     } else if (repoContext && Array.isArray(repoContext.existingFiles)) {
       this.existingFiles = new Set(repoContext.existingFiles.map((f) => this.normalizePath(f)));
+      if (Array.isArray(repoContext.installedPackages)) {
+        this.installedPackages = new Set(repoContext.installedPackages);
+      } else if (repoContext.packageJsonContent) {
+        const arch = detectRepositoryArchitecture(repoContext.existingFiles, repoContext.packageJsonContent);
+        this.installedPackages = new Set(arch.installedPackages);
+      } else {
+        this.installedPackages = new Set();
+      }
     } else {
       this.existingFiles = new Set();
+      this.installedPackages = new Set();
     }
   }
 
@@ -58,6 +77,12 @@ export class ManifestValidator {
 
     // Rule 5: Path Constraints
     errors.push(...this.validatePaths(manifest, this.contract.targetPaths));
+
+    // Rule 6: Router Architecture Conformance
+    errors.push(...this.validateRouterArchitecture(manifest));
+
+    // Rule 7: Authoritative MODIFY Target Existence
+    errors.push(...this.validateModifyTargets(manifest));
 
     return {
       valid: errors.length === 0,
@@ -187,8 +212,22 @@ export class ManifestValidator {
       const fileDir = path.dirname(file.path);
 
       for (const dep of file.dependencies) {
-        // Skip external package imports (e.g., 'react', 'express', 'lucide-react')
-        if (this.isExternalPackage(dep)) continue;
+        if (this.isExternalPackage(dep)) {
+          // If repository has installed packages known, verify external dependency is installed or Node builtin
+          if (this.installedPackages.size > 0) {
+            const allowed = isAllowedBuiltinOrInstalled(dep, this.installedPackages);
+            if (!allowed) {
+              const root = extractPackageRoot(dep);
+              errors.push({
+                type: "external-dependency-missing",
+                affectedFiles: [file.path],
+                message: `[external-dependency-missing] External dependency '${dep}' (package '${root}') is not installed in package.json.`,
+                suggestion: `Only use packages listed in package.json ([${Array.from(this.installedPackages).join(", ")}]), or implement the feature using native JS/standard library.`,
+              });
+            }
+          }
+          continue;
+        }
 
         // Resolve local file path
         let resolvedPath = "";
@@ -352,6 +391,46 @@ export class ManifestValidator {
     return errors;
   }
 
+  /**
+   * Validates framework router architecture conformance (App Router vs Pages Router).
+   */
+  public validateRouterArchitecture(manifest: FileManifest): ValidationError[] {
+    const errors: ValidationError[] = [];
+    const hasApp = this.hasAppRouter();
+    const hasPages = this.hasPagesRouter();
+
+    for (const file of manifest.files) {
+      if (!file.path) continue;
+      const normalized = this.normalizePath(file.path);
+
+      // In an App-Router-only repository, creating files under pages/ or src/pages/ is strictly forbidden
+      if (hasApp && !hasPages && file.action === "create") {
+        if (normalized.startsWith("pages/") || normalized.startsWith("src/pages/")) {
+          errors.push({
+            type: "router-architecture" as any,
+            affectedFiles: [file.path],
+            message: `[router-architecture] Manifest attempts to create Pages Router file '${file.path}' in an App-Router-only project. Use the verified App Router structure instead (e.g. app/**/page.tsx or embed in existing app/page.tsx).`,
+            suggestion: "Use verified App Router directory (app/) instead of inventing Pages Router (pages/ or src/pages/).",
+          });
+        }
+      }
+
+      // In a Pages-Router-only repository, creating files under app/ or src/app/ is strictly forbidden
+      if (hasPages && !hasApp && file.action === "create") {
+        if (normalized.startsWith("app/") || normalized.startsWith("src/app/")) {
+          errors.push({
+            type: "router-architecture" as any,
+            affectedFiles: [file.path],
+            message: `[router-architecture] Manifest attempts to create App Router file '${file.path}' in a Pages-Router-only project. Use the verified Pages Router structure instead.`,
+            suggestion: "Use verified Pages Router directory (pages/) instead of inventing App Router (app/ or src/app/).",
+          });
+        }
+      }
+    }
+
+    return errors;
+  }
+
   // ──────────────────────────────────────────────────────────────────────────
   // Helper Utility Methods
   // ──────────────────────────────────────────────────────────────────────────
@@ -367,26 +446,52 @@ export class ManifestValidator {
     return true;
   }
 
+  private hasAppRouter(): boolean {
+    return Array.from(this.existingFiles).some(
+      (f) =>
+        /^(src\/)?app\/(page|layout|route|not-found|error|loading|template)\.(tsx|jsx|ts|js)$/.test(f) ||
+        /^(src\/)?app\/.*\/page\.(tsx|jsx|ts|js)$/.test(f)
+    );
+  }
+
+  private hasPagesRouter(): boolean {
+    return Array.from(this.existingFiles).some(
+      (f) =>
+        /^(src\/)?pages\/.*(index|_app|_document|\[.*\])\.(tsx|jsx|ts|js)$/.test(f) ||
+        /^(src\/)?pages\/.*\.(tsx|jsx|ts|js)$/.test(f)
+    );
+  }
+
   private isEntryPointOrConfig(filePath: string): boolean {
     const norm = this.normalizePath(filePath);
     const basename = path.basename(norm);
 
+    // 1. Next.js App Router entry points (app/**/page.*, app/**/layout.*, app/**/route.*)
+    if (/^(src\/)?app\/.*(page|layout|route|not-found|error|loading|template)\.(tsx|jsx|js|ts)$/.test(norm)) {
+      return true;
+    }
+
+    // 2. Next.js Pages Router entry points (pages/**/*.tsx, src/pages/**/*.tsx)
+    // ONLY valid if the repository actually uses Pages Router!
+    if (/^(src\/)?pages\/.*\.(tsx|jsx|js|ts)$/.test(norm)) {
+      if (this.hasPagesRouter()) {
+        return true;
+      }
+      // If repository has App Router and NO Pages Router, model-invented src/pages/ is NOT an entry point
+      return false;
+    }
+
+    // 3. Root entry points & configs
     const entryBasenames = [
       "index.html",
-      "app.tsx",
-      "app.jsx",
-      "app.js",
-      "app.ts",
       "main.tsx",
       "main.jsx",
       "main.js",
       "main.ts",
-      "page.tsx",
-      "page.jsx",
-      "page.js",
-      "page.ts",
-      "layout.tsx",
-      "layout.jsx",
+      "app.tsx",
+      "app.jsx",
+      "app.js",
+      "app.ts",
       "index.ts",
       "index.js",
       "server.ts",
@@ -401,6 +506,7 @@ export class ManifestValidator {
       "tailwind.config.ts",
       "next.config.js",
       "next.config.mjs",
+      "next.config.ts",
       "vite.config.ts",
       "vite.config.js",
       "schema.prisma",
@@ -439,5 +545,30 @@ export class ManifestValidator {
       if (normA + ext === normB || normB + ext === normA) return true;
     }
     return false;
+  }
+
+  /**
+   * Rule 7: Authoritative MODIFY Target Existence
+   * For every MODIFY action, the target file MUST exist in the verified existing repository files.
+   */
+  public validateModifyTargets(manifest: FileManifest): ValidationError[] {
+    const errors: ValidationError[] = [];
+
+    // If repository has no existing files at all (e.g. purely standalone new project), any MODIFY is invalid
+    for (const file of manifest.files) {
+      if (file.action === "modify") {
+        const norm = this.normalizePath(file.path);
+        if (!this.existingFiles.has(norm)) {
+          errors.push({
+            type: "modify-source-missing",
+            affectedFiles: [file.path],
+            message: `[modify-source-missing] Cannot MODIFY '${file.path}' because authoritative source content is unavailable in repository.`,
+            suggestion: `Ensure '${file.path}' exists in the repository before modifying, or change action to 'create' if creating a new file.`,
+          });
+        }
+      }
+    }
+
+    return errors;
   }
 }

@@ -124,10 +124,13 @@ DESIGN & QUALITY STANDARDS:
   * NEVER generate React components (.tsx/.jsx), Next.js pages (app/*.tsx), or TypeScript interfaces (src/types.ts) unless the project actually uses React/JSX or Next.js.
 - When creating UI/dashboards/components (e.g. calculator, task board, analytics):
   * Use modern HSL dark mode, sleek card borders (border-white/10 or border-violet-500/20), backdrop blur glassmorphism, and responsive CSS grid layouts.
-  * Include interactive controls (tabs, filters, search, toggle switches, tooltips, buttons).
-  * Use Lucide icons (lucide-react for React apps, or inline SVG for Vanilla HTML) for visual indicators and badges.
+  * Use clean UI icons: prefer inline SVG by default; only import 'lucide-react' if it is verified and present in AVAILABLE EXTERNAL PACKAGES.
   * Include rich mock data and complete component logic so the app works immediately out of the box.
   * DEFENSIVE STATE MACHINES: Implement comprehensive state handling (null/undefined variable protection, error state resets, edge case validation, clean default state handling).
+- SECURITY & DEPENDENCY MANDATE:
+  * NEVER import uninstalled external packages. You MUST ONLY import packages explicitly listed in AVAILABLE EXTERNAL PACKAGES or standard Node built-in modules.
+  * NEVER pass raw, unvalidated user-controlled expression strings directly to eval(), new Function(), or unrestricted mathjs.evaluate().
+  * For calculator, math, or expression features, implement explicit tokenization, allowlisted mathematical operations (+, -, *, /, %, power, sin, cos, tan, sqrt, etc.), or a safe deterministic AST/parser using standard JavaScript/TypeScript.
 
 EXECUTION & VERIFICATION CHECKLIST:
 Include a 12-point checklist in explanation with checkmarks (✓):
@@ -235,6 +238,13 @@ Respond ONLY with valid JSON:
 export const MANIFEST_GENERATION_PROMPT = `You are a File Manifest Generation Agent for Anka OS AI Coding Agent.
 BEFORE generating any code, you MUST output a complete File Manifest declaring ALL files you intend to create, modify, or delete.
 
+═══════════════════════════════════════════════════════════════════════
+MINIMALITY & SCOPE GUIDELINES
+═══════════════════════════════════════════════════════════════════════
+1. Choose the SMALLEST COHERENT FILE SET required to satisfy the user request.
+2. Do NOT modify global entry points (app/layout.*, global configuration, package.json, global providers) unless the requested change genuinely requires them.
+3. For visual/component refinements, prefer modifying existing component/style/page files directly involved in the feature.
+
 Respond ONLY with valid JSON:
 {
   "files": [
@@ -251,6 +261,8 @@ Respond ONLY with valid JSON:
 
 export const CODE_CRITIQUE_PROMPT = `You are an Independent Code Review & Quality Reflection Agent.
 Critique generated code changes for logic bugs, unhandled edge cases, missing error boundaries, and style consistency.
+
+CRITICAL: The 'score' property MUST be a number between 0.0 and 1.0 inclusive (e.g. 0.85 for 85%).
 
 Respond ONLY with valid JSON:
 {

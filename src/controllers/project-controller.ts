@@ -7,6 +7,7 @@ import { generatePresignedUrl, generateDownloadUrl, deleteFromS3, detectType } f
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
+import { RepositoryMaterializationService } from "../services/repository-materialization.service";
 const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
@@ -276,6 +277,9 @@ export class ProjectController {
 
       const message = commitMessage || `edit: update ${filePath}`;
       const result = await ProjectGitHubService.pushChanges(project.githubUrl, [{ path: filePath, content }], message, token);
+      if (result?.sha) {
+        await RepositoryMaterializationService.syncManagedCloneToCommit(param(req, "id"), result.sha);
+      }
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Error saving repo file:", error);

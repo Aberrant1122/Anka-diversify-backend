@@ -23,6 +23,7 @@ export interface ExecutionScopeEnforcerParams {
   manifest?: FileManifest | null;
   contract?: ExecutionContract | null;
   existingFilePaths?: string[] | Set<string>;
+  isRepair?: boolean;
 }
 
 export interface ExecutionScopeEnforcerResult {
@@ -56,7 +57,7 @@ export function resolveEffectiveAction(
 export function enforceExecutionScope(
   params: ExecutionScopeEnforcerParams
 ): ExecutionScopeEnforcerResult {
-  const { proposedChanges, manifest, contract, existingFilePaths = [] } = params;
+  const { proposedChanges, manifest, contract, existingFilePaths = [], isRepair = false } = params;
 
   const errors: ScopeViolation[] = [];
 
@@ -121,6 +122,17 @@ export function enforceExecutionScope(
           message: `File "${normPath}" was generated but not declared in the approved manifest.`,
           actualAction: effectiveAction,
         });
+      } else if (isRepair) {
+        // In repair mode, any manifest-declared file can be repaired (modified/re-created), unless declared for deletion
+        if (decl.action === "delete" && effectiveAction !== "delete") {
+          errors.push({
+            path: change.path,
+            reason: "ACTION_MISMATCH",
+            message: `File "${normPath}" was declared for deletion in the manifest, but repair attempted "${effectiveAction}".`,
+            expectedAction: "delete",
+            actualAction: effectiveAction,
+          });
+        }
       } else if (decl.action !== effectiveAction) {
         errors.push({
           path: change.path,
@@ -133,27 +145,40 @@ export function enforceExecutionScope(
     }
 
     // Rule 2: Actual Repository State Verification
-    if (effectiveAction === "create" && exists) {
-      errors.push({
-        path: change.path,
-        reason: "CREATE_FILE_ALREADY_EXISTS",
-        message: `Cannot CREATE file "${normPath}" because it already exists in the repository.`,
-        actualAction: effectiveAction,
-      });
-    } else if (effectiveAction === "modify" && !exists) {
-      errors.push({
-        path: change.path,
-        reason: "MODIFY_FILE_NOT_FOUND",
-        message: `Cannot MODIFY file "${normPath}" because it does not exist in the repository.`,
-        actualAction: effectiveAction,
-      });
-    } else if (effectiveAction === "delete" && !exists) {
-      errors.push({
-        path: change.path,
-        reason: "DELETE_FILE_NOT_FOUND",
-        message: `Cannot DELETE file "${normPath}" because it does not exist in the repository.`,
-        actualAction: effectiveAction,
-      });
+    if (!isRepair) {
+      if (effectiveAction === "create" && exists) {
+        errors.push({
+          path: change.path,
+          reason: "CREATE_FILE_ALREADY_EXISTS",
+          message: `Cannot CREATE file "${normPath}" because it already exists in the repository.`,
+          actualAction: effectiveAction,
+        });
+      } else if (effectiveAction === "modify" && !exists) {
+        errors.push({
+          path: change.path,
+          reason: "MODIFY_FILE_NOT_FOUND",
+          message: `Cannot MODIFY file "${normPath}" because it does not exist in the repository.`,
+          actualAction: effectiveAction,
+        });
+      } else if (effectiveAction === "delete" && !exists) {
+        errors.push({
+          path: change.path,
+          reason: "DELETE_FILE_NOT_FOUND",
+          message: `Cannot DELETE file "${normPath}" because it does not exist in the repository.`,
+          actualAction: effectiveAction,
+        });
+      }
+    } else {
+      // In repair mode: files created in initial generation or existing on disk can be modified.
+      // Only forbid modifying a file that doesn't exist and wasn't in the manifest.
+      if (effectiveAction === "modify" && !exists && !manifestLookup.has(normPath)) {
+        errors.push({
+          path: change.path,
+          reason: "MODIFY_FILE_NOT_FOUND",
+          message: `Cannot MODIFY file "${normPath}" during repair because it does not exist in the worktree.`,
+          actualAction: effectiveAction,
+        });
+      }
     }
 
     // Rule 3: Contract Target Paths Defense-in-Depth

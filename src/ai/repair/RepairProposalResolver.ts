@@ -31,6 +31,7 @@ export type RepairChangeProposal =
 
 export type RepairResolutionErrorCode =
   | "REPAIR_UNDECLARED_FILE"
+  | "SCOPE_EXPANSION_REQUIRED"
   | "REPAIR_ACTION_MISMATCH"
   | "MODIFY_PATCH_REQUIRED"
   | "PATCH_SOURCE_FILE_NOT_FOUND"
@@ -97,12 +98,26 @@ export function validateRepairManifestScope(
       };
     }
 
-    if (declaredAction !== proposal.action) {
+    // For repair, files declared as CREATE or MODIFY can be repaired via MODIFY or CREATE.
+    // Deletion of non-delete files, or modifying delete files, is rejected as REPAIR_ACTION_MISMATCH.
+    if (proposal.action === "delete" && declaredAction !== "delete") {
       return {
         valid: false,
         error: {
           code: "REPAIR_ACTION_MISMATCH",
-          message: `Repair proposal for "${proposal.path}" attempted action "${proposal.action}", but manifest authorized action "${declaredAction}".`,
+          message: `Repair proposal for "${proposal.path}" attempted deletion, but manifest authorized action "${declaredAction}".`,
+          path: proposal.path,
+          proposalIndex: i,
+        },
+      };
+    }
+
+    if (declaredAction === "delete" && proposal.action !== "delete") {
+      return {
+        valid: false,
+        error: {
+          code: "REPAIR_ACTION_MISMATCH",
+          message: `Repair proposal for "${proposal.path}" attempted action "${proposal.action}", but manifest declared the file for DELETION.`,
           path: proposal.path,
           proposalIndex: i,
         },

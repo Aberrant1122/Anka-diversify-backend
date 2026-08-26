@@ -23,13 +23,25 @@ async function ensureUser(userId: string): Promise<void> {
 
 export class ProjectService {
   async getAllProjects(userId: string) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+
+    const isSystemAdmin = user?.role === "admin";
+
     return prisma.project.findMany({
-      where: {
-        OR: [
-          { userId },
-          { members: { some: { userId } } },
-        ],
-      },
+      where: isSystemAdmin
+        ? {
+            NOT: { id: { startsWith: "eval-project-" } },
+          }
+        : {
+            OR: [
+              { userId },
+              { members: { some: { userId } } },
+            ],
+            NOT: { id: { startsWith: "eval-project-" } },
+          },
       include: {
         tasks: true,
         memorySummary: { select: { summary: true, lastUpdated: true } },
@@ -41,14 +53,23 @@ export class ProjectService {
   }
 
   async getProjectById(id: string, userId: string) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+
+    const isSystemAdmin = user?.role === "admin";
+
     return prisma.project.findFirst({
-      where: {
-        id,
-        OR: [
-          { userId },
-          { members: { some: { userId } } },
-        ],
-      },
+      where: isSystemAdmin
+        ? { id }
+        : {
+            id,
+            OR: [
+              { userId },
+              { members: { some: { userId } } },
+            ],
+          },
       include: {
         tasks: true,
         memorySummary: true,

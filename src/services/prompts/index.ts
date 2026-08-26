@@ -554,14 +554,15 @@ FILE MANIFEST REQUIREMENTS
 CRITICAL RULES:
 1. Generate the File Manifest BEFORE any code generation begins.
 2. Declare EVERY file you will create, modify, or delete — no exceptions.
-3. For each file, list ALL its dependencies (import paths).
-4. Ensure every import path resolves to either:
+3. MINIMALITY & SCOPE: Choose the SMALLEST COHERENT FILE SET required to satisfy the request. Do NOT modify global entry points (app/layout.*, global config, package.json) unless the change genuinely requires global setup.
+4. For each file, list ALL its dependencies (import paths).
+5. Ensure every import path resolves to either:
    - A file in this manifest (with action "create" or "modify")
    - An existing file in the repository
    - An external package (node_modules)
-5. Do NOT create orphaned files — every non-entry-point file must be imported/used by another file.
-6. Respect the maxFiles limit from the Execution Contract.
-7. All file paths must be within the allowed targetPaths from the Execution Contract.
+6. Do NOT create orphaned files — every non-entry-point file must be imported/used by another file.
+7. Respect the maxFiles limit from the Execution Contract.
+8. All file paths must be within the allowed targetPaths from the Execution Contract.
 
 FILE MANIFEST JSON SCHEMA:
 {

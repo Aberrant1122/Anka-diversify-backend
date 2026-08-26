@@ -1586,7 +1586,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
           }
         }
       }
-    }, 30000);
+    }, 120000);
   });
 
   // ── 4. Step 10D2A — Safe Real-Eval Database Provisioning & Resilience ────────

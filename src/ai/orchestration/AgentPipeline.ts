@@ -32,8 +32,12 @@ import { rerankSemanticResults } from "../repository/CodeAwareReranker";
 import { packFileContext } from "../context/ContextPacker";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
 import { verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
-import { FileManifest } from "../../types";
+import { FileManifest, BaselineDiagnostic } from "../../types";
 import { decrypt } from "../../utils/encryption";
+import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
+import { ManifestCorrectionEngine } from "../planning/ManifestCorrectionEngine";
+import { AuthoritativeSourceHydrator } from "../manifest/AuthoritativeSourceHydrator";
+import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
 
 const prisma = new PrismaClient();
 
@@ -43,7 +47,12 @@ export class AgentPipeline {
     projectId: string,
     request: ChatRequest,
     onProgress?: (event: AgentProgressEvent) => void,
-    options?: { effectiveLocalPath?: string },
+    options?: {
+      effectiveLocalPath?: string;
+      baselineDiagnostics?: BaselineDiagnostic[];
+      targetedBaselineDiagnostics?: BaselineDiagnostic[];
+      isBaselineDeltaTask?: boolean;
+    },
   ): Promise<AgentResponse> {
     const session = await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
     const projectContext = await RepositoryContextBuilder.buildProjectContext(projectId);
@@ -61,6 +70,7 @@ export class AgentPipeline {
 
     const snapshot = projectContext.repoSnapshot;
     const requestedPath = options?.effectiveLocalPath || (request.context as any)?.effectiveLocalPath || project?.localPath;
+    console.log(`[ANKA_EXEC] AgentPipeline starting, localPath=${requestedPath || "none"}`);
     const effectiveLocalPath = await RepositoryScanner.ensureLocalWorkspace(projectId, requestedPath, snapshot);
     const effectiveSnapshot = RepositoryScanner.getEffectiveSnapshot(snapshot, effectiveLocalPath);
     const currentRevisionHash = effectiveSnapshot.revision?.contentHash;
@@ -369,73 +379,134 @@ export class AgentPipeline {
     const compressionRatio = (inputTokens / Math.max(1, outputTokens)).toFixed(2);
     const s5Time = performance.now() - s5Start;
 
-    // Stage 6: Manifest Generation & Task Decomposition
+    // Stage 6: Authoritative Manifest Generation & Validation (with optional advisory decomposition)
     const s6Start = performance.now();
     let approvedManifest: FileManifest | null = null;
+    let manifestGenerationError: string | null = null;
     const manifestEnabled = process.env.ENABLE_MANIFEST_ENFORCEMENT !== "false";
 
     if (manifestEnabled) {
+      // Extract package.json content if available in snapshot
+      let packageJsonContent: string | undefined;
+      const pkgFile = rawSnapshotFiles.find((f: any) => f?.path === "package.json" || f?.path?.endsWith("/package.json"));
+      if (pkgFile && typeof pkgFile.content === "string") {
+        packageJsonContent = pkgFile.content;
+      }
+
+      const architectureSummary = detectRepositoryArchitecture(canonicalExistingFiles, packageJsonContent);
+
+      // Select top bounded relevant files for manifest planning
+      const relevantPlanningFiles: Array<{ path: string; content: string }> = [];
+      if (optimizedContext?.fileContext) {
+        for (const [filePath, content] of Object.entries(optimizedContext.fileContext)) {
+          if (typeof content === "string" && content.trim().length > 0) {
+            relevantPlanningFiles.push({ path: filePath, content });
+          }
+        }
+      }
+      for (const snapFile of rawSnapshotFiles) {
+        if (snapFile?.path && typeof snapFile?.content === "string") {
+          const normPath = snapFile.path.replace(/\\/g, "/").replace(/^\.\//, "");
+          if (
+            (normPath === "package.json" || architectureSummary.existingEntryPoints.includes(normPath)) &&
+            !relevantPlanningFiles.some((rf) => rf.path === normPath)
+          ) {
+            relevantPlanningFiles.push({ path: normPath, content: snapFile.content });
+          }
+        }
+      }
+
+      // Check effective local path for existing query-relevant components (e.g. Calculator)
+      if (effectiveLocalPath && fs.existsSync(effectiveLocalPath)) {
+        const queryTerms = request.message.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+        for (const f of canonicalExistingFiles) {
+          const norm = f.replace(/\\/g, "/").replace(/^\.\//, "");
+          const isQueryRelevant = queryTerms.some((term) => norm.toLowerCase().includes(term));
+          const isEntry = architectureSummary.existingEntryPoints.includes(norm);
+          if ((isQueryRelevant || isEntry) && !relevantPlanningFiles.some((rf) => rf.path === norm)) {
+            const abs = path.join(effectiveLocalPath, norm);
+            if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+              try {
+                const content = fs.readFileSync(abs, "utf8");
+                relevantPlanningFiles.push({ path: norm, content });
+              } catch {}
+            }
+          }
+        }
+      }
+
       const planningContext = {
         ...projectContext,
         existingFiles: canonicalExistingFiles,
+        architecture: architectureSummary,
+        relevantFiles: relevantPlanningFiles.slice(0, 8),
       };
 
-      const shouldDecompose =
-        intentResult.taskType === "NEW_FEATURE" &&
-        (intentResult.estimatedComplexity === "LARGE" || intentResult.estimatedComplexity === "COMPLEX");
+      // 1. Authoritative FileManifest generation for ALL tasks
+      let rawManifest: FileManifest | null = null;
+      try {
+        const generator = new ManifestGenerator(getOpenAI());
+        rawManifest = await generator.generateManifest(request.message, planningContext, executionContract);
+      } catch (e: any) {
+        manifestGenerationError = e?.message || String(e);
+        console.error("[AgentPipeline] Manifest generation error:", manifestGenerationError);
+      }
 
-      if (shouldDecompose) {
-        try {
-          const decomposer = new TaskDecomposer(getOpenAI());
-          const graph = await decomposer.decomposeTask(request.message, planningContext, intentResult);
+      if (rawManifest) {
+        const validator = new ManifestValidator(executionContract, {
+          existingFiles: canonicalExistingFiles,
+          installedPackages: architectureSummary.installedPackages,
+          packageVersions: architectureSummary.packageVersions,
+        });
+        let valRes = validator.validate(rawManifest);
 
-          await prisma.taskDecomposition.create({
-            data: {
-              projectId,
-              sessionId: session.id,
-              userRequest: request.message,
-              graphJson: graph as any,
-              totalSubTasks: graph.nodes.length,
-              status: "in_progress",
-            },
-          });
+        await prisma.agentManifest.create({
+          data: {
+            projectId,
+            sessionId: session.id,
+            manifestJson: rawManifest as any,
+            validationStatus: valRes.valid ? "approved" : "rejected",
+            validationErrors: valRes.errors as any,
+          },
+        });
 
-          const executor = new SubTaskExecutor(new ManifestGenerator(getOpenAI()));
-          const completedMap = new Map<string, any>();
+        if (valRes.valid) {
+          approvedManifest = rawManifest;
+        } else {
+          console.warn("[AgentPipeline] Initial manifest validation failed. Attempting 1 bounded correction...");
+          try {
+            const correctedManifest = await ManifestCorrectionEngine.attemptCorrection(
+              rawManifest,
+              valRes.errors,
+              request.message,
+              planningContext,
+              executionContract,
+              getOpenAI()
+            );
 
-          for (const subTaskId of graph.executionOrder) {
-            const subTask = graph.nodes.find((n) => n.id === subTaskId);
-            if (!subTask) continue;
+            if (correctedManifest) {
+              const reValRes = validator.validate(correctedManifest);
+              await prisma.agentManifest.create({
+                data: {
+                  projectId,
+                  sessionId: session.id,
+                  manifestJson: correctedManifest as any,
+                  validationStatus: reValRes.valid ? "approved" : "rejected",
+                  validationErrors: reValRes.errors as any,
+                },
+              });
 
-            const res = await executor.executeSubTask(subTask, completedMap, planningContext, executionContract);
-            completedMap.set(subTaskId, res);
+              if (reValRes.valid) {
+                approvedManifest = correctedManifest;
+              } else {
+                valRes = reValRes;
+              }
+            }
+          } catch (corrErr: any) {
+            console.warn("[AgentPipeline] Manifest correction exception:", corrErr?.message || corrErr);
           }
-          const agg = executor.aggregateResults(completedMap);
-          if (agg.success) {
-            approvedManifest = agg.aggregateManifest;
-          }
-        } catch (e: any) {
-          console.error("[AgentPipeline] Task decomposition error:", e?.message || e);
-        }
-      } else {
-        try {
-          const generator = new ManifestGenerator(getOpenAI());
-          const manifest = await generator.generateManifest(request.message, planningContext, executionContract);
 
-          const validator = new ManifestValidator(executionContract, canonicalExistingFiles);
-          const valRes = validator.validate(manifest);
-
-          await prisma.agentManifest.create({
-            data: {
-              projectId,
-              sessionId: session.id,
-              manifestJson: manifest as any,
-              validationStatus: valRes.valid ? "approved" : "rejected",
-              validationErrors: valRes.errors as any,
-            },
-          });
-
-          if (!valRes.valid) {
+          if (!approvedManifest) {
             const errorDetails = valRes.errors.map((e) => `• [${e.type}] ${e.message} (${e.suggestion})`).join("\n");
             const failureExplanation = `[Manifest Validation Failed] The planned file manifest violated execution contract constraints:\n${errorDetails}`;
             await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
@@ -453,10 +524,32 @@ export class AgentPipeline {
               confidence: finalConfidence,
             };
           }
+        }
+      }
 
-          approvedManifest = manifest;
+      // 2. Optional advisory decomposition for LARGE/COMPLEX NEW_FEATURE tasks
+      const shouldDecompose =
+        intentResult.taskType === "NEW_FEATURE" &&
+        (intentResult.estimatedComplexity === "LARGE" || intentResult.estimatedComplexity === "COMPLEX");
+
+      if (shouldDecompose) {
+        try {
+          const decomposer = new TaskDecomposer(getOpenAI());
+          const graph = await decomposer.decomposeTask(request.message, planningContext, intentResult);
+
+          await prisma.taskDecomposition.create({
+            data: {
+              projectId,
+              sessionId: session.id,
+              userRequest: request.message,
+              graphJson: graph as any,
+              totalSubTasks: graph.nodes.length,
+              status: "completed",
+            },
+          });
+          // Advisory decomposition completed; approvedManifest remains the authoritative validated manifest
         } catch (e: any) {
-          console.error("[AgentPipeline] Manifest generation error:", e?.message || e);
+          console.warn("[AgentPipeline] Advisory task decomposition error (non-blocking):", e?.message || e);
         }
       }
     }
@@ -468,7 +561,37 @@ export class AgentPipeline {
       executionContract.pipeline === "REPOSITORY" &&
       executionContract.taskType !== "DOCS"
     ) {
-      const failureExplanation = `[APPROVED_MANIFEST_REQUIRED] Execution halted: An approved file manifest is required for repository changes, but none was generated or validated.`;
+      const failureExplanation = manifestGenerationError
+        ? `[MANIFEST_GENERATION_FAILED] Failed to generate file manifest: ${manifestGenerationError}`
+        : `[APPROVED_MANIFEST_REQUIRED] Execution halted: An approved file manifest is required for repository changes, but none was generated or validated.`;
+      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+      return {
+        explanation: failureExplanation,
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        intent: intentResult.intent,
+        taskType: intentResult.taskType,
+        risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity,
+        targetPath: intentResult.targetPath,
+        confidence: finalConfidence,
+      };
+    }
+
+    // Authoritative Manifest Source Hydration for MODIFY actions
+    const hydrationResult = AuthoritativeSourceHydrator.hydrateModifySources(
+      approvedManifest,
+      effectiveLocalPath,
+      canonicalExistingFiles,
+      optimizedContext?.fileContext || {},
+    );
+
+    if (!hydrationResult.success) {
+      const failureExplanation =
+        hydrationResult.error ||
+        `[MANIFEST_SOURCE_HYDRATION_FAILED] Failed to hydrate source for approved modify targets.`;
       await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
 
       return {
@@ -494,6 +617,8 @@ export class AgentPipeline {
       systemPrompt,
       executionContract,
       approvedManifest,
+      hydrationResult.authoritativeModifySources,
+      hydrationResult.mergedSourceMap,
     );
     const s7Time = performance.now() - s7Start;
 
@@ -616,6 +741,8 @@ export class AgentPipeline {
         onProgress,
         approvedManifest,
         executionContract,
+        options?.baselineDiagnostics,
+        options?.targetedBaselineDiagnostics,
       );
 
       if (!repairResult.success && !repairResult.infrastructureError && effectiveLocalPath && effectiveValidationCommands.length > 0) {
@@ -772,6 +899,14 @@ export class AgentPipeline {
       securityPass: auditResult.securityPass,
       critiqueScore: auditResult.critiqueScore,
       buildVerified: gateSuccess,
+      taskVerified: repairResult.taskVerified ?? gateSuccess,
+      repositoryClean: repairResult.repositoryClean ?? gateSuccess,
+      healthStatus: repairResult.taskVerified ? (repairResult.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY") : undefined,
+      baselineDiagnosticCount: repairResult.deltaResult?.baselineDiagnosticCount,
+      targetedBaselineDiagnostics: repairResult.deltaResult?.targetedBaselineDiagnostics,
+      resolvedTargetDiagnostics: repairResult.deltaResult?.resolvedTargetDiagnostics,
+      remainingBaselineDiagnostics: repairResult.deltaResult?.remainingBaselineDiagnostics,
+      newTaskDiagnostics: repairResult.deltaResult?.newTaskDiagnostics,
       repaired: Boolean(repairResult.repaired ?? repairResult.attempts > 1),
       repairAttempted: Boolean(repairResult.attempts > 1 || repairResult.repaired),
       repairAttempts: repairResult.attempts || 0,
@@ -787,6 +922,18 @@ export class AgentPipeline {
       verificationChecklist: defaultChecklist,
       lifecycleStage: gateSuccess ? "Done" : "BuildFailed",
       pipelineMeasurementText,
+      patchCorrectionAttempted: (roadmapAndDiff as any).patchTelemetry?.patchCorrectionAttempted,
+      patchCorrectionSucceeded: (roadmapAndDiff as any).patchTelemetry?.patchCorrectionSucceeded,
+      patchCorrectionAttempts: (roadmapAndDiff as any).patchTelemetry?.patchCorrectionAttempts,
+      securityRiskLevel: auditResult.riskLevel,
+      securityVulnerabilities: auditResult.vulnerabilities,
+      securityRecommendations: auditResult.recommendations,
+      rootBuildFailure: repairResult.rootFailure,
+      currentFailure: repairResult.currentFailure,
+      validationDetails: repairResult.validationDetails,
+      modelRepairAttempts: repairResult.modelRepairAttempts,
+      patchesAppliedCount: repairResult.patchesAppliedCount,
+      buildAttemptsCount: repairResult.buildAttemptsCount,
     };
   }
 }

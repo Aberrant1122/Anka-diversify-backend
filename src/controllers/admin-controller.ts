@@ -7,23 +7,41 @@ export class AdminController {
   async getDashboardStats(_req: Request, res: Response) {
     try {
       const [totalUsers, projects, recentTasks, completedTaskCount, users] = await Promise.all([
-        prisma.user.count(),
+        prisma.user.count({
+          where: {
+            NOT: { id: { startsWith: 'eval-user-' } },
+          },
+        }),
         prisma.project.findMany({
-          where: { status: { not: 'completed' } },
+          where: {
+            status: { not: 'completed' },
+            NOT: { id: { startsWith: 'eval-project-' } },
+          },
           include: {
             members: { include: { user: { select: { id: true, name: true, email: true, role: true } } } },
           },
           orderBy: { createdAt: 'desc' },
         }),
         prisma.projectTask.findMany({
+          where: {
+            NOT: { projectId: { startsWith: 'eval-project-' } },
+          },
           orderBy: { createdAt: 'desc' },
           take: 10,
           include: {
             project: { select: { id: true, name: true } },
           },
         }),
-        prisma.projectTask.count({ where: { status: 'done' } }),
+        prisma.projectTask.count({
+          where: {
+            status: 'done',
+            NOT: { projectId: { startsWith: 'eval-project-' } },
+          },
+        }),
         prisma.user.findMany({
+          where: {
+            NOT: { id: { startsWith: 'eval-user-' } },
+          },
           select: { id: true, name: true, email: true, role: true, status: true, createdAt: true },
           orderBy: { createdAt: 'desc' },
         }),
