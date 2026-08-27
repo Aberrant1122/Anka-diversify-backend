@@ -304,4 +304,279 @@ You're importing a component that needs useState. It only works in a Client Comp
     expect(summary.agentResponse.repositoryClean).toBe(true);
     expect(summary.agentResponse.healthStatus).toBe("HEALTHY");
   });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Regression Tests A - E: Causality-Aware Revealed Baseline Diagnostics
+  // ──────────────────────────────────────────────────────────────────────────
+
+  test("Regression Test A: Hidden pre-existing error is revealed after fixing blocker -> revealedBaselineDiagnostics, taskVerified=true", async () => {
+    const preTaskCalculatorContent = `
+import React, { useState } from 'react';
+import { create, all } from 'mathjs';
+
+const math = create(all);
+
+export const CalculatorButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+  <button onClick={onClick}>{label}</button>
+);
+
+export const CalculatorButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+  <button onClick={onClick}>{label}</button>
+);
+`;
+    const postTaskCalculatorContent = `
+"use client";
+import React, { useState } from 'react';
+import { create, all } from 'mathjs';
+
+const math = create(all);
+
+export const CalculatorButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+  <button onClick={onClick}>{label}</button>
+);
+
+export const CalculatorButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+  <button onClick={onClick}>{label}</button>
+);
+`;
+
+    const baselineErrors = `
+Failed to compile.
+./components/Calculator.tsx:2:17
+You're importing a module that depends on \`useState\` into a React Server Component module. This API is only available in Client Components. To fix, mark the file (or its parent) with the \`"use client"\` directive.
+`;
+
+    const postPatchErrors = `
+Failed to compile.
+./components/Calculator.tsx:8:14
+Type error: Cannot redeclare exported variable 'CalculatorButton'.
+> 8 | export const CalculatorButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+    |              ^^^^^^^^^^^^^^^^
+`;
+
+    const baseDiags = BaselineDeltaVerifier.extractDiagnostics(baselineErrors, "BASELINE");
+    const postDiags = BaselineDeltaVerifier.extractDiagnostics(postPatchErrors, "CURRENT_TASK");
+
+    expect(baseDiags.length).toBe(1);
+    expect(baseDiags[0].errorCode).toBe("CLIENT_DIRECTIVE_REQUIRED");
+
+    const targeted = BaselineDeltaVerifier.matchUserTaskToBaseline(
+      "Fix the useState Server Component error in components/Calculator.tsx",
+      baseDiags
+    ).targetedDiagnostics;
+
+    expect(targeted.length).toBe(1);
+
+    const causalityContext = {
+      preTaskSourceGetter: (filePath: string) => {
+        if (filePath.includes("Calculator.tsx")) return preTaskCalculatorContent;
+        return null;
+      },
+      changes: [{ path: "components/Calculator.tsx", content: postTaskCalculatorContent, action: "modify" as const, description: "Add use client" }],
+      isBroadRepairTask: false,
+    };
+
+    const deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
+      baseDiags,
+      postDiags,
+      targeted,
+      causalityContext
+    );
+
+    expect(deltaResult.resolvedTargetDiagnostics.length).toBe(1);
+    expect(deltaResult.revealedBaselineDiagnostics.length).toBe(1);
+    expect(deltaResult.revealedBaselineDiagnostics[0].message).toContain("Cannot redeclare exported variable");
+    expect(deltaResult.newTaskDiagnostics.length).toBe(0);
+    expect(deltaResult.taskVerified).toBe(true);
+    expect(deltaResult.repositoryClean).toBe(false);
+
+    const explanation = BaselineDeltaVerifier.formatDeltaExplanation(deltaResult);
+    expect(explanation).toContain("Requested Fix: VERIFIED");
+    expect(explanation).toContain("Revealed pre-existing errors");
+    expect(explanation).toContain("Cannot redeclare exported variable");
+  });
+
+  test("Regression Test B: Agent introduces new error in the SAME file -> newTaskDiagnostics, taskVerified=false", async () => {
+    const preTaskCalculatorContent = `
+import React, { useState } from 'react';
+import { create, all } from 'mathjs';
+
+const math = create(all);
+
+export const CalculatorButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+  <button onClick={onClick}>{label}</button>
+);
+`;
+
+    // Agent adds "use client" AND also adds a duplicate CalculatorButton declaration that did NOT exist in pre-task source
+    const postTaskCalculatorContent = `
+"use client";
+import React, { useState } from 'react';
+import { create, all } from 'mathjs';
+
+const math = create(all);
+
+export const CalculatorButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+  <button onClick={onClick}>{label}</button>
+);
+
+export const CalculatorButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+  <button onClick={onClick}>{label}</button>
+);
+`;
+
+    const baselineErrors = `
+Failed to compile.
+./components/Calculator.tsx:2:17
+You're importing a module that depends on \`useState\` into a React Server Component module.
+`;
+
+    const postPatchErrors = `
+Failed to compile.
+./components/Calculator.tsx:14:14
+Type error: Cannot redeclare exported variable 'CalculatorButton'.
+`;
+
+    const baseDiags = BaselineDeltaVerifier.extractDiagnostics(baselineErrors, "BASELINE");
+    const postDiags = BaselineDeltaVerifier.extractDiagnostics(postPatchErrors, "CURRENT_TASK");
+    const targeted = baseDiags;
+
+    const causalityContext = {
+      preTaskSourceGetter: (filePath: string) => {
+        if (filePath.includes("Calculator.tsx")) return preTaskCalculatorContent;
+        return null;
+      },
+      changes: [{ path: "components/Calculator.tsx", content: postTaskCalculatorContent, action: "modify" as const, description: "Add use client with accidental duplication" }],
+      isBroadRepairTask: false,
+    };
+
+    const deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
+      baseDiags,
+      postDiags,
+      targeted,
+      causalityContext
+    );
+
+    expect(deltaResult.resolvedTargetDiagnostics.length).toBe(1);
+    expect(deltaResult.revealedBaselineDiagnostics.length).toBe(0);
+    expect(deltaResult.newTaskDiagnostics.length).toBe(1);
+    expect(deltaResult.taskVerified).toBe(false);
+  });
+
+  test("Regression Test C: Broad fix-all request does not early-exit on revealed error", async () => {
+    const preTaskCalculatorContent = `
+import React, { useState } from 'react';
+export const CalculatorButton = 1;
+export const CalculatorButton = 2;
+`;
+    const postTaskCalculatorContent = `
+"use client";
+import React, { useState } from 'react';
+export const CalculatorButton = 1;
+export const CalculatorButton = 2;
+`;
+
+    const baselineErrors = `
+./components/Calculator.tsx:2:17
+You're importing a module that depends on \`useState\` into a React Server Component module.
+`;
+    const postPatchErrors = `
+./components/Calculator.tsx:4:14
+Cannot redeclare exported variable 'CalculatorButton'.
+`;
+
+    const baseDiags = BaselineDeltaVerifier.extractDiagnostics(baselineErrors, "BASELINE");
+    const postDiags = BaselineDeltaVerifier.extractDiagnostics(postPatchErrors, "CURRENT_TASK");
+    const targeted = baseDiags;
+
+    const broadContext = {
+      preTaskSourceGetter: () => preTaskCalculatorContent,
+      changes: [{ path: "components/Calculator.tsx", content: postTaskCalculatorContent, action: "modify" as const, description: "Add use client" }],
+      isBroadRepairTask: true, // "fix all build errors"
+    };
+
+    const deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
+      baseDiags,
+      postDiags,
+      targeted,
+      broadContext
+    );
+
+    expect(deltaResult.revealedBaselineDiagnostics.length).toBe(1);
+    // For broad repair, repositoryClean is false, so taskVerified remains false so repair continues
+    expect(deltaResult.taskVerified).toBe(false);
+  });
+
+  test("Regression Test D: Normal healthy baseline with agent-introduced error", async () => {
+    const baseDiags: any[] = [];
+    const postPatchErrors = `
+./components/Header.tsx:10:5
+Type error: Property 'title' does not exist on type 'HeaderProps'.
+`;
+    const postDiags = BaselineDeltaVerifier.extractDiagnostics(postPatchErrors, "CURRENT_TASK");
+
+    const deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
+      baseDiags,
+      postDiags,
+      [],
+      {
+        preTaskSourceGetter: () => "export function Header() {}",
+        changes: [{ path: "components/Header.tsx", content: "broken", action: "modify" as const, description: "Header" }],
+        isBroadRepairTask: false,
+      }
+    );
+
+    expect(deltaResult.newTaskDiagnostics.length).toBe(1);
+    expect(deltaResult.revealedBaselineDiagnostics.length).toBe(0);
+    expect(deltaResult.taskVerified).toBe(false);
+  });
+
+  test("Regression Test E: Fix in File A causes a genuine new error in File B", async () => {
+    const preTaskFileA = `
+import { useState } from 'react';
+export function A() { useState(); }
+`;
+    const preTaskFileB = `
+export function B() { return 42; }
+`;
+    const postTaskFileA = `
+"use client";
+import { useState } from 'react';
+export function A() { useState(); }
+`;
+    const postTaskFileB = `
+export function B() { return nonExistentVar; }
+`;
+
+    const baselineErrors = `
+./components/A.tsx:2:10
+You're importing a module that depends on \`useState\` into a React Server Component module.
+`;
+    const postPatchErrors = `
+./components/B.tsx:2:30
+Cannot find name 'nonExistentVar'.
+`;
+
+    const baseDiags = BaselineDeltaVerifier.extractDiagnostics(baselineErrors, "BASELINE");
+    const postDiags = BaselineDeltaVerifier.extractDiagnostics(postPatchErrors, "CURRENT_TASK");
+    const targeted = baseDiags;
+
+    const deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
+      baseDiags,
+      postDiags,
+      targeted,
+      {
+        preTaskSourceGetter: (path: string) => (path.includes("A.tsx") ? preTaskFileA : preTaskFileB),
+        changes: [
+          { path: "components/A.tsx", content: postTaskFileA, action: "modify" as const, description: "A" },
+          { path: "components/B.tsx", content: postTaskFileB, action: "modify" as const, description: "B" },
+        ],
+        isBroadRepairTask: false,
+      }
+    );
+
+    expect(deltaResult.newTaskDiagnostics.length).toBe(1);
+    expect(deltaResult.revealedBaselineDiagnostics.length).toBe(0);
+    expect(deltaResult.taskVerified).toBe(false);
+  });
 });

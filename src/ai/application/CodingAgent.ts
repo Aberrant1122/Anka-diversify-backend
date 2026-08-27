@@ -57,6 +57,10 @@ export class CodingAgent {
       throw new Error(`[REPOSITORY_NOT_READY] Project "${projectId}" does not exist in database.`);
     }
 
+    const isUserConfiguredLocalPath = Boolean(
+      project.localPath && !RepositoryMaterializationService.isManagedRepositoryPath(project.localPath)
+    );
+
     // 3. Materialize or refresh repository freshness if githubUrl is present or managed clone exists
     if (project.githubUrl || (project.localPath && RepositoryMaterializationService.isManagedRepositoryPath(project.localPath))) {
       const mat = await RepositoryMaterializationService.ensureProjectRepositoryCurrent(projectId);
@@ -64,7 +68,7 @@ export class CodingAgent {
         project.localPath = mat.metadata.canonicalRoot;
       } else if (!project.localPath) {
         throw new Error(
-          `[REPOSITORY_NOT_READY] Project "${projectId}" failed repository materialization: ${mat.error || "Unknown error"}. githubUrl=${project.githubUrl}, localPathConfigured=false`
+          `[REPOSITORY_NOT_READY] Project "${projectId}" failed repository materialization: ${mat.error || "Unknown error"}. githubUrl=${project.githubUrl}, localPathConfigured=${isUserConfiguredLocalPath}`
         );
       }
     }
@@ -73,7 +77,7 @@ export class CodingAgent {
     if (!project.localPath) {
       console.log(`[ANKA_EXEC] gitRoot=none (no localPath configured)`);
       throw new Error(
-        `[REPOSITORY_NOT_READY] Project "${projectId}" has no local repository configured and no valid repository source. localPathConfigured=false, githubUrl=${project.githubUrl || "none"}`
+        `[REPOSITORY_NOT_READY] Project "${projectId}" has no local repository configured and no valid repository source. localPathConfigured=${isUserConfiguredLocalPath}, githubUrl=${project.githubUrl || "none"}`
       );
     }
 
@@ -107,7 +111,7 @@ export class CodingAgent {
     console.log(`[REPO_READY] project=${projectId}`);
     console.log(`[REPO_READY] trackedFiles=${trackedFilesCount}`);
     console.log(`[REPO_READY] head=${headSha.slice(0, 8)}`);
-    console.log(`[REPO_READY] localPathConfigured=true`);
+    console.log(`[REPO_READY] localPathConfigured=${isUserConfiguredLocalPath}`);
 
     // 8. Execute strictly through GitWorktreeService against the canonical Git repository root
     const runId = crypto.randomUUID().slice(0, 8);

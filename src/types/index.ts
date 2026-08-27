@@ -503,6 +503,7 @@ export interface AgentResponse {
   targetedBaselineDiagnostics?: BaselineDiagnostic[];
   resolvedTargetDiagnostics?: BaselineDiagnostic[];
   remainingBaselineDiagnostics?: BaselineDiagnostic[];
+  revealedBaselineDiagnostics?: BaselineDiagnostic[];
   newTaskDiagnostics?: BaselineDiagnostic[];
   securityRiskLevel?: string;
   securityVulnerabilities?: Array<{ file: string; issue: string; severity: string }>;

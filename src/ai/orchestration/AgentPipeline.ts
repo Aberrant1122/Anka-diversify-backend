@@ -906,6 +906,7 @@ export class AgentPipeline {
       targetedBaselineDiagnostics: repairResult.deltaResult?.targetedBaselineDiagnostics,
       resolvedTargetDiagnostics: repairResult.deltaResult?.resolvedTargetDiagnostics,
       remainingBaselineDiagnostics: repairResult.deltaResult?.remainingBaselineDiagnostics,
+      revealedBaselineDiagnostics: repairResult.deltaResult?.revealedBaselineDiagnostics,
       newTaskDiagnostics: repairResult.deltaResult?.newTaskDiagnostics,
       repaired: Boolean(repairResult.repaired ?? repairResult.attempts > 1),
       repairAttempted: Boolean(repairResult.attempts > 1 || repairResult.repaired),

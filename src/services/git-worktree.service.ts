@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { exec } from "child_process";
+import { exec, execSync } from "child_process";
 import { promisify } from "util";
 import { AgentPipeline } from "../ai/orchestration/AgentPipeline";
 import { AgentFileChange, AgentProgressEvent, AgentResponse, ChatRequest, BaselineDiagnostic } from "../types";
@@ -13,6 +13,7 @@ import { ErrorClassifier } from "../ai/validation/ErrorClassifier";
 import { BaselineRepairCoordinator } from "./baseline-repair.coordinator";
 import { BaselineDeltaVerifier, BaselineDeltaResult } from "./baseline-delta.verifier";
 import { RuntimePreflightService } from "./runtime-preflight.service";
+import { RepositoryCacheManager } from "./repository-cache.manager";
 
 const execAsync = promisify(exec);
 
@@ -358,12 +359,13 @@ export class GitWorktreeService {
   static async runIsolatedAgent(options: RunIsolatedAgentOptions): Promise<RepositoryRunSummary> {
     const { userId, projectId, repositoryPath, runId, request, onProgress } = options;
 
-    const prepared = await this.prepareRepositoryRun({ repositoryPath, runId });
-    console.log(`[ANKA_EXEC] worktree=${prepared.worktreePath}`);
+    return RepositoryCacheManager.withLease(projectId, async () => {
+      const prepared = await this.prepareRepositoryRun({ repositoryPath, runId });
+      console.log(`[ANKA_EXEC] worktree=${prepared.worktreePath}`);
 
-    try {
-      // 2. Prepare dependencies inside isolated worktree
-      const depPrep = await WorktreeDependencyService.prepareDependencies(prepared.worktreePath);
+      try {
+        // 2. Prepare dependencies inside isolated worktree
+        const depPrep = await WorktreeDependencyService.prepareDependencies(prepared.worktreePath);
       if (!depPrep.success) {
         const errorType = depPrep.errorType || "INFRASTRUCTURE";
         const isRepairableDep =
@@ -663,10 +665,30 @@ export class GitWorktreeService {
         } else {
           const postBuild = await ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands);
           const postChangeDiagnostics = BaselineDeltaVerifier.extractDiagnostics(postBuild.errors, "CURRENT_TASK");
+
+          const preTaskSourceGetter = (filePath: string) => {
+            try {
+              const absPath = path.join(prepared.worktreePath, filePath);
+              // If git show baseCommitSha is available
+              return execSync(`git show ${prepared.baseCommitSha}:${filePath}`, {
+                cwd: prepared.worktreePath,
+                encoding: "utf8",
+                stdio: ["pipe", "pipe", "ignore"],
+              });
+            } catch {
+              return null;
+            }
+          };
+
           deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
             baselineDiagnostics,
             postChangeDiagnostics,
-            targetedBaselineDiagnostics
+            targetedBaselineDiagnostics,
+            {
+              preTaskSourceGetter,
+              changes: agentResponse.changes,
+              isBroadRepairTask: BaselineDeltaVerifier.isBroadBuildRepairTask(request.message),
+            }
           );
 
           if (deltaResult.taskVerified) {
@@ -721,16 +743,18 @@ export class GitWorktreeService {
           targetedBaselineDiagnostics: deltaResult?.targetedBaselineDiagnostics ?? agentResponse.targetedBaselineDiagnostics,
           resolvedTargetDiagnostics: deltaResult?.resolvedTargetDiagnostics ?? agentResponse.resolvedTargetDiagnostics,
           remainingBaselineDiagnostics: deltaResult?.remainingBaselineDiagnostics ?? agentResponse.remainingBaselineDiagnostics,
+          revealedBaselineDiagnostics: deltaResult?.revealedBaselineDiagnostics ?? agentResponse.revealedBaselineDiagnostics,
           newTaskDiagnostics: deltaResult?.newTaskDiagnostics ?? agentResponse.newTaskDiagnostics,
         },
       };
-    } finally {
-      await this.cleanupWorktree(
-        prepared.worktreePath,
-        prepared.repositoryRoot,
-        prepared.branchName,
-        runId
-      );
-    }
+      } finally {
+        await this.cleanupWorktree(
+          prepared.worktreePath,
+          prepared.repositoryRoot,
+          prepared.branchName,
+          runId
+        );
+      }
+    });
   }
 }

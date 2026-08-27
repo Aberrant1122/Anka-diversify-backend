@@ -1,15 +1,23 @@
 import { ErrorDiagnosticsParser, DiagnosticError } from "./surgical-repair.engine";
 import { ErrorClassifier } from "../ai/validation/ErrorClassifier";
-import { BaselineDiagnostic } from "../types";
+import { BaselineDiagnostic, ExecutionContract } from "../types";
+import { AgentFileChange } from "../ai/shared/types";
 
 export interface BaselineDeltaResult {
   baselineDiagnosticCount: number;
   targetedBaselineDiagnostics: BaselineDiagnostic[];
   resolvedTargetDiagnostics: BaselineDiagnostic[];
   remainingBaselineDiagnostics: BaselineDiagnostic[];
+  revealedBaselineDiagnostics: BaselineDiagnostic[];
   newTaskDiagnostics: BaselineDiagnostic[];
   taskVerified: boolean;
   repositoryClean: boolean;
+}
+
+export interface CausalityContext {
+  preTaskSourceGetter?: (filePath: string) => string | null | undefined;
+  changes?: AgentFileChange[];
+  isBroadRepairTask?: boolean;
 }
 
 export class BaselineDeltaVerifier {
@@ -205,12 +213,94 @@ export class BaselineDeltaVerifier {
   }
 
   /**
+   * Deterministically determines whether an error appearing after a fix was caused by a pre-existing
+   * construct in the authoritative pre-task source that was NOT created or modified by the agent's patch.
+   */
+  public static isConstructPreExistingAndUntouched(
+    diag: BaselineDiagnostic,
+    preTaskContent: string | null | undefined,
+    change?: AgentFileChange
+  ): { isPreExisting: boolean; isTouched: boolean } {
+    if (!preTaskContent) {
+      // File did not exist before task or content is unavailable -> fail safe to new task error
+      return { isPreExisting: false, isTouched: true };
+    }
+
+    const postContent = change?.content;
+    const msg = diag.message || "";
+    const rawTrace = diag.rawTrace || "";
+    const symbolName = diag.symbolName;
+
+    // 1. Redeclaration / Duplicate export check (e.g. Cannot redeclare exported variable 'CalculatorButton')
+    const redeclareMatch =
+      msg.match(/(?:cannot redeclare exported variable|cannot redeclare block-scoped variable|identifier|duplicate identifier|already been declared)['"\s]+([a-zA-Z0-9_$]+)/i) ||
+      rawTrace.match(/(?:cannot redeclare exported variable|cannot redeclare block-scoped variable|identifier|duplicate identifier|already been declared)['"\s]+([a-zA-Z0-9_$]+)/i);
+    const targetSymbol = symbolName || (redeclareMatch ? redeclareMatch[1] : undefined);
+
+    if (targetSymbol) {
+      const symbolDeclRegex = new RegExp(`(?:export\\s+(?:const|let|var|function|class|type|interface)|(?:const|let|var|function|class|type|interface))\\s+${targetSymbol}\\b`, "g");
+      const preMatches = preTaskContent.match(symbolDeclRegex) || [];
+      const preSymbolOccurrences = (preTaskContent.match(new RegExp(`\\b${targetSymbol}\\b`, "g")) || []).length;
+
+      // If pre-task source had 2+ declarations or multiple occurrences of this symbol
+      if (preMatches.length >= 2 || (preMatches.length >= 1 && preSymbolOccurrences >= 2)) {
+        if (postContent) {
+          const postMatches = postContent.match(symbolDeclRegex) || [];
+          const agentAddedDeclarations = postMatches.length > preMatches.length;
+          if (!agentAddedDeclarations) {
+            return { isPreExisting: true, isTouched: false };
+          } else {
+            return { isPreExisting: true, isTouched: true };
+          }
+        }
+        return { isPreExisting: true, isTouched: false };
+      }
+    }
+
+    // 2. Syntax / Type / Snippet Check: if error snippet or line exists in rawTrace
+    const codeSnippetMatch = rawTrace.match(/>\s*\d+\s*\|\s*(.+)/);
+    if (codeSnippetMatch) {
+      const failingSnippet = codeSnippetMatch[1].trim();
+      if (failingSnippet.length > 5 && preTaskContent.includes(failingSnippet)) {
+        if (postContent && postContent.includes(failingSnippet)) {
+          return { isPreExisting: true, isTouched: false };
+        }
+      }
+    }
+
+    // 3. Fallback check for exact message / error construct in preTaskContent
+    if (diag.errorCode && diag.errorCode.startsWith("TS")) {
+      const nameMatch = msg.match(/Cannot find (?:name|module) '([^']+)'/i);
+      if (nameMatch && preTaskContent.includes(nameMatch[1])) {
+        if (!postContent || postContent.includes(nameMatch[1])) {
+          return { isPreExisting: true, isTouched: false };
+        }
+      }
+    }
+
+    // Fail safe: could not prove pre-existence with deterministic evidence
+    return { isPreExisting: false, isTouched: true };
+  }
+
+  /**
+   * Helper to check if a user message or execution contract represents a broad build repair task.
+   */
+  public static isBroadBuildRepairTask(message?: string, contract?: ExecutionContract | null): boolean {
+    if (contract?.goal && /fix all (?:build )?errors|repair (?:the )?(?:entire |all )?build/i.test(contract.goal)) {
+      return true;
+    }
+    if (!message) return false;
+    return /fix all (?:build )?errors|clear all (?:build )?errors|make (?:the )?(?:repository|repo|project|build) build(?: successfully)?|repair (?:the )?(?:entire |all )?(?:broken )?build/i.test(message);
+  }
+
+  /**
    * Compares baseline diagnostics with post-change diagnostics.
    */
   public static compareBaselineVsPostChange(
     baselineDiagnostics: BaselineDiagnostic[],
     postChangeDiagnostics: BaselineDiagnostic[],
-    targetedDiagnostics: BaselineDiagnostic[]
+    targetedDiagnostics: BaselineDiagnostic[],
+    causalityContext?: CausalityContext
   ): BaselineDeltaResult {
     const postFpSet = new Set(postChangeDiagnostics.map((p) => p.fingerprint));
     const baseFpSet = new Set(baselineDiagnostics.map((b) => b.fingerprint));
@@ -218,24 +308,61 @@ export class BaselineDeltaVerifier {
     // Targeted diagnostics that disappeared
     const resolvedTargetDiagnostics = targetedDiagnostics.filter((t) => !postFpSet.has(t.fingerprint));
 
-    // Pre-existing baseline diagnostics that remain
+    // Pre-existing baseline diagnostics that remain explicitly
     const remainingBaselineDiagnostics = baselineDiagnostics.filter((b) => postFpSet.has(b.fingerprint));
 
-    // Diagnostics in post-change that did NOT exist in baseline
-    const newTaskDiagnostics = postChangeDiagnostics.filter((p) => !baseFpSet.has(p.fingerprint));
+    // Diagnostics in post-change that did NOT exist in original baseline output
+    const unpredictedDiagnostics = postChangeDiagnostics.filter((p) => !baseFpSet.has(p.fingerprint));
+
+    const revealedBaselineDiagnostics: BaselineDiagnostic[] = [];
+    const newTaskDiagnostics: BaselineDiagnostic[] = [];
+
+    const isBaselineDeltaMode = targetedDiagnostics.length > 0 && resolvedTargetDiagnostics.length > 0;
+
+    for (const diag of unpredictedDiagnostics) {
+      if (isBaselineDeltaMode && causalityContext?.preTaskSourceGetter && diag.filePath) {
+        const cleanPath = diag.filePath.replace(/^\.\//, "").replace(/\\/g, "/");
+        const preContent = causalityContext.preTaskSourceGetter(cleanPath);
+        const change = causalityContext.changes?.find(
+          (c) => (c.path || "").replace(/^\.\//, "").replace(/\\/g, "/").toLowerCase() === cleanPath.toLowerCase()
+        );
+
+        const causality = this.isConstructPreExistingAndUntouched(diag, preContent, change);
+        const isRevealed = causality.isPreExisting && !causality.isTouched;
+
+        console.log(
+          `[BASELINE_CAUSALITY] file=${cleanPath} diagnostic=${diag.errorCode || diag.message.slice(0, 50)} preExistingCause=${causality.isPreExisting} agentTouchedCause=${causality.isTouched} classification=${isRevealed ? "REVEALED_BASELINE" : "NEW_TASK"}`
+        );
+
+        if (isRevealed) {
+          revealedBaselineDiagnostics.push(diag);
+        } else {
+          newTaskDiagnostics.push(diag);
+        }
+      } else {
+        newTaskDiagnostics.push(diag);
+      }
+    }
 
     const allTargetedResolved =
       targetedDiagnostics.length > 0 && resolvedTargetDiagnostics.length === targetedDiagnostics.length;
     const noNewErrors = newTaskDiagnostics.length === 0;
 
-    const taskVerified = allTargetedResolved && noNewErrors;
+    // For broad repair requests ("fix all build errors"), revealed errors remain in repair scope
+    const isBroad = Boolean(causalityContext?.isBroadRepairTask);
     const repositoryClean = postChangeDiagnostics.length === 0;
+    const taskVerified = isBroad ? repositoryClean : allTargetedResolved && noNewErrors;
+
+    console.log(
+      `[BASELINE_DELTA] targetResolved=${allTargetedResolved} remainingBaseline=${remainingBaselineDiagnostics.length} revealedBaseline=${revealedBaselineDiagnostics.length} newTask=${newTaskDiagnostics.length}`
+    );
 
     return {
       baselineDiagnosticCount: baselineDiagnostics.length,
       targetedBaselineDiagnostics: targetedDiagnostics,
       resolvedTargetDiagnostics,
       remainingBaselineDiagnostics,
+      revealedBaselineDiagnostics,
       newTaskDiagnostics,
       taskVerified,
       repositoryClean,
@@ -256,6 +383,16 @@ export class BaselineDeltaVerifier {
       lines.push("Resolved:");
       for (const res of delta.resolvedTargetDiagnostics) {
         lines.push(`- ${res.filePath ? `${res.filePath} (${res.errorCode || res.message})` : res.message}`);
+      }
+
+      if (delta.revealedBaselineDiagnostics && delta.revealedBaselineDiagnostics.length > 0) {
+        lines.push("");
+        lines.push("Revealed pre-existing errors (unmasked after requested fix):");
+        for (const rev of delta.revealedBaselineDiagnostics) {
+          lines.push(`- ${rev.filePath ? `${rev.filePath}: ${rev.message}` : rev.message}`);
+        }
+        lines.push("");
+        lines.push("These pre-existing errors already existed in the baseline and were not caused by this change.");
       }
 
       if (delta.remainingBaselineDiagnostics.length > 0) {

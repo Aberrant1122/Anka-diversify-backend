@@ -418,10 +418,23 @@ export class SelfHealingEngine {
 
         if (baselineDiagnostics && baselineDiagnostics.length > 0) {
           const currentDiags = BaselineDeltaVerifier.extractDiagnostics(validation.errors, "CURRENT_TASK");
+          const isBroad = BaselineDeltaVerifier.isBroadBuildRepairTask(originalMessage, executionContract);
+          const preTaskSourceGetter = (filePath: string) => {
+            if (fsManager) {
+              return fsManager.getOriginalContent(filePath);
+            }
+            return undefined;
+          };
+
           const deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
             baselineDiagnostics,
             currentDiags,
-            targetedBaselineDiagnostics || []
+            targetedBaselineDiagnostics || [],
+            {
+              preTaskSourceGetter,
+              changes: currentChanges,
+              isBroadRepairTask: isBroad,
+            }
           );
 
           if (deltaResult.taskVerified) {

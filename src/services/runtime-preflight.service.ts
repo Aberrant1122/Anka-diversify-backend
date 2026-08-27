@@ -14,6 +14,9 @@ export class RuntimePreflightService {
    * Throws Error("RUNTIME_DEPENDENCY_MISSING: <tool>") if missing.
    */
   public static async verifyTool(tool: RequiredRuntimeTool): Promise<void> {
+    if (this.verifiedTools.has(tool)) {
+      return;
+    }
     try {
       const command = `${tool} --version`;
       await execAsync(command, { timeout: 10000 });
