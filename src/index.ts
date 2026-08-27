@@ -105,17 +105,23 @@ httpServer.on("upgrade", (_req, socket) => {
 });
 
 import { WasmASTParserEngine } from "./services/ast-parser.engine";
+import { GitWorktreeService } from "./services/git-worktree.service";
+import { RepositoryCacheManager } from "./services/repository-cache.manager";
 
 // Initialize WebAssembly Tree-Sitter AST Engine on server boot
 WasmASTParserEngine.initialize()
   .then(() => console.log("  ✓ WebAssembly Tree-Sitter AST Engine initialized"))
   .catch((err) => console.warn(`[WasmAST Engine Warning] Initialization warning: ${err?.message || err}`));
 
+// Execute startup sweep across repository cache mirrors and orphan run directories
+RepositoryCacheManager.performStartupSweep()
+  .then((res) => console.log(`  ✓ Startup sweep completed: ${res.sweptCaches} cache(s), ${res.sweptRuns} run(s), reclaimed ${res.reclaimedBytes} bytes`))
+  .catch((err) => console.warn(`[StartupSweep Warning] Startup sweep warning: ${err?.message || err}`));
+
 httpServer.listen(PORT, () => {
   console.log(`🚀 Anka OS Backend server running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🤖 AI API: http://localhost:${PORT}/api/ai`);
-
 });
 
 httpServer.timeout = 300000; // 5 minutes for long-running AI agent tasks

@@ -5,6 +5,7 @@ import { promisify } from "util";
 import { prisma } from "./database";
 import { decrypt } from "../utils/encryption";
 import { GitWorktreeService } from "./git-worktree.service";
+import { RepositoryCacheManager } from "./repository-cache.manager";
 
 const execAsync = promisify(exec);
 
@@ -26,23 +27,41 @@ export interface MaterializationResult {
 export class RepositoryMaterializationService {
   /**
    * Deterministic directory for managed repository clones.
+   * Resolves to ephemeral cache under os.tmpdir()/anka/repo-cache/<projectId>.
    */
   public static getManagedRepositoryPath(projectId: string): string {
-    return path.resolve(process.cwd(), ".anka-cache", "managed-repos", projectId);
+    return RepositoryCacheManager.getProjectCachePath(projectId);
   }
 
   /**
-   * Checks whether a directory is inside the internal ANKA managed repository cache.
+   * Checks whether a directory is inside an ANKA managed repository cache (current ephemeral or legacy).
    */
   public static isManagedRepositoryPath(dirPath: string): boolean {
     if (!dirPath) return false;
     const resolvedTarget = path.resolve(dirPath);
-    const managedBase = path.resolve(process.cwd(), ".anka-cache", "managed-repos");
-    return (
-      resolvedTarget.startsWith(managedBase + path.sep) ||
-      resolvedTarget.startsWith(managedBase + "/") ||
-      resolvedTarget === managedBase
-    );
+    const currentBase = path.resolve(RepositoryCacheManager.getCacheRoot());
+    const legacyBase = path.resolve(process.cwd(), ".anka-cache", "managed-repos");
+
+    const isUnderCurrent =
+      resolvedTarget.startsWith(currentBase + path.sep) ||
+      resolvedTarget.startsWith(currentBase + "/") ||
+      resolvedTarget === currentBase;
+
+    const isUnderLegacy =
+      resolvedTarget.startsWith(legacyBase + path.sep) ||
+      resolvedTarget.startsWith(legacyBase + "/") ||
+      resolvedTarget === legacyBase;
+
+    return isUnderCurrent || isUnderLegacy;
+  }
+
+  /**
+   * Checks whether a path is a legacy .anka-cache managed repository path.
+   */
+  public static isLegacyManagedPath(dirPath: string): boolean {
+    if (!dirPath) return false;
+    const normalized = dirPath.replace(/\\/g, "/");
+    return normalized.includes(".anka-cache/managed-repos");
   }
 
   /**
@@ -58,231 +77,74 @@ export class RepositoryMaterializationService {
   }
 
   /**
+   * Builds an authenticated or clean Git URL for cloning/fetching with credentials.
+   */
+  private static buildAuthGitUrl(rawUrl: string, encryptedToken?: string | null): string {
+    let token: string | undefined;
+    if (encryptedToken) {
+      try {
+        token = decrypt(encryptedToken);
+      } catch {}
+    }
+
+    let fetchUrl = rawUrl.trim();
+    if (token && fetchUrl.startsWith("https://github.com/")) {
+      const repoPath = fetchUrl.replace("https://github.com/", "");
+      fetchUrl = `https://x-access-token:${token}@github.com/${repoPath}`;
+    }
+    return fetchUrl;
+  }
+
+  /**
    * Ensures that a project's repository is materialized and fresh.
    * If it is an ANKA-managed clone, synchronizes it to the latest remote branch commit.
    * If it is a user-owned external localPath, leaves their checkout untouched and inspects local HEAD.
    */
   public static async ensureProjectRepositoryCurrent(projectId: string): Promise<MaterializationResult> {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { id: true, name: true, localPath: true, githubUrl: true, githubToken: true },
-    });
+    return RepositoryCacheManager.withProjectLock(projectId, async () => {
+      // Runtime preflight verification for git
+      try {
+        const { RuntimePreflightService } = await import("./runtime-preflight.service");
+        await RuntimePreflightService.verifyTool("git");
+      } catch (preflightErr: any) {
+        return {
+          success: false,
+          errorType: "RUNTIME_DEPENDENCY_MISSING" as any,
+          error: preflightErr?.message || "RUNTIME_DEPENDENCY_MISSING: git",
+        };
+      }
 
-    if (!project) {
-      return {
-        success: false,
-        errorType: "REPOSITORY_NOT_READY",
-        error: `Project "${projectId}" not found in database.`,
-      };
-    }
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: { id: true, name: true, localPath: true, githubUrl: true, githubToken: true },
+      });
 
-    const managedPath = this.getManagedRepositoryPath(projectId);
-    const hasConfiguredPath = Boolean(project.localPath && fs.existsSync(path.resolve(project.localPath)));
-    const hasManagedClone = fs.existsSync(path.join(managedPath, ".git"));
-
-    // If no local clone exists anywhere, perform initial clone
-    if (!hasConfiguredPath && !hasManagedClone) {
-      if (!project.githubUrl) {
+      if (!project) {
         return {
           success: false,
           errorType: "REPOSITORY_NOT_READY",
-          error: `Project "${projectId}" has no localPath configured and no githubUrl to materialize.`,
+          error: `Project "${projectId}" not found in database.`,
         };
       }
-      return this.materializeProjectRepository(projectId);
-    }
 
-    const candidateRoot = project.localPath && fs.existsSync(path.resolve(project.localPath))
-      ? path.resolve(project.localPath)
-      : managedPath;
+      // Check if project has a genuine user-owned external localPath (not any managed repository path)
+      const isManagedPath = project.localPath ? this.isManagedRepositoryPath(project.localPath) : false;
+      const hasConfiguredExternalPath = Boolean(
+        project.localPath && !isManagedPath && fs.existsSync(path.resolve(project.localPath))
+      );
 
-    const isManaged = this.isManagedRepositoryPath(candidateRoot);
+      const managedPath = this.getManagedRepositoryPath(projectId);
+      const isFresh = RepositoryCacheManager.isCacheFresh(projectId);
+      const gitDirExists = fs.existsSync(path.join(managedPath, ".git"));
+      const cacheAgeMs = RepositoryCacheManager.getCacheAgeMs(projectId);
 
-    try {
-      const canonicalRoot = await GitWorktreeService.resolveRepositoryRoot(candidateRoot);
-      const localHeadBefore = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
-
-      let branch = "main";
-      try {
-        const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: canonicalRoot });
-        branch = stdout.trim() || "main";
-      } catch {}
-
-      let origin = "";
-      try {
-        const { stdout } = await execAsync("git remote get-url origin", { cwd: canonicalRoot });
-        origin = stdout.trim();
-      } catch {}
-
-      let localHeadAfter = localHeadBefore;
-      let updated = false;
-
-      // For ANKA-managed clones backed by githubUrl: sync to latest remote commit
-      if (isManaged && project.githubUrl) {
-        let token: string | undefined;
-        if (project.githubToken) {
-          try {
-            token = decrypt(project.githubToken);
-          } catch {}
-        }
-
-        let fetchUrl = project.githubUrl.trim();
-        if (token && fetchUrl.startsWith("https://github.com/")) {
-          const repoPath = fetchUrl.replace("https://github.com/", "");
-          fetchUrl = `https://x-access-token:${token}@github.com/${repoPath}`;
-        }
-
+      // If user-owned external localPath exists, inspect directly without touching
+      if (hasConfiguredExternalPath) {
+        const candidateRoot = path.resolve(project.localPath!);
         try {
-          // Verify working tree is clean
-          const { stdout: statusOut } = await execAsync("git status --porcelain", { cwd: canonicalRoot });
-          if (statusOut.trim().length > 0) {
-            console.warn(`[RepoSync] Managed clone has uncommitted files. Cleaning.`);
-            await execAsync("git reset --hard HEAD", { cwd: canonicalRoot });
-            await execAsync("git clean -fd", { cwd: canonicalRoot });
-          }
-
-          // Ensure remote URL is configured
-          try {
-            await execAsync(`git remote set-url origin "${fetchUrl}"`, { cwd: canonicalRoot });
-          } catch {
-            await execAsync(`git remote add origin "${fetchUrl}"`, { cwd: canonicalRoot });
-          }
-
-          // Fetch from remote
-          await execAsync("git fetch origin", { cwd: canonicalRoot, timeout: 60000 });
-
-          // Resolve remote branch HEAD SHA
-          let remoteHead = "";
-          try {
-            const { stdout: remoteShaOut } = await execAsync(`git rev-parse origin/${branch}`, { cwd: canonicalRoot });
-            remoteHead = remoteShaOut.trim();
-          } catch {
-            // Fallback to FETCH_HEAD or main/master
-            try {
-              const { stdout: fetchHeadOut } = await execAsync("git rev-parse FETCH_HEAD", { cwd: canonicalRoot });
-              remoteHead = fetchHeadOut.trim();
-            } catch {}
-          }
-
-          if (remoteHead && remoteHead !== localHeadBefore) {
-            await execAsync(`git reset --hard ${remoteHead}`, { cwd: canonicalRoot });
-            localHeadAfter = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
-            updated = true;
-          }
-
-          console.log(`[REPO_SYNC] remoteHead=${(remoteHead || localHeadAfter).slice(0, 8)}`);
-          console.log(`[REPO_SYNC] localHeadBefore=${localHeadBefore.slice(0, 8)}`);
-          console.log(`[REPO_SYNC] localHeadAfter=${localHeadAfter.slice(0, 8)}`);
-          console.log(`[REPO_SYNC] updated=${updated}`);
-        } catch (syncErr: any) {
-          console.warn(`[RepoSync] Fetch/reset warning on managed repo "${canonicalRoot}": ${syncErr?.message}`);
-        }
-      }
-
-      const { stdout: lsOut } = await execAsync("git ls-files", { cwd: canonicalRoot });
-      const trackedFilesCount = lsOut.split("\n").filter((l) => l.trim().length > 0).length;
-
-      // Update Project.localPath in database to canonicalRoot if needed
-      if (project.localPath !== canonicalRoot) {
-        await prisma.project.update({
-          where: { id: projectId },
-          data: { localPath: canonicalRoot },
-        });
-      }
-
-      return {
-        success: true,
-        metadata: {
-          canonicalRoot,
-          headSha: localHeadAfter,
-          branch,
-          origin,
-          trackedFilesCount,
-        },
-      };
-    } catch (err: any) {
-      if (project.githubUrl) {
-        return this.materializeProjectRepository(projectId);
-      }
-      return {
-        success: false,
-        errorType: "VALIDATION_FAILED",
-        error: `Failed ensuring freshness for repository "${candidateRoot}": ${err?.message || err}`,
-      };
-    }
-  }
-
-  /**
-   * Synchronizes an ANKA-managed clone directly to a specific commit SHA after an authorized push.
-   */
-  public static async syncManagedCloneToCommit(projectId: string, commitSha: string): Promise<boolean> {
-    if (!projectId || !commitSha) return false;
-    const managedPath = this.getManagedRepositoryPath(projectId);
-    if (!fs.existsSync(path.join(managedPath, ".git"))) {
-      return false;
-    }
-
-    try {
-      const canonicalRoot = await GitWorktreeService.resolveRepositoryRoot(managedPath);
-      const localHeadBefore = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
-
-      if (localHeadBefore === commitSha) {
-        console.log(`[REPO_SYNC] remoteHead=${commitSha.slice(0, 8)}`);
-        console.log(`[REPO_SYNC] localHeadBefore=${localHeadBefore.slice(0, 8)}`);
-        console.log(`[REPO_SYNC] localHeadAfter=${localHeadBefore.slice(0, 8)}`);
-        console.log(`[REPO_SYNC] updated=false`);
-        return true;
-      }
-
-      // Fetch and reset
-      await execAsync("git fetch origin", { cwd: canonicalRoot, timeout: 60000 });
-      await execAsync(`git reset --hard ${commitSha}`, { cwd: canonicalRoot });
-      const localHeadAfter = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
-
-      console.log(`[REPO_SYNC] remoteHead=${commitSha.slice(0, 8)}`);
-      console.log(`[REPO_SYNC] localHeadBefore=${localHeadBefore.slice(0, 8)}`);
-      console.log(`[REPO_SYNC] localHeadAfter=${localHeadAfter.slice(0, 8)}`);
-      console.log(`[REPO_SYNC] updated=${localHeadAfter !== localHeadBefore}`);
-      return true;
-    } catch (err: any) {
-      console.warn(`[RepoSync] Could not sync managed clone to commit ${commitSha}: ${err?.message}`);
-      return false;
-    }
-  }
-
-  /**
-   * Materializes and verifies a project's local Git repository.
-   * If a project only has a githubUrl, this clones or refreshes the repository
-   * into a deterministic managed directory and persists Project.localPath.
-   */
-  public static async materializeProjectRepository(projectId: string): Promise<MaterializationResult> {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { id: true, name: true, localPath: true, githubUrl: true, githubToken: true },
-    });
-
-    if (!project) {
-      return {
-        success: false,
-        errorType: "REPOSITORY_NOT_READY",
-        error: `Project "${projectId}" not found in database.`,
-      };
-    }
-
-    // Case 1: Project already has an existing valid localPath on disk
-    if (project.localPath) {
-      const resolvedLocal = path.resolve(project.localPath);
-      if (fs.existsSync(resolvedLocal)) {
-        try {
-          const canonicalRoot = await GitWorktreeService.resolveRepositoryRoot(resolvedLocal);
-          
-          // If it is a managed clone and has githubUrl, ensure freshness
-          if (this.isManagedRepositoryPath(canonicalRoot) && project.githubUrl) {
-            return this.ensureProjectRepositoryCurrent(projectId);
-          }
-
+          const canonicalRoot = await GitWorktreeService.resolveRepositoryRoot(candidateRoot);
           const headSha = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
-          
+
           let branch = "main";
           try {
             const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: canonicalRoot });
@@ -304,7 +166,238 @@ export class RepositoryMaterializationService {
               canonicalRoot,
               headSha,
               branch,
-              origin,
+              origin: RepositoryCacheManager.redactCredentials(origin),
+              trackedFilesCount,
+            },
+          };
+        } catch (err: any) {
+          console.warn(`[RepoMaterialization] User configured localPath "${project.localPath}" error:`, err);
+        }
+      }
+
+      // Log structured REPO_CACHE metrics for managed cache
+      if (!gitDirExists) {
+        RepositoryCacheManager.logStatus(projectId, "MISS");
+      } else if (isFresh) {
+        RepositoryCacheManager.logStatus(projectId, "HIT", cacheAgeMs ?? undefined);
+      } else {
+        RepositoryCacheManager.logStatus(projectId, "EXPIRED", cacheAgeMs ?? undefined);
+      }
+
+      // If no valid clone exists or cache expired, perform fresh clone / materialization
+      if (!isFresh) {
+        if (!project.githubUrl) {
+          return {
+            success: false,
+            errorType: "REPOSITORY_NOT_READY",
+            error: `Project "${projectId}" has no localPath configured and no githubUrl to materialize.`,
+          };
+        }
+        return this.materializeProjectRepositoryInternal(projectId, project);
+      }
+
+      // Existing fresh managed cache: sync with remote HEAD
+      try {
+        const canonicalRoot = await GitWorktreeService.resolveRepositoryRoot(managedPath);
+        const localHeadBefore = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
+
+        let branch = "main";
+        try {
+          const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: canonicalRoot });
+          branch = stdout.trim() || "main";
+        } catch {}
+
+        let origin = "";
+        try {
+          const { stdout } = await execAsync("git remote get-url origin", { cwd: canonicalRoot });
+          origin = stdout.trim();
+        } catch {}
+
+        let localHeadAfter = localHeadBefore;
+        let updated = false;
+
+        if (project.githubUrl) {
+          const fetchUrl = this.buildAuthGitUrl(project.githubUrl, project.githubToken);
+
+          try {
+            // Verify working tree is clean
+            const { stdout: statusOut } = await execAsync("git status --porcelain", { cwd: canonicalRoot });
+            if (statusOut.trim().length > 0) {
+              console.warn(`[RepoSync] Managed clone has uncommitted files. Cleaning.`);
+              await execAsync("git reset --hard HEAD", { cwd: canonicalRoot });
+              await execAsync("git clean -fd", { cwd: canonicalRoot });
+            }
+
+            // Ensure remote URL is configured
+            try {
+              await execAsync(`git remote set-url origin "${fetchUrl}"`, { cwd: canonicalRoot });
+            } catch {
+              await execAsync(`git remote add origin "${fetchUrl}"`, { cwd: canonicalRoot });
+            }
+
+            // Fetch from remote
+            await execAsync("git fetch origin", { cwd: canonicalRoot, timeout: 60000 });
+
+            // Resolve remote branch HEAD SHA
+            let remoteHead = "";
+            try {
+              const { stdout: remoteShaOut } = await execAsync(`git rev-parse origin/${branch}`, { cwd: canonicalRoot });
+              remoteHead = remoteShaOut.trim();
+            } catch {
+              try {
+                const { stdout: fetchHeadOut } = await execAsync("git rev-parse FETCH_HEAD", { cwd: canonicalRoot });
+                remoteHead = fetchHeadOut.trim();
+              } catch {}
+            }
+
+            if (remoteHead && remoteHead !== localHeadBefore) {
+              await execAsync(`git reset --hard ${remoteHead}`, { cwd: canonicalRoot });
+              localHeadAfter = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
+              updated = true;
+            }
+
+            console.log(`[REPO_SYNC] remoteHead=${(remoteHead || localHeadAfter).slice(0, 8)}`);
+            console.log(`[REPO_SYNC] localHeadBefore=${localHeadBefore.slice(0, 8)}`);
+            console.log(`[REPO_SYNC] localHeadAfter=${localHeadAfter.slice(0, 8)}`);
+            console.log(`[REPO_SYNC] updated=${updated}`);
+          } catch (syncErr: any) {
+            console.warn(`[RepoSync] Fetch/reset warning on managed repo "${canonicalRoot}": ${RepositoryCacheManager.redactCredentials(syncErr?.message)}`);
+          }
+        }
+
+        const { stdout: lsOut } = await execAsync("git ls-files", { cwd: canonicalRoot });
+        const trackedFilesCount = lsOut.split("\n").filter((l) => l.trim().length > 0).length;
+
+        // Touch last-used timestamp in cache metadata
+        RepositoryCacheManager.touch(projectId);
+
+        return {
+          success: true,
+          metadata: {
+            canonicalRoot,
+            headSha: localHeadAfter,
+            branch,
+            origin: RepositoryCacheManager.redactCredentials(origin),
+            trackedFilesCount,
+          },
+        };
+      } catch (err: any) {
+        if (project.githubUrl) {
+          return this.materializeProjectRepositoryInternal(projectId, project);
+        }
+        return {
+          success: false,
+          errorType: "VALIDATION_FAILED",
+          error: RepositoryCacheManager.redactCredentials(
+            `Failed ensuring freshness for repository "${managedPath}": ${err?.message || err}`
+          ),
+        };
+      }
+    });
+  }
+
+  /**
+   * Synchronizes an ANKA-managed clone directly to a specific commit SHA after an authorized push.
+   */
+  public static async syncManagedCloneToCommit(projectId: string, commitSha: string): Promise<boolean> {
+    if (!projectId || !commitSha) return false;
+    return RepositoryCacheManager.withProjectLock(projectId, async () => {
+      const managedPath = this.getManagedRepositoryPath(projectId);
+      if (!fs.existsSync(path.join(managedPath, ".git"))) {
+        return false;
+      }
+
+      try {
+        const canonicalRoot = await GitWorktreeService.resolveRepositoryRoot(managedPath);
+        const localHeadBefore = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
+
+        if (localHeadBefore === commitSha) {
+          console.log(`[REPO_SYNC] remoteHead=${commitSha.slice(0, 8)}`);
+          console.log(`[REPO_SYNC] localHeadBefore=${localHeadBefore.slice(0, 8)}`);
+          console.log(`[REPO_SYNC] localHeadAfter=${localHeadBefore.slice(0, 8)}`);
+          console.log(`[REPO_SYNC] updated=false`);
+          RepositoryCacheManager.touch(projectId);
+          return true;
+        }
+
+        // Fetch and reset
+        await execAsync("git fetch origin", { cwd: canonicalRoot, timeout: 60000 });
+        await execAsync(`git reset --hard ${commitSha}`, { cwd: canonicalRoot });
+        const localHeadAfter = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
+
+        console.log(`[REPO_SYNC] remoteHead=${commitSha.slice(0, 8)}`);
+        console.log(`[REPO_SYNC] localHeadBefore=${localHeadBefore.slice(0, 8)}`);
+        console.log(`[REPO_SYNC] localHeadAfter=${localHeadAfter.slice(0, 8)}`);
+        console.log(`[REPO_SYNC] updated=${localHeadAfter !== localHeadBefore}`);
+
+        RepositoryCacheManager.touch(projectId);
+        return true;
+      } catch (err: any) {
+        console.warn(`[RepoSync] Could not sync managed clone to commit ${commitSha}: ${RepositoryCacheManager.redactCredentials(err?.message)}`);
+        return false;
+      }
+    });
+  }
+
+  /**
+   * Materializes and verifies a project's local Git repository.
+   */
+  public static async materializeProjectRepository(projectId: string): Promise<MaterializationResult> {
+    return RepositoryCacheManager.withProjectLock(projectId, async () => {
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: { id: true, name: true, localPath: true, githubUrl: true, githubToken: true },
+      });
+
+      if (!project) {
+        return {
+          success: false,
+          errorType: "REPOSITORY_NOT_READY",
+          error: `Project "${projectId}" not found in database.`,
+        };
+      }
+
+      return this.materializeProjectRepositoryInternal(projectId, project);
+    });
+  }
+
+  /**
+   * Internal implementation of repository materialization.
+   */
+  private static async materializeProjectRepositoryInternal(
+    projectId: string,
+    project: { id: string; name: string; localPath?: string | null; githubUrl?: string | null; githubToken?: string | null }
+  ): Promise<MaterializationResult> {
+    // Case 1: Project has a user-owned external localPath (ignore managed paths)
+    if (project.localPath && !this.isManagedRepositoryPath(project.localPath)) {
+      const resolvedLocal = path.resolve(project.localPath);
+      if (fs.existsSync(resolvedLocal)) {
+        try {
+          const canonicalRoot = await GitWorktreeService.resolveRepositoryRoot(resolvedLocal);
+          const headSha = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
+
+          let branch = "main";
+          try {
+            const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: canonicalRoot });
+            branch = stdout.trim() || "main";
+          } catch {}
+
+          let origin = "";
+          try {
+            const { stdout } = await execAsync("git remote get-url origin", { cwd: canonicalRoot });
+            origin = stdout.trim();
+          } catch {}
+
+          const { stdout: lsOut } = await execAsync("git ls-files", { cwd: canonicalRoot });
+          const trackedFilesCount = lsOut.split("\n").filter((l) => l.trim().length > 0).length;
+
+          return {
+            success: true,
+            metadata: {
+              canonicalRoot,
+              headSha,
+              branch,
+              origin: RepositoryCacheManager.redactCredentials(origin),
               trackedFilesCount,
             },
           };
@@ -314,31 +407,18 @@ export class RepositoryMaterializationService {
       }
     }
 
-    // Case 2: Project has a GitHub URL that requires materialization
+    // Case 2: Project has a GitHub URL that requires materialization into ephemeral cache
     if (project.githubUrl) {
       const targetDir = this.getManagedRepositoryPath(projectId);
-      await fs.promises.mkdir(path.dirname(targetDir), { recursive: true });
+      const isFresh = RepositoryCacheManager.isCacheFresh(projectId);
 
-      let token: string | undefined;
-      if (project.githubToken) {
-        try {
-          token = decrypt(project.githubToken);
-        } catch {}
-      }
-
-      let cloneUrl = project.githubUrl.trim();
-      if (token && cloneUrl.startsWith("https://github.com/")) {
-        const repoPath = cloneUrl.replace("https://github.com/", "");
-        cloneUrl = `https://x-access-token:${token}@github.com/${repoPath}`;
-      }
-
-      const isAlreadyCloned = fs.existsSync(path.join(targetDir, ".git"));
+      const cloneUrl = this.buildAuthGitUrl(project.githubUrl, project.githubToken);
 
       try {
-        if (!isAlreadyCloned) {
-          if (fs.existsSync(targetDir)) {
-            await fs.promises.rm(targetDir, { recursive: true, force: true });
-          }
+        if (!isFresh) {
+          await RepositoryCacheManager.removeProjectCache(projectId);
+          await fs.promises.mkdir(path.dirname(targetDir), { recursive: true });
+
           await execAsync(`git clone "${cloneUrl}" "${targetDir}"`, {
             timeout: 120000,
           });
@@ -346,7 +426,7 @@ export class RepositoryMaterializationService {
           try {
             await execAsync("git fetch origin", { cwd: targetDir, timeout: 60000 });
           } catch (fetchErr: any) {
-            console.warn(`[RepoMaterialization] git fetch failed on "${targetDir}": ${fetchErr?.message}`);
+            console.warn(`[RepoMaterialization] git fetch failed on "${targetDir}": ${RepositoryCacheManager.redactCredentials(fetchErr?.message)}`);
           }
         }
 
@@ -368,11 +448,11 @@ export class RepositoryMaterializationService {
         const { stdout: lsOut } = await execAsync("git ls-files", { cwd: canonicalRoot });
         const trackedFilesCount = lsOut.split("\n").filter((l) => l.trim().length > 0).length;
 
-        // Persist localPath in Project database record
-        await prisma.project.update({
-          where: { id: projectId },
-          data: { localPath: canonicalRoot },
-        });
+        // Touch cache metadata (do NOT persist ephemeral path to Project.localPath in database)
+        RepositoryCacheManager.touch(projectId);
+
+        // Enforce maximum cache budget after new clone/fetch
+        await RepositoryCacheManager.enforceMaxBudget();
 
         return {
           success: true,
@@ -380,15 +460,16 @@ export class RepositoryMaterializationService {
             canonicalRoot,
             headSha,
             branch,
-            origin,
+            origin: RepositoryCacheManager.redactCredentials(origin),
             trackedFilesCount,
           },
         };
       } catch (err: any) {
+        const cleanError = RepositoryCacheManager.redactCredentials(err?.message || String(err));
         return {
           success: false,
           errorType: "CLONE_FAILED",
-          error: `Failed cloning repository from "${project.githubUrl}": ${err?.message || err}`,
+          error: `Failed cloning repository from "${project.githubUrl}": ${cleanError}`,
         };
       }
     }

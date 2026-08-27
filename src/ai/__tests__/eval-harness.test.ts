@@ -1462,7 +1462,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
           files: [
             {
               path: "src/services/user.service.ts",
-              fixedReplacement: (content: string) => content.replace("name,\n  };", "name,\n    role: 'user',\n  };"),
+              fixedReplacement: (content: string) => content.replace(/name,[\r\n]+  \};/, "name,\n    role: 'user',\n  };"),
             },
           ],
         },
@@ -1472,7 +1472,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
           files: [
             {
               path: "src/config/server.ts",
-              fixedReplacement: (content: string) => content.replace("port: 3000,\n", "port: 3000,\n  rateLimitMs: 500,\n"),
+              fixedReplacement: (content: string) => content.replace(/port: 3000,[\r\n]+/, "port: 3000,\n  rateLimitMs: 500,\n"),
             },
             {
               path: "src/middleware/rateLimiter.ts",
@@ -1526,7 +1526,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
           files: [
             {
               path: "src/payment/gateway.ts",
-              fixedReplacement: (content: string) => content.replace("sandbox?: boolean;\n", "sandbox?: boolean;\n  timeoutMs?: number;\n"),
+              fixedReplacement: (content: string) => content.replace(/sandbox\?: boolean;[\r\n]+/, "sandbox?: boolean;\n  timeoutMs?: number;\n"),
             },
             {
               path: "src/payment/checkout.ts",
