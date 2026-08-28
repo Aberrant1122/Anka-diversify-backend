@@ -320,7 +320,9 @@ at line 1 before any imports.
     const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
     const rawChanges: any[] = Array.isArray(parsed.changes) ? parsed.changes : [];
     const explanation = parsed.explanation || "Agent generated code diffs.";
-    const commitMessage = parsed.commitMessage || `feat(${intentResult.intent.toLowerCase()}): implementation updates`;
+    const commitMessage =
+      parsed.commitMessage ||
+      `feat(${(intentResult?.intent || "build").toLowerCase()}): implementation updates`;
 
     // ── Resolve raw LLM proposals into AgentFileChange[] ──
     const hasManifestContext = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
@@ -330,7 +332,7 @@ at line 1 before any imports.
 
     if (hasManifestContext && !isDeleteTask && !isStandaloneWeb) {
       // Structured patch path: parse as GeneratedChangeProposal[]
-      const proposals: GeneratedChangeProposal[] = rawChanges.map((raw: any) => {
+      const initialProposals: GeneratedChangeProposal[] = rawChanges.map((raw: any) => {
         const action = (raw.action || "modify").toLowerCase();
         if (action === "create") {
           return {
@@ -358,6 +360,79 @@ at line 1 before any imports.
         }
       });
 
+      // ─── Deterministic No-Op Patch Edit Normalization ───────────────────
+      const primaryTargetPaths = new Set(
+        (contract?.expectedFiles && contract.expectedFiles.length > 0
+          ? contract.expectedFiles
+          : contract?.targetPaths || []
+        )
+          .filter((p) => p && !p.includes("project-wide") && !p.includes("*"))
+          .map((p) => p.replace(/\\/g, "/").replace(/^\.\//, ""))
+      );
+
+      const primaryAuthoritativeFile = intentResult?.targetPath
+        ? intentResult.targetPath.replace(/\\/g, "/").replace(/^\.\//, "")
+        : Array.from(primaryTargetPaths)[0];
+
+      const normalizedProposals: GeneratedChangeProposal[] = [];
+
+      for (const proposal of initialProposals) {
+        if (proposal.action !== "modify") {
+          normalizedProposals.push(proposal);
+          continue;
+        }
+
+        const rawEdits = Array.isArray(proposal.edits) ? proposal.edits : [];
+        const effectiveEdits = rawEdits.filter((edit: any) => {
+          if (!edit || typeof edit !== "object") return false;
+          const isIdentical =
+            typeof edit.oldText === "string" &&
+            typeof edit.newText === "string" &&
+            edit.oldText === edit.newText;
+          return !isIdentical;
+        });
+
+        const normProposalPath = proposal.path.replace(/\\/g, "/").replace(/^\.\//, "");
+        const isAuthoritativeTarget =
+          normProposalPath === primaryAuthoritativeFile ||
+          (primaryTargetPaths.size === 1 && primaryTargetPaths.has(normProposalPath));
+
+        if (rawEdits.length > 0 && effectiveEdits.length === 0) {
+          if (!isAuthoritativeTarget && initialProposals.length > 1) {
+            // Supporting target with only no-op edits: prune it safely without failing the task
+            console.log(
+              `[CodeGenerator] Supporting target "${proposal.path}" contained only no-op edit(s) and required no modification. Pruned from effective changes.`
+            );
+            continue;
+          } else {
+            // Authoritative diagnostic target: do NOT silently drop. Keep it so bounded correction or explicit failure runs.
+            console.warn(
+              `[CodeGenerator] Authoritative target "${proposal.path}" generated only no-op edit(s). Retaining proposal for bounded patch correction.`
+            );
+            normalizedProposals.push(proposal);
+          }
+        } else {
+          if (rawEdits.length > effectiveEdits.length) {
+            console.log(
+              `[CodeGenerator] Pruned ${rawEdits.length - effectiveEdits.length} no-op edit(s) from "${proposal.path}". Retained ${effectiveEdits.length} effective edit(s).`
+            );
+          }
+          normalizedProposals.push({
+            ...proposal,
+            edits: effectiveEdits,
+          });
+        }
+      }
+
+      // Guard: If all proposals were pruned because every single file was no-op:
+      if (normalizedProposals.length === 0) {
+        throw new Error(
+          `[PATCH_RESOLUTION_FAILED] NO_EFFECTIVE_CHANGE: All generated file modifications were no-op edits. A modify task must produce at least one effective change.`
+        );
+      }
+
+      const proposals = normalizedProposals;
+
       let resolution: ResolutionResult = resolveGenerationProposals(
         proposals,
         effectiveResolutionSourceMap,
@@ -372,7 +447,10 @@ at line 1 before any imports.
       if (!resolution.success) {
         const err = resolution.error;
         const isEligibleForCorrection =
-          (err.code === "PATCH_TARGET_NOT_FOUND" || err.code === "AMBIGUOUS_PATCH_TARGET") &&
+          (err.code === "PATCH_TARGET_NOT_FOUND" ||
+            err.code === "AMBIGUOUS_PATCH_TARGET" ||
+            err.code === "NO_OP_PATCH_EDIT" ||
+            err.code === "MODIFY_PATCH_REQUIRED") &&
           typeof err.proposalIndex === "number" &&
           proposals[err.proposalIndex]?.action === "modify";
 
@@ -412,7 +490,7 @@ at line 1 before any imports.
               userMessage: message,
               manifestAction: "modify",
               failedEdits: failedProposal.edits,
-              errorCode: err.code as "PATCH_TARGET_NOT_FOUND" | "AMBIGUOUS_PATCH_TARGET",
+              errorCode: err.code as "PATCH_TARGET_NOT_FOUND" | "AMBIGUOUS_PATCH_TARGET" | "NO_OP_PATCH_EDIT" | "MODIFY_PATCH_REQUIRED",
               errorMessage: err.message,
             });
 

@@ -286,11 +286,36 @@ export class BaselineDeltaVerifier {
    * Helper to check if a user message or execution contract represents a broad build repair task.
    */
   public static isBroadBuildRepairTask(message?: string, contract?: ExecutionContract | null): boolean {
-    if (contract?.goal && /fix all (?:build )?errors|repair (?:the )?(?:entire |all )?build/i.test(contract.goal)) {
+    if (contract?.goal && /(?:fix|solve|resolve|repair|clear)\s+(?:all|every)\s+(?:build |compiler |compilation |typescript )?(?:errors?|issues?|broken build)|repair (?:the )?(?:entire |all )?build/i.test(contract.goal)) {
       return true;
     }
     if (!message) return false;
-    return /fix all (?:build )?errors|clear all (?:build )?errors|make (?:the )?(?:repository|repo|project|build) build(?: successfully)?|repair (?:the )?(?:entire |all )?(?:broken )?build/i.test(message);
+
+    const msg = message.toLowerCase();
+
+    // 1. Direct broad action phrases targeting build/compiler errors or repository buildability
+    if (
+      /(?:fix|solve|resolve|repair|clear|clean\s+up)\s+(?:all|every|the)\s+(?:build|compiler|compilation|typescript|ts)?\s*(?:errors?|issues?|failures?|broken\s+build)/i.test(msg) ||
+      /make\s+(?:the\s+)?(?:repository|repo|project|codebase|build)\s+build(?:ing| successfully)?/i.test(msg) ||
+      /get\s+(?:the\s+)?(?:repository|repo|project|codebase|build)\s+(?:to\s+)?build(?:ing| successfully)?/i.test(msg) ||
+      /repair\s+(?:the\s+)?(?:entire|all|whole)\s+(?:broken\s+)?build/i.test(msg)
+    ) {
+      return true;
+    }
+
+    // 2. Compound phrases: message contains build/compiler error context AND broad solve intent
+    // e.g. "I am having build errors in this repo, I need you to solve them all"
+    const hasBuildErrorContext =
+      /(?:build|compiler|compilation|typescript|tsc)\s*(?:errors?|issues?|failures?|broken|failing)|broken\s+(?:build|repository|repo|project)/i.test(msg);
+    const hasBroadSolveIntent =
+      /(?:solve|fix|resolve|repair|clear|address)\s+(?:them\s+all|all\s+of\s+them|all\s+the\s+errors|all\s+errors|everything|each\s+and\s+every\s+one)/i.test(msg) ||
+      /(?:all|every)\s+(?:of\s+them|errors?|issues?)\s*(?:need\s+to\s+be\s+)?(?:fixed|solved|resolved|repaired|cleared)/i.test(msg);
+
+    if (hasBuildErrorContext && hasBroadSolveIntent) {
+      return true;
+    }
+
+    return false;
   }
 
   /**

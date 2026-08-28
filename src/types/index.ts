@@ -505,6 +505,7 @@ export interface AgentResponse {
   remainingBaselineDiagnostics?: BaselineDiagnostic[];
   revealedBaselineDiagnostics?: BaselineDiagnostic[];
   newTaskDiagnostics?: BaselineDiagnostic[];
+  deltaResult?: any;
   securityRiskLevel?: string;
   securityVulnerabilities?: Array<{ file: string; issue: string; severity: string }>;
   securityRecommendations?: string[];

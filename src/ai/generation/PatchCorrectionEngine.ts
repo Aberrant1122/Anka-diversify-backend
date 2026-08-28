@@ -8,7 +8,7 @@ export interface PatchCorrectionInput {
   userMessage: string;
   manifestAction?: string;
   failedEdits: readonly FilePatchEdit[];
-  errorCode: "PATCH_TARGET_NOT_FOUND" | "AMBIGUOUS_PATCH_TARGET";
+  errorCode: "PATCH_TARGET_NOT_FOUND" | "AMBIGUOUS_PATCH_TARGET" | "NO_OP_PATCH_EDIT" | "MODIFY_PATCH_REQUIRED";
   errorMessage: string;
 }
 
@@ -30,13 +30,14 @@ export interface PatchCorrectionTelemetry {
 export class PatchCorrectionEngine {
   /**
    * Attempts ONE bounded model-assisted correction for a failed MODIFY patch proposal
-   * whose oldText was not found or was ambiguous in current authoritative file content.
+   * whose oldText was not found, was ambiguous, or was a no-op in current authoritative file content.
    */
   static async correctPatch(input: PatchCorrectionInput): Promise<PatchCorrectionResult> {
     const { filePath, currentContent, userMessage, manifestAction, failedEdits, errorCode, errorMessage } = input;
 
-    // Strict guard: only attempt for target-not-found or ambiguous-target
-    if (errorCode !== "PATCH_TARGET_NOT_FOUND" && errorCode !== "AMBIGUOUS_PATCH_TARGET") {
+    // Strict guard: only attempt for target-not-found, ambiguous-target, no-op edit, or empty patch
+    const eligibleCodes = ["PATCH_TARGET_NOT_FOUND", "AMBIGUOUS_PATCH_TARGET", "NO_OP_PATCH_EDIT", "MODIFY_PATCH_REQUIRED"];
+    if (!eligibleCodes.includes(errorCode)) {
       return {
         attempted: false,
         succeeded: false,
@@ -47,7 +48,7 @@ export class PatchCorrectionEngine {
     const fileSha = crypto.createHash("sha256").update(currentContent).digest("hex");
 
     const systemPrompt = `You are an Exact Patch Correction Assistant.
-A previously generated search/replace patch failed because the proposed "oldText" was not found exactly in the current source file content or matched multiple locations ambiguously.
+A previously generated search/replace patch failed (Reason: ${errorCode}). A modify edit must produce a real effective change and match exact source text.
 
 CRITICAL CORRECTION RULES:
 1. The previous oldText was not found exactly in the current source.

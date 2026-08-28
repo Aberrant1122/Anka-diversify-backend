@@ -66,6 +66,15 @@ export class ManifestGenerator {
       }
     }
 
+    if (repositoryContext.baselineDiagnostics && Array.isArray(repositoryContext.baselineDiagnostics) && repositoryContext.baselineDiagnostics.length > 0) {
+      contextText += `AUTHORITATIVE COMPILER / BUILD DIAGNOSTICS (PROVEN REPOSITORY DEFECTS):\n`;
+      for (const diag of repositoryContext.baselineDiagnostics) {
+        contextText += `- File: ${diag.filePath || "(unknown)"} | Code: ${diag.errorCode || "BUILD_ERROR"}${diag.symbolName ? ` | Symbol: ${diag.symbolName}` : ""}\n`;
+        contextText += `  Message: ${diag.message}\n`;
+      }
+      contextText += `- Manifest Planning Rule: You MUST prioritize modifying the exact failing files listed above. Do not include speculative unrelated files without concrete import/dependency evidence.\n\n`;
+    }
+
     if (subTaskScope) {
       contextText += `SUB-TASK SCOPE:\n`;
       contextText += `- SubTask ID: ${subTaskScope.id}\n`;
@@ -98,7 +107,7 @@ export class ManifestGenerator {
     } catch (err: any) {
       console.error("[ManifestGenerator] Error calling OpenAI or parsing manifest:", err?.message || err);
       // Fallback minimal manifest to avoid breaking process
-      return this.buildFallbackManifest(userRequest, contract, subTaskScope);
+      return this.buildFallbackManifest(userRequest, contract, repositoryContext, subTaskScope);
     }
   }
 
@@ -126,9 +135,10 @@ export class ManifestGenerator {
   /**
    * Builds a safe fallback manifest when LLM invocation or JSON parsing fails.
    */
-  private buildFallbackManifest(
+  public buildFallbackManifest(
     userRequest: string,
     contract: ExecutionContract,
+    repositoryContext?: ManifestPlanningContext,
     subTaskScope?: SubTask
   ): FileManifest {
     if (contract.pipeline === "STANDALONE" || contract.environment === "HTML_CSS_JS") {
@@ -172,17 +182,28 @@ export class ManifestGenerator {
       };
     }
 
-    const defaultPath = contract.targetPaths.length > 0 && !contract.targetPaths.includes("project-wide")
-      ? `${contract.targetPaths[0]}/index.ts`
-      : "src/index.ts";
+    const existingFileList = repositoryContext?.existingFiles || [];
+    const rawTarget = contract.targetPaths.find((tp) => tp && !tp.includes("project-wide"));
+    let defaultPath = "src/index.ts";
+    let defaultAction: "create" | "modify" = "create";
+
+    if (rawTarget) {
+      const normalizedTarget = rawTarget.replace(/\\/g, "/").replace(/^\.\//, "");
+      if (existingFileList.includes(normalizedTarget) || /\.[a-zA-Z0-9]+$/.test(normalizedTarget)) {
+        defaultPath = normalizedTarget;
+        defaultAction = existingFileList.includes(normalizedTarget) ? "modify" : "create";
+      } else {
+        defaultPath = `${normalizedTarget}/index.ts`;
+      }
+    }
 
     return {
       files: [
         {
           path: defaultPath,
-          action: "create",
+          action: defaultAction,
           dependencies: [],
-          description: "Fallback manifest file entry",
+          description: defaultAction === "modify" ? `Repair compiler diagnostics in ${defaultPath}` : "Fallback manifest file entry",
         },
       ],
       totalFiles: 1,

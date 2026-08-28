@@ -38,6 +38,7 @@ import { detectRepositoryArchitecture } from "../planning/RepositoryArchitecture
 import { ManifestCorrectionEngine } from "../planning/ManifestCorrectionEngine";
 import { AuthoritativeSourceHydrator } from "../manifest/AuthoritativeSourceHydrator";
 import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
+import { TargetScopeExpander } from "../contracts/TargetScopeExpander";
 
 const prisma = new PrismaClient();
 
@@ -102,7 +103,30 @@ export class AgentPipeline {
       )
     );
 
+    const baselineDiagnosticsList = options?.targetedBaselineDiagnostics || options?.baselineDiagnostics || [];
+    const diagnosticTargetPaths = Array.from(
+      new Set(
+        baselineDiagnosticsList
+          .map((d) => d.filePath)
+          .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+          .map((p) => p.replace(/\\/g, "/").replace(/^\.\//, ""))
+      )
+    );
+
     const executionContract: ExecutionContract = buildExecutionContract(intentResult, request.message, canonicalExistingFiles);
+
+    if (diagnosticTargetPaths.length > 0) {
+      const mergedTargets = Array.from(new Set([...diagnosticTargetPaths, ...executionContract.targetPaths])).filter(
+        (tp) => tp !== "(project-wide)"
+      );
+      if (mergedTargets.length > 0) {
+        executionContract.targetPaths = mergedTargets;
+      }
+      executionContract.searchScope = Array.from(new Set([...diagnosticTargetPaths, ...executionContract.searchScope]));
+      if (executionContract.taskType === "NEW_FEATURE" || executionContract.taskType === "REFACTOR") {
+        executionContract.taskType = "BUG_FIX";
+      }
+    }
 
     onProgress?.({
       step: 1,
@@ -241,11 +265,12 @@ export class AgentPipeline {
 
       const semanticQueries = buildGroundedSemanticQueries({
         message: request.message,
-        targetPath: intentResult?.targetPath,
+        targetPath: intentResult?.targetPath || diagnosticTargetPaths[0],
         discoveredSymbols: discoveredSymbolNames,
         discoveredServices: executionMemory?.discoveredServices || [],
         discoveredModels: executionMemory?.discoveredModels || [],
         discoveredRoutes: executionMemory?.discoveredRoutes || [],
+        baselineDiagnostics: baselineDiagnosticsList,
       });
 
       console.log(`[AgentPipeline] Semantic retrieval queries: ${semanticQueries.length}`);
@@ -257,7 +282,7 @@ export class AgentPipeline {
       candidateChunks = semanticCandidates;
 
       const semanticResults = rerankSemanticResults(semanticCandidates, {
-        targetPath: intentResult?.targetPath,
+        targetPath: intentResult?.targetPath || diagnosticTargetPaths[0],
         discoveredSymbols: executionMemory?.discoveredSymbols,
         discoveredServices: executionMemory?.discoveredServices || [],
         discoveredModels: executionMemory?.discoveredModels || [],
@@ -280,6 +305,27 @@ export class AgentPipeline {
 
       // Enrich optimizedContext.fileContext with full repository file contents (never partial chunks)
       if (optimizedContext && optimizedContext.fileContext) {
+        // Ensure proven compiler diagnostic target files are deterministically loaded into fileContext
+        if (diagnosticTargetPaths.length > 0) {
+          for (const diagPath of diagnosticTargetPaths) {
+            if (!optimizedContext.fileContext[diagPath]) {
+              const snap = rawSnapshotFiles.find(
+                (f: any) => f?.path?.replace(/\\/g, "/").replace(/^\.\//, "") === diagPath
+              );
+              if (snap && typeof snap.content === "string") {
+                optimizedContext.fileContext[diagPath] = snap.content;
+              } else if (effectiveLocalPath) {
+                const abs = path.join(effectiveLocalPath, diagPath);
+                if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+                  try {
+                    optimizedContext.fileContext[diagPath] = fs.readFileSync(abs, "utf8");
+                  } catch {}
+                }
+              }
+            }
+          }
+        }
+
         enrichFileContextWithSemanticResults({
           fileContext: optimizedContext.fileContext,
           semanticResults,
@@ -291,7 +337,7 @@ export class AgentPipeline {
         // Deterministically pack full files within token budget
         const packed = packFileContext({
           fileContext: optimizedContext.fileContext,
-          targetPath: intentResult?.targetPath,
+          targetPath: intentResult?.targetPath || diagnosticTargetPaths[0],
           targetPaths: executionContract?.targetPaths,
           discoveredSymbols: executionMemory?.discoveredSymbols,
           discoveredServices: executionMemory?.discoveredServices || [],
@@ -435,11 +481,35 @@ export class AgentPipeline {
         }
       }
 
+      // Ensure diagnostic target files are prioritized at the top of relevantPlanningFiles
+      if (diagnosticTargetPaths.length > 0) {
+        for (const diagPath of diagnosticTargetPaths) {
+          const existingIdx = relevantPlanningFiles.findIndex((rf) => rf.path === diagPath);
+          if (existingIdx >= 0) {
+            const [item] = relevantPlanningFiles.splice(existingIdx, 1);
+            relevantPlanningFiles.unshift(item);
+          } else {
+            const snap = rawSnapshotFiles.find((f: any) => f?.path?.replace(/\\/g, "/").replace(/^\.\//, "") === diagPath);
+            if (snap && typeof snap.content === "string") {
+              relevantPlanningFiles.unshift({ path: diagPath, content: snap.content });
+            } else if (effectiveLocalPath) {
+              const abs = path.join(effectiveLocalPath, diagPath);
+              if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+                try {
+                  relevantPlanningFiles.unshift({ path: diagPath, content: fs.readFileSync(abs, "utf8") });
+                } catch {}
+              }
+            }
+          }
+        }
+      }
+
       const planningContext = {
         ...projectContext,
         existingFiles: canonicalExistingFiles,
         architecture: architectureSummary,
         relevantFiles: relevantPlanningFiles.slice(0, 8),
+        baselineDiagnostics: baselineDiagnosticsList,
       };
 
       // 1. Authoritative FileManifest generation for ALL tasks
@@ -453,6 +523,28 @@ export class AgentPipeline {
       }
 
       if (rawManifest) {
+        // Evidence-backed target path expansion for BROAD build repair tasks only
+        const isBroadRepair = BaselineDeltaVerifier.isBroadBuildRepairTask(request.message, executionContract);
+        if (isBroadRepair && Array.isArray(rawManifest.files)) {
+          const candidatePaths = rawManifest.files.map((f) => f.path).filter(Boolean);
+          const expansionResult = TargetScopeExpander.expandBroadRepairTargetPaths({
+            contract: executionContract,
+            candidatePaths,
+            knowledgeGraph,
+            snapshotFiles: rawSnapshotFiles,
+            localPath: effectiveLocalPath,
+            fileContext: optimizedContext?.fileContext,
+            baselineDiagnostics: baselineDiagnosticsList,
+          });
+
+          if (expansionResult.approvedExpansions.length > 0) {
+            executionContract.targetPaths = expansionResult.expandedTargetPaths;
+            executionContract.searchScope = Array.from(
+              new Set([...executionContract.searchScope, ...expansionResult.expandedTargetPaths])
+            );
+          }
+        }
+
         const validator = new ManifestValidator(executionContract, {
           existingFiles: canonicalExistingFiles,
           installedPackages: architectureSummary.installedPackages,
@@ -807,6 +899,13 @@ export class AgentPipeline {
     const promptTokensK = (outputTokens / 1000).toFixed(1);
     const completionTokensK = (roadmapAndDiff.changes.length * 0.5 + 1.2).toFixed(1);
 
+    const isRepositoryClean = repairResult.repositoryClean !== undefined
+      ? Boolean(repairResult.repositoryClean)
+      : Boolean(repairResult.success && !repairResult.errorLog);
+    const isTaskVerified = Boolean(repairResult.taskVerified ?? repairResult.success);
+    const gateSuccess = overallGatePassed && !rollbackErrorLog;
+    const isBuildVerified = Boolean(gateSuccess && isRepositoryClean);
+
     const pipelineMeasurementText = PipelineTelemetry.generateMeasurementText({
       s1Time,
       s2Time,
@@ -829,7 +928,7 @@ export class AgentPipeline {
       completionTokensK,
       modifiedFilesCount: repairResult.finalChanges.length,
       validationCommands: effectiveValidationCommands,
-      buildSuccess: repairResult.success,
+      buildSuccess: isRepositoryClean,
       securityPass: auditResult.securityPass,
       repairAttempts: repairResult.attempts,
       errorType: repairResult.errorType,
@@ -855,17 +954,26 @@ export class AgentPipeline {
       executionContract,
       featureValidation,
       finalConfidence,
-      repairResult.success,
+      isRepositoryClean,
+      isTaskVerified,
+      isRepositoryClean,
     );
+
+    let buildStatusText = "❌ Build Verification Failed";
+    if (isRepositoryClean) {
+      buildStatusText = "✅ Build Verified / Passed";
+    } else if (isTaskVerified) {
+      buildStatusText = "⚠️ Task Verified (Repository Unhealthy: Pre-existing / Revealed Baseline Errors)";
+    }
 
     const featureChecks = featureValidation.checks || [];
     const checklistMarkdown =
       `\n\n### ⏱️ Pipeline Stage Performance & Metrics\n${pipelineMeasurementText}\n\n### 📋 Repository Intelligence Verification Checklist\n` +
       `**Repository Search Confidence:** ${(finalConfidence * 100).toFixed(0)}%\n` +
-      `**Build Status:** ${repairResult.success ? "✅ Build Verified / Passed" : "❌ Build Verification Failed"}\n\n` +
+      `**Build Status:** ${buildStatusText}\n\n` +
       `**Search Summary:**\n${searchSummary}\n\n` +
       defaultChecklist.map((item) => `${item.checked ? "✅" : "❌"} ${item.label}`).join("\n") +
-      (!repairResult.success && repairResult.errorLog
+      (!isRepositoryClean && repairResult.errorLog && !isTaskVerified
         ? `\n\n**❌ Build Verification Errors Captured:**\n\`\`\`\n${repairResult.errorLog.slice(0, 2000)}\n\`\`\``
         : "") +
       (featureValidation.failedChecks.length > 0
@@ -877,15 +985,19 @@ export class AgentPipeline {
         ? repairResult.finalChanges.map((c: any) => `- ${c.path}: ${c.action === "delete" || c.isDeleted ? "[DELETED] " : ""}${c.description}`).join("\n")
         : "No files changed.";
 
-    const summary = `[TaskType: ${intentResult.taskType} | Risk: ${intentResult.risk} | Complexity: ${intentResult.estimatedComplexity}] ${roadmapAndDiff.explanation}\n\n${auditResult.summary}${checklistMarkdown}\n\nFiles Modified / Deleted:\n${fileChangeLines}`;
+    let combinedExplanation = roadmapAndDiff.explanation;
+    if (repairResult.deltaResult && (!repairResult.repositoryClean || (repairResult.deltaResult.revealedBaselineDiagnostics && repairResult.deltaResult.revealedBaselineDiagnostics.length > 0))) {
+      const deltaExplanation = BaselineDeltaVerifier.formatDeltaExplanation(repairResult.deltaResult);
+      combinedExplanation = combinedExplanation + "\n\n" + deltaExplanation;
+    }
+
+    const summary = `[TaskType: ${intentResult.taskType} | Risk: ${intentResult.risk} | Complexity: ${intentResult.estimatedComplexity}] ${combinedExplanation}\n\n${auditResult.summary}${checklistMarkdown}\n\nFiles Modified / Deleted:\n${fileChangeLines}`;
     await MemoryPersistence.saveMessage(session.id, "assistant", summary);
 
     if (!session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
 
-    const gateSuccess = overallGatePassed && !rollbackErrorLog;
-
     return {
-      explanation: roadmapAndDiff.explanation + "\n\n" + auditResult.summary + checklistMarkdown,
+      explanation: combinedExplanation + "\n\n" + auditResult.summary + checklistMarkdown,
       changes: gateSuccess ? repairResult.finalChanges : [],
       commitMessage: roadmapAndDiff.commitMessage,
       sessionId: session.id,
@@ -898,16 +1010,17 @@ export class AgentPipeline {
       roadmap: roadmapAndDiff.roadmap,
       securityPass: auditResult.securityPass,
       critiqueScore: auditResult.critiqueScore,
-      buildVerified: gateSuccess,
-      taskVerified: repairResult.taskVerified ?? gateSuccess,
-      repositoryClean: repairResult.repositoryClean ?? gateSuccess,
-      healthStatus: repairResult.taskVerified ? (repairResult.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY") : undefined,
+      buildVerified: isBuildVerified,
+      taskVerified: isTaskVerified,
+      repositoryClean: isRepositoryClean,
+      healthStatus: isTaskVerified ? (isRepositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY") : (isBuildVerified ? "HEALTHY" : undefined),
       baselineDiagnosticCount: repairResult.deltaResult?.baselineDiagnosticCount,
       targetedBaselineDiagnostics: repairResult.deltaResult?.targetedBaselineDiagnostics,
       resolvedTargetDiagnostics: repairResult.deltaResult?.resolvedTargetDiagnostics,
       remainingBaselineDiagnostics: repairResult.deltaResult?.remainingBaselineDiagnostics,
       revealedBaselineDiagnostics: repairResult.deltaResult?.revealedBaselineDiagnostics,
       newTaskDiagnostics: repairResult.deltaResult?.newTaskDiagnostics,
+      deltaResult: repairResult.deltaResult,
       repaired: Boolean(repairResult.repaired ?? repairResult.attempts > 1),
       repairAttempted: Boolean(repairResult.attempts > 1 || repairResult.repaired),
       repairAttempts: repairResult.attempts || 0,
@@ -915,11 +1028,11 @@ export class AgentPipeline {
       repairSuccess: Boolean(repairResult.success),
       repairTrigger: repairResult.repairTrigger || "NONE",
       buildErrors: [
-        !repairResult.success && repairResult.errorLog ? repairResult.errorLog : "",
+        !isBuildVerified && !isTaskVerified && repairResult.errorLog ? repairResult.errorLog : "",
         !auditResult.securityPass ? "Security audit failed / flagged critical security violations." : "",
         !featureValidation.overallPassed ? "Feature / static validation failed required checks." : "",
         rollbackErrorLog ? rollbackErrorLog : "",
-      ].filter(Boolean).join("\n\n") || repairResult.errorLog,
+      ].filter(Boolean).join("\n\n") || (!isBuildVerified && !isTaskVerified ? repairResult.errorLog : ""),
       verificationChecklist: defaultChecklist,
       lifecycleStage: gateSuccess ? "Done" : "BuildFailed",
       pipelineMeasurementText,

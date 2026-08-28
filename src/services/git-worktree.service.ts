@@ -558,14 +558,21 @@ export class GitWorktreeService {
 
           if (!baselineBuildPassed) {
             baselineDiagnostics = BaselineDeltaVerifier.extractDiagnostics(baselineCheck.errors || "", "BASELINE");
+            const isBroadBuildRepair = BaselineDeltaVerifier.isBroadBuildRepairTask(request.message || "");
             const matchResult = BaselineDeltaVerifier.matchUserTaskToBaseline(
               request.message || "",
               baselineDiagnostics
             );
-            targetedBaselineDiagnostics = matchResult.targetedDiagnostics;
+            targetedBaselineDiagnostics = isBroadBuildRepair
+              ? baselineDiagnostics
+              : matchResult.targetedDiagnostics;
 
             if (targetedBaselineDiagnostics.length > 0) {
-              console.log(`[BASELINE_DELTA] User request targets ${targetedBaselineDiagnostics.length} pre-existing baseline diagnostic(s). Allowing constrained task repair.`);
+              if (isBroadBuildRepair) {
+                console.log(`[BASELINE_DELTA] User request is a broad build repair task targeting all ${targetedBaselineDiagnostics.length} visible baseline diagnostic(s). Allowing constrained task repair.`);
+              } else {
+                console.log(`[BASELINE_DELTA] User request targets ${targetedBaselineDiagnostics.length} pre-existing baseline diagnostic(s). Allowing constrained task repair.`);
+              }
               isBaselineDeltaTask = true;
             } else {
               console.log(`[REPO_HEALTH] baselineHealthy=false`);
@@ -660,8 +667,11 @@ export class GitWorktreeService {
       if (baselineCommands.length > 0 && isBaselineDeltaTask) {
         if (agentResponse.taskVerified) {
           validationPassed = true;
-          agentResponse.buildVerified = true;
+          agentResponse.buildVerified = Boolean(agentResponse.repositoryClean);
           agentResponse.healthStatus = agentResponse.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY";
+          if (!agentResponse.repositoryClean && agentResponse.deltaResult) {
+            agentResponse.explanation = BaselineDeltaVerifier.formatDeltaExplanation(agentResponse.deltaResult);
+          }
         } else {
           const postBuild = await ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands);
           const postChangeDiagnostics = BaselineDeltaVerifier.extractDiagnostics(postBuild.errors, "CURRENT_TASK");
@@ -693,7 +703,7 @@ export class GitWorktreeService {
 
           if (deltaResult.taskVerified) {
             validationPassed = true;
-            agentResponse.buildVerified = true;
+            agentResponse.buildVerified = Boolean(deltaResult.repositoryClean);
             agentResponse.taskVerified = true;
             agentResponse.repositoryClean = deltaResult.repositoryClean;
             agentResponse.healthStatus = deltaResult.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY";
@@ -730,15 +740,16 @@ export class GitWorktreeService {
           worktreePath: prepared.worktreePath,
           branchName: prepared.branchName,
           baseCommitSha: prepared.baseCommitSha,
+          buildVerified: agentResponse.buildVerified ?? (validationPassed && (deltaResult ? deltaResult.repositoryClean : (agentResponse.repositoryClean ?? true))),
           healthStatus: agentResponse.healthStatus || (validationPassed ? "HEALTHY" : "BASELINE_REPOSITORY_UNHEALTHY"),
           baselineDependencyInstall: "PASS",
           baselineBuild: baselineBuildPassed ? "PASS" : "FAIL",
           baselineReady: baselineBuildPassed,
           buildReady: baselineBuildPassed,
-          origin: validationPassed ? (deltaResult && !deltaResult.repositoryClean ? "BASELINE" : undefined) : "CURRENT_TASK",
+          origin: validationPassed ? (deltaResult && !deltaResult.repositoryClean ? "BASELINE" : (agentResponse.repositoryClean === false ? "BASELINE" : undefined)) : "CURRENT_TASK",
           agentIntroduced: Boolean(!validationPassed && (deltaResult ? deltaResult.newTaskDiagnostics.length > 0 : !agentResponse.buildVerified)),
           taskVerified: deltaResult ? deltaResult.taskVerified : (agentResponse.taskVerified ?? validationPassed),
-          repositoryClean: deltaResult ? deltaResult.repositoryClean : (agentResponse.repositoryClean ?? validationPassed),
+          repositoryClean: deltaResult ? deltaResult.repositoryClean : (agentResponse.repositoryClean ?? (agentResponse.buildVerified && validationPassed)),
           baselineDiagnosticCount: deltaResult?.baselineDiagnosticCount ?? agentResponse.baselineDiagnosticCount,
           targetedBaselineDiagnostics: deltaResult?.targetedBaselineDiagnostics ?? agentResponse.targetedBaselineDiagnostics,
           resolvedTargetDiagnostics: deltaResult?.resolvedTargetDiagnostics ?? agentResponse.resolvedTargetDiagnostics,
