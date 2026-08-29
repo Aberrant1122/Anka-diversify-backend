@@ -1,7 +1,220 @@
+import { execSync } from "child_process";
+import fs from "fs";
+import path from "path";
 import { ErrorDiagnosticsParser, DiagnosticError } from "./surgical-repair.engine";
 import { ErrorClassifier } from "../ai/validation/ErrorClassifier";
 import { BaselineDiagnostic, ExecutionContract } from "../types";
-import { AgentFileChange } from "../ai/shared/types";
+import { AgentFileChange, ExtendedKnowledgeGraph } from "../ai/shared/types";
+import { ImportValidator } from "../ai/validation/ImportValidator";
+import { matchesModuleSpecifier } from "../ai/contracts/TargetScopeExpander";
+import { normalizeRepoPath } from "../ai/repository/SemanticContextResolver";
+import { StaticValidationEngine } from "./static-validator.engine";
+
+export const GLOBAL_CONFIG_FILE_PATTERNS = [
+  /^package\.json$/i,
+  /^package-lock\.json$/i,
+  /^pnpm-lock\.yaml$/i,
+  /^yarn\.lock$/i,
+  /^tsconfig(?:.*)?\.json$/i,
+  /^jsconfig(?:.*)?\.json$/i,
+  /^(?:next|vite|webpack|rollup|babel|postcss|tailwind)\.config\.[a-zA-Z0-9]+$/i,
+];
+
+/**
+ * Deterministically proves whether a TS2614 / TS2305 "has no exported member" mismatch
+ * existed in the immutable baseline before the agent touched any file.
+ */
+function isMissingNamedExportPreExisting(
+  importerFilePath: string,
+  preTaskImporterContent: string,
+  symbol: string,
+  moduleSpecifier: string | undefined,
+  preTaskSourceGetter?: (path: string) => string | null | undefined,
+): boolean {
+  if (!symbol || !preTaskImporterContent) return false;
+
+  const diagNorm = normalizeRepoPath(importerFilePath);
+  const importerDir = path.dirname(diagNorm);
+
+  // 1. Parse imports from pre-task importer
+  const importerAST = StaticValidationEngine.parseFile(diagNorm, preTaskImporterContent, new Map());
+
+  // Find the import corresponding to moduleSpecifier or matching target
+  const matchingImports = importerAST.imports.filter((imp) => {
+    if (!imp.isLocal) return false;
+    if (moduleSpecifier) {
+      const cleanMod = moduleSpecifier.replace(/^\.\//, "").replace(/\\/g, "/");
+      const cleanImp = imp.rawPath.replace(/^\.\//, "").replace(/\\/g, "/");
+      if (cleanImp === cleanMod || cleanImp.endsWith("/" + cleanMod) || cleanMod.endsWith("/" + cleanImp)) {
+        return true;
+      }
+      return false;
+    }
+    return imp.namedImports.includes(symbol);
+  });
+
+  // Verify baseline importer actually requested `symbol` as a named import
+  const hasNamedImportInBaseline = matchingImports.some((imp) => imp.namedImports.includes(symbol));
+  if (!hasNamedImportInBaseline) {
+    return false;
+  }
+
+  // 2. Resolve candidate target module paths
+  const resolvedTargetPaths: string[] = [];
+  for (const imp of matchingImports) {
+    if (imp.rawPath) {
+      let targetBase = "";
+      if (imp.rawPath.startsWith("@/")) {
+        targetBase = imp.rawPath.replace("@/", "src/");
+      } else {
+        targetBase = path.normalize(path.join(importerDir, imp.rawPath)).replace(/\\/g, "/");
+      }
+      const exts = ["", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js", "/index.jsx"];
+      for (const ext of exts) {
+        resolvedTargetPaths.push(normalizeRepoPath(targetBase + ext));
+      }
+    }
+  }
+
+  // 3. Obtain immutable pre-task content of target module
+  let targetPreTaskContent: string | null = null;
+  let targetResolvedPath: string | null = null;
+
+  if (preTaskSourceGetter) {
+    for (const candidate of resolvedTargetPaths) {
+      const content = preTaskSourceGetter(candidate);
+      if (typeof content === "string") {
+        targetPreTaskContent = content;
+        targetResolvedPath = candidate;
+        break;
+      }
+    }
+  }
+
+  if (!targetPreTaskContent || !targetResolvedPath) {
+    return false;
+  }
+
+  // 4. Parse exports from immutable target module
+  const targetAST = StaticValidationEngine.parseFile(targetResolvedPath, targetPreTaskContent, new Map());
+
+  // Check if target module had a NAMED export matching `symbol`
+  const hasNamedExport = targetAST.exports.some(
+    (exp) => exp.kind === "named" && exp.name === symbol,
+  );
+
+  // If baseline target had NO named export for `symbol` and baseline importer requested it:
+  // PROOF COMPLETE: The named-import / missing-named-export mismatch pre-existed in immutable baseline.
+  return !hasNamedExport;
+}
+
+/**
+ * Deterministically proves whether a TS6133 unused declaration in an already-authorized file
+ * is an AUTHORIZED_REPAIR_FOLLOWUP caused by an earlier authorized repair removing its usage/export.
+ */
+function isUnusedDeclAuthorizedRepairFollowup(
+  filePath: string,
+  preTaskContent: string,
+  currentContent: string | undefined,
+  symbol: string,
+  causalityContext?: CausalityContext,
+): boolean {
+  if (!symbol || !preTaskContent || !currentContent) return false;
+
+  const diagNorm = normalizeRepoPath(filePath);
+
+  // 1. File must have been already formally authorized in this run
+  if (!causalityContext?.authorizedRevealedBaselinePaths?.has(diagNorm)) {
+    return false;
+  }
+
+  // 2. File must be present in repair history / currentChanges
+  const changeForFile = (causalityContext?.changes || []).find(
+    (c) => normalizeRepoPath(c.path) === diagNorm,
+  );
+  if (!changeForFile) {
+    return false;
+  }
+
+  // 3. Immutable baseline MUST contain the declaration of `symbol`
+  const declRegex = new RegExp(`(?:const|let|var|function|class|type|interface)\\s+${symbol}\\b`);
+  if (!declRegex.test(preTaskContent)) {
+    return false;
+  }
+
+  // 4. Immutable baseline MUST ALSO contain actual usage / export references preventing TS6133
+  const preSymbolOccurrences = (preTaskContent.match(new RegExp(`\\b${symbol}\\b`, "g")) || []).length;
+  if (preSymbolOccurrences < 2) {
+    // If only 1 occurrence in baseline, it was already unused at baseline (not caused by repair)
+    return false;
+  }
+
+  // 5. Current source MUST still contain the declaration
+  if (!declRegex.test(currentContent)) {
+    return false;
+  }
+
+  // 6. Current source no longer contains the baseline usage/export references (only declaration remains)
+  const currentSymbolOccurrences = (currentContent.match(new RegExp(`\\b${symbol}\\b`, "g")) || []).length;
+  if (currentSymbolOccurrences > 1) {
+    // If occurrences > 1, usages still exist in currentContent
+    return false;
+  }
+
+  // 7. That disappearance is attributable to an authorized repair patch in this run
+  return true;
+}
+
+export interface PreTaskSourceInfo {
+  content: string;
+  origin: "FS_MANAGER" | "GIT_BASE";
+}
+
+/**
+ * Creates an immutable pre-task source getter for baseline causality verification.
+ * Fallback order:
+ * 1. FileSystemStateManager snapshot (if already snapshotted)
+ * 2. Immutable Git base commit content via `git show <baseCommitSha>:<filePath>`
+ * 3. Returns null (fail closed)
+ */
+export function createPreTaskSourceGetter(
+  localPath: string | null | undefined,
+  fsManager?: { getOriginalContent: (p: string) => string | null | undefined; hasOriginalFile: (p: string) => boolean },
+  baseCommitSha?: string,
+): (filePath: string) => PreTaskSourceInfo | null {
+  return (filePath: string) => {
+    if (!filePath || typeof filePath !== "string") return null;
+    const normPath = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+
+    // 1. Check FileSystemStateManager snapshot
+    if (fsManager && fsManager.hasOriginalFile(normPath)) {
+      const orig = fsManager.getOriginalContent(normPath);
+      if (typeof orig === "string") {
+        return { content: orig, origin: "FS_MANAGER" };
+      }
+    }
+
+    // 2. If unavailable in snapshot, check Git immutable base commit
+    if (localPath && fs.existsSync(localPath)) {
+      try {
+        const gitTarget = baseCommitSha ? `${baseCommitSha}:${normPath}` : `HEAD:${normPath}`;
+        const content = execSync(`git show ${gitTarget}`, {
+          cwd: localPath,
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        if (typeof content === "string") {
+          return { content, origin: "GIT_BASE" };
+        }
+      } catch {
+        // File did not exist at base commit or git failed -> return null
+      }
+    }
+
+    return null;
+  };
+}
 
 export interface BaselineDeltaResult {
   baselineDiagnosticCount: number;
@@ -18,6 +231,9 @@ export interface CausalityContext {
   preTaskSourceGetter?: (filePath: string) => string | null | undefined;
   changes?: AgentFileChange[];
   isBroadRepairTask?: boolean;
+  knowledgeGraph?: ExtendedKnowledgeGraph | null;
+  /** Normalized paths of files dynamically authorized as REVEALED_BASELINE during this repair run */
+  authorizedRevealedBaselinePaths?: Set<string>;
 }
 
 export class BaselineDeltaVerifier {
@@ -219,14 +435,23 @@ export class BaselineDeltaVerifier {
   public static isConstructPreExistingAndUntouched(
     diag: BaselineDiagnostic,
     preTaskContent: string | null | undefined,
-    change?: AgentFileChange
-  ): { isPreExisting: boolean; isTouched: boolean } {
+    change?: AgentFileChange,
+    causalityContext?: CausalityContext
+  ): { isPreExisting: boolean; isTouched: boolean; isAuthorizedRepairFollowup?: boolean } {
     if (!preTaskContent) {
       // File did not exist before task or content is unavailable -> fail safe to new task error
       return { isPreExisting: false, isTouched: true };
     }
 
     const postContent = change?.content;
+    const normalizeSourceForComparison = (content: string) =>
+      content.replace(/\r\n?/g, "\n");
+
+    const isSelfContentUnchanged =
+      !change ||
+      (typeof postContent === "string" &&
+        normalizeSourceForComparison(postContent) === normalizeSourceForComparison(preTaskContent));
+
     const msg = diag.message || "";
     const rawTrace = diag.rawTrace || "";
     const symbolName = diag.symbolName;
@@ -235,7 +460,7 @@ export class BaselineDeltaVerifier {
     const redeclareMatch =
       msg.match(/(?:cannot redeclare exported variable|cannot redeclare block-scoped variable|identifier|duplicate identifier|already been declared)['"\s]+([a-zA-Z0-9_$]+)/i) ||
       rawTrace.match(/(?:cannot redeclare exported variable|cannot redeclare block-scoped variable|identifier|duplicate identifier|already been declared)['"\s]+([a-zA-Z0-9_$]+)/i);
-    const targetSymbol = symbolName || (redeclareMatch ? redeclareMatch[1] : undefined);
+    const targetSymbol = (diag.errorCode === "TS2440" || redeclareMatch) ? (symbolName || (redeclareMatch ? redeclareMatch[1] : undefined)) : undefined;
 
     if (targetSymbol) {
       const symbolDeclRegex = new RegExp(`(?:export\\s+(?:const|let|var|function|class|type|interface)|(?:const|let|var|function|class|type|interface))\\s+${targetSymbol}\\b`, "g");
@@ -244,7 +469,7 @@ export class BaselineDeltaVerifier {
 
       // If pre-task source had 2+ declarations or multiple occurrences of this symbol
       if (preMatches.length >= 2 || (preMatches.length >= 1 && preSymbolOccurrences >= 2)) {
-        if (postContent) {
+        if (postContent && !isSelfContentUnchanged) {
           const postMatches = postContent.match(symbolDeclRegex) || [];
           const agentAddedDeclarations = postMatches.length > preMatches.length;
           if (!agentAddedDeclarations) {
@@ -262,19 +487,337 @@ export class BaselineDeltaVerifier {
     if (codeSnippetMatch) {
       const failingSnippet = codeSnippetMatch[1].trim();
       if (failingSnippet.length > 5 && preTaskContent.includes(failingSnippet)) {
-        if (postContent && postContent.includes(failingSnippet)) {
+        if (!postContent || postContent.includes(failingSnippet)) {
           return { isPreExisting: true, isTouched: false };
         }
       }
     }
 
     // 3. Fallback check for exact message / error construct in preTaskContent
-    if (diag.errorCode && diag.errorCode.startsWith("TS")) {
-      const nameMatch = msg.match(/Cannot find (?:name|module) '([^']+)'/i);
-      if (nameMatch && preTaskContent.includes(nameMatch[1])) {
-        if (!postContent || postContent.includes(nameMatch[1])) {
+    const cannotFindMatch = msg.match(/Cannot find (?:name|module) '([^']+)'/i);
+    if (cannotFindMatch && preTaskContent.includes(cannotFindMatch[1])) {
+      if (!postContent || postContent.includes(cannotFindMatch[1])) {
+        return { isPreExisting: true, isTouched: false };
+      }
+    }
+
+    // 3a. Deterministic TS2614 / TS2305 baseline import/export mismatch proof
+    const isNamedExportMismatchDiag =
+      diag.errorCode === "TS2614" ||
+      diag.errorCode === "TS2305" ||
+      /has no exported member/i.test(msg) ||
+      /has no exported member/i.test(rawTrace);
+
+    const missingExportSymbol =
+      symbolName ||
+      msg.match(/has no exported member\s+['"`]([A-Za-z0-9_$]+)['"`]/i)?.[1] ||
+      rawTrace.match(/has no exported member\s+['"`]([A-Za-z0-9_$]+)['"`]/i)?.[1];
+
+    const missingExportModule =
+      msg.match(/Module\s+['"`]+([^'"`]+)['"`]+\s+has no exported member/i)?.[1] ||
+      rawTrace.match(/Module\s+['"`]+([^'"`]+)['"`]+\s+has no exported member/i)?.[1];
+
+    if (isNamedExportMismatchDiag && missingExportSymbol && causalityContext?.preTaskSourceGetter && isSelfContentUnchanged) {
+      if (
+        isMissingNamedExportPreExisting(
+          diag.filePath || "",
+          preTaskContent,
+          missingExportSymbol,
+          missingExportModule,
+          causalityContext.preTaskSourceGetter
+        )
+      ) {
+        return { isPreExisting: true, isTouched: false };
+      }
+    }
+
+    // 3c. TS6133 unused declaration authorized repair follow-up
+    const isUnusedDiag =
+      diag.errorCode === "TS6133" ||
+      /is declared but (?:its value is never read|never used)/i.test(msg) ||
+      /is declared but (?:its value is never read|never used)/i.test(rawTrace);
+
+    const unusedSymbol =
+      symbolName ||
+      msg.match(/['"`]([A-Za-z0-9_$]+)['"`]\s+is declared but/i)?.[1] ||
+      rawTrace.match(/['"`]([A-Za-z0-9_$]+)['"`]\s+is declared but/i)?.[1];
+
+    if (isUnusedDiag) {
+      if (unusedSymbol && postContent) {
+        const isFollowup = isUnusedDeclAuthorizedRepairFollowup(
+          diag.filePath || "",
+          preTaskContent,
+          postContent,
+          unusedSymbol,
+          causalityContext
+        );
+        if (isFollowup) {
+          return { isPreExisting: false, isTouched: true, isAuthorizedRepairFollowup: true };
+        }
+      }
+      // TS6133 is NEVER an untouched pre-existing baseline error
+      return { isPreExisting: false, isTouched: true };
+    }
+
+    // 3b. Refined causality for previously authorized revealed-baseline repair targets.
+    //     When a file was authorized for baseline repair and its content has since changed
+    //     (due to an authorized surgical repair), we must NOT automatically fail to NEW_TASK.
+    //     Instead, re-check whether the CURRENT diagnostic construct can be deterministically
+    //     proven to have existed in immutable pre-task source.
+    if (
+      !isSelfContentUnchanged &&
+      causalityContext?.authorizedRevealedBaselinePaths &&
+      diag.filePath
+    ) {
+      const diagFilePath = (diag.filePath || "").replace(/^\.\//, "").replace(/\\/g, "/");
+      const diagNormPath = normalizeRepoPath(diagFilePath);
+
+      if (causalityContext.authorizedRevealedBaselinePaths.has(diagNormPath)) {
+        // Deterministic TS2614 / TS2305 proof takes precedence over cross-file dependency heuristic
+        if (isNamedExportMismatchDiag && missingExportSymbol && causalityContext?.preTaskSourceGetter) {
+          const isProvenMismatch = isMissingNamedExportPreExisting(
+            diagFilePath,
+            preTaskContent,
+            missingExportSymbol,
+            missingExportModule,
+            causalityContext.preTaskSourceGetter
+          );
+          if (isProvenMismatch) {
+            return { isPreExisting: true, isTouched: false };
+          }
+        }
+
+        // Safety: check dependency/global-config fail-closed before granting continued authority
+        const modifiedOtherFiles = (causalityContext.changes || []).filter((c) => {
+          const cPath = (c.path || "").replace(/^\.\//, "").replace(/\\/g, "/");
+          if (cPath.toLowerCase() === diagFilePath.toLowerCase()) return false;
+          if (causalityContext.preTaskSourceGetter) {
+            const orig = causalityContext.preTaskSourceGetter(cPath);
+            if (orig && normalizeSourceForComparison(orig) === normalizeSourceForComparison(c.content || "")) {
+              return false;
+            }
+          }
+          return true;
+        });
+
+        // Fail closed if agent modified a global config file
+        const hasGlobalConfigModified = modifiedOtherFiles.some((c) => {
+          const baseName = path.basename(c.path).toLowerCase();
+          return GLOBAL_CONFIG_FILE_PATTERNS.some((pat) => pat.test(baseName));
+        });
+        if (hasGlobalConfigModified) {
+          return { isPreExisting: false, isTouched: true };
+        }
+
+        // Fail closed if this file depends on another file the agent actually modified
+        if (modifiedOtherFiles.length > 0) {
+          const importSpecifiers = ImportValidator.extractImportSpecifiers(preTaskContent);
+          for (const modFile of modifiedOtherFiles) {
+            const modNorm = normalizeRepoPath(modFile.path);
+            for (const spec of importSpecifiers) {
+              if (matchesModuleSpecifier(diagFilePath, spec, modNorm)) {
+                return { isPreExisting: false, isTouched: true };
+              }
+            }
+            const modBase = path.basename(modNorm, path.extname(modNorm));
+            if (msg.includes(modNorm) || msg.includes(`./${modBase}`) || rawTrace.includes(modNorm)) {
+              return { isPreExisting: false, isTouched: true };
+            }
+          }
+        }
+
+        // Check knowledge graph if available
+        if (causalityContext?.knowledgeGraph) {
+          const kg = causalityContext.knowledgeGraph;
+          for (const modFile of modifiedOtherFiles) {
+            const modNorm = normalizeRepoPath(modFile.path);
+            const diagNorm = normalizeRepoPath(diagFilePath);
+
+            if (Array.isArray(kg.imports)) {
+              if (
+                kg.imports.some(
+                  (imp) =>
+                    normalizeRepoPath(imp.file) === diagNorm &&
+                    matchesModuleSpecifier(diagNorm, imp.source, modNorm)
+                )
+              ) {
+                return { isPreExisting: false, isTouched: true };
+              }
+            }
+
+            if (kg.dependencyGraph) {
+              const deps = kg.dependencyGraph[diagNorm] || [];
+              if (deps.some((dep) => matchesModuleSpecifier(diagNorm, dep, modNorm))) {
+                return { isPreExisting: false, isTouched: true };
+              }
+            }
+          }
+        }
+
+        // Now check if the current diagnostic construct existed in immutable pre-task source.
+        // This uses stable evidence (errorCode, symbolName, construct text) NOT line/column.
+
+        // R1. Duplicate export / redeclare: check if pre-task had the problematic symbol
+        if (targetSymbol) {
+          const symbolDeclRegex = new RegExp(`(?:export\\s+(?:const|let|var|function|class|type|interface)|(?:const|let|var|function|class|type|interface))\\s+${targetSymbol}\\b`, "g");
+          const preMatches = preTaskContent.match(symbolDeclRegex) || [];
+          const preSymbolOccurrences = (preTaskContent.match(new RegExp(`\\b${targetSymbol}\\b`, "g")) || []).length;
+          if (preMatches.length >= 2 || (preMatches.length >= 1 && preSymbolOccurrences >= 2)) {
+            // Verify the repair didn't ADD more declarations than baseline
+            if (postContent) {
+              const postMatches = postContent.match(symbolDeclRegex) || [];
+              if (postMatches.length <= preMatches.length) {
+                return { isPreExisting: true, isTouched: false };
+              }
+            } else {
+              return { isPreExisting: true, isTouched: false };
+            }
+          }
+        }
+
+        // R2. Named construct / cannot find name/module: verify construct exists in pre-task source
+        const authCannotFindMatch = msg.match(/Cannot find (?:name|module) '([^']+)'/i);
+        if (authCannotFindMatch && preTaskContent.includes(authCannotFindMatch[1])) {
           return { isPreExisting: true, isTouched: false };
         }
+
+        // R3. Raw trace snippet: if the failing code snippet exists in pre-task source
+        const authSnippetMatch = rawTrace.match(/>\s*\d+\s*\|\s*(.+)/);
+        if (authSnippetMatch) {
+          const failingSnippet = authSnippetMatch[1].trim();
+          if (failingSnippet.length > 5 && preTaskContent.includes(failingSnippet)) {
+            return { isPreExisting: true, isTouched: false };
+          }
+        }
+
+        // R4. TS6133 unused declaration authorized repair follow-up
+        const isUnusedDiag =
+          diag.errorCode === "TS6133" ||
+          /is declared but (?:its value is never read|never used)/i.test(msg) ||
+          /is declared but (?:its value is never read|never used)/i.test(rawTrace);
+
+        const unusedSymbol =
+          symbolName ||
+          msg.match(/['"`]([A-Za-z0-9_$]+)['"`]\s+is declared but/i)?.[1] ||
+          rawTrace.match(/['"`]([A-Za-z0-9_$]+)['"`]\s+is declared but/i)?.[1];
+
+        if (isUnusedDiag && unusedSymbol && postContent) {
+          const isFollowup = isUnusedDeclAuthorizedRepairFollowup(
+            diagFilePath,
+            preTaskContent,
+            postContent,
+            unusedSymbol,
+            causalityContext
+          );
+          if (isFollowup) {
+            return { isPreExisting: false, isTouched: true, isAuthorizedRepairFollowup: true };
+          }
+        }
+
+        // Could not deterministically prove this diagnostic construct existed at baseline
+        // -> Fail closed to NEW_TASK. Authorization does NOT grant blanket immunity.
+        return { isPreExisting: false, isTouched: true };
+      }
+    }
+
+    // 4. If the file itself is unchanged (never modified by agent, or hydrated with identical content):
+    if (isSelfContentUnchanged) {
+      const diagFilePath = (diag.filePath || "").replace(/^\.\//, "").replace(/\\/g, "/");
+
+      // Deterministic TS2614 / TS2305 proof takes precedence over cross-file dependency heuristic
+      if (isNamedExportMismatchDiag && missingExportSymbol && causalityContext?.preTaskSourceGetter) {
+        const isProvenMismatch = isMissingNamedExportPreExisting(
+          diagFilePath,
+          preTaskContent,
+          missingExportSymbol,
+          missingExportModule,
+          causalityContext.preTaskSourceGetter
+        );
+        if (isProvenMismatch) {
+          return { isPreExisting: true, isTouched: false };
+        }
+      }
+
+      // Identify any other files that were actually modified by the agent
+      const modifiedOtherFiles = (causalityContext?.changes || []).filter((c) => {
+        const cPath = (c.path || "").replace(/^\.\//, "").replace(/\\/g, "/");
+        if (cPath.toLowerCase() === diagFilePath.toLowerCase()) return false;
+        if (causalityContext?.preTaskSourceGetter) {
+          const orig = causalityContext.preTaskSourceGetter(cPath);
+          if (orig && normalizeSourceForComparison(orig) === normalizeSourceForComparison(c.content || "")) {
+            return false;
+          }
+        }
+        return true;
+      });
+
+      // A) Global config modification check: if agent modified a global build/config file, fail closed
+      const hasGlobalConfigModified = modifiedOtherFiles.some((c) => {
+        const baseName = path.basename(c.path).toLowerCase();
+        return GLOBAL_CONFIG_FILE_PATTERNS.some((pat) => pat.test(baseName));
+      });
+
+      if (hasGlobalConfigModified) {
+        return { isPreExisting: false, isTouched: true };
+      }
+
+      // B) Dependency check against modified files
+      if (modifiedOtherFiles.length > 0) {
+        const importSpecifiers = ImportValidator.extractImportSpecifiers(preTaskContent);
+
+        for (const modFile of modifiedOtherFiles) {
+          const modNorm = normalizeRepoPath(modFile.path);
+
+          // Does preTaskContent import modFile?
+          for (const spec of importSpecifiers) {
+            if (matchesModuleSpecifier(diagFilePath, spec, modNorm)) {
+              return { isPreExisting: false, isTouched: true };
+            }
+          }
+
+          // Does diagnostic message or trace mention the modified file or its relative specifier?
+          const modBase = path.basename(modNorm, path.extname(modNorm));
+          if (msg.includes(modNorm) || msg.includes(`./${modBase}`) || rawTrace.includes(modNorm)) {
+            return { isPreExisting: false, isTouched: true };
+          }
+        }
+
+        // Check knowledge graph if available
+        if (causalityContext?.knowledgeGraph) {
+          const kg = causalityContext.knowledgeGraph;
+          for (const modFile of modifiedOtherFiles) {
+            const modNorm = normalizeRepoPath(modFile.path);
+            const diagNorm = normalizeRepoPath(diagFilePath);
+
+            if (Array.isArray(kg.imports)) {
+              if (
+                kg.imports.some(
+                  (imp) =>
+                    normalizeRepoPath(imp.file) === diagNorm &&
+                    matchesModuleSpecifier(diagNorm, imp.source, modNorm)
+                )
+              ) {
+                return { isPreExisting: false, isTouched: true };
+              }
+            }
+
+            if (kg.dependencyGraph) {
+              const deps = kg.dependencyGraph[diagNorm] || [];
+              if (deps.some((dep) => matchesModuleSpecifier(diagNorm, dep, modNorm))) {
+                return { isPreExisting: false, isTouched: true };
+              }
+            }
+          }
+        }
+      }
+
+      // C) File is unchanged AND does not depend on any modified file AND no global config modified
+      const lines = preTaskContent.split("\n");
+      if (diag.line && diag.line <= lines.length) {
+        return { isPreExisting: true, isTouched: false };
+      }
+      if (!diag.line) {
+        return { isPreExisting: true, isTouched: false };
       }
     }
 
@@ -352,17 +895,25 @@ export class BaselineDeltaVerifier {
           (c) => (c.path || "").replace(/^\.\//, "").replace(/\\/g, "/").toLowerCase() === cleanPath.toLowerCase()
         );
 
-        const causality = this.isConstructPreExistingAndUntouched(diag, preContent, change);
+        const causality = this.isConstructPreExistingAndUntouched(diag, preContent, change, causalityContext);
         const isRevealed = causality.isPreExisting && !causality.isTouched;
+        const isFollowup = Boolean(causality.isAuthorizedRepairFollowup);
 
-        console.log(
-          `[BASELINE_CAUSALITY] file=${cleanPath} diagnostic=${diag.errorCode || diag.message.slice(0, 50)} preExistingCause=${causality.isPreExisting} agentTouchedCause=${causality.isTouched} classification=${isRevealed ? "REVEALED_BASELINE" : "NEW_TASK"}`
-        );
-
-        if (isRevealed) {
+        if (isFollowup) {
+          console.log(
+            `[BASELINE_CAUSALITY] file=${cleanPath} diagnostic=${diag.errorCode || diag.message.slice(0, 50)} preExistingCause=false agentTouchedCause=true classification=AUTHORIZED_REPAIR_FOLLOWUP`
+          );
           revealedBaselineDiagnostics.push(diag);
         } else {
-          newTaskDiagnostics.push(diag);
+          console.log(
+            `[BASELINE_CAUSALITY] file=${cleanPath} diagnostic=${diag.errorCode || diag.message.slice(0, 50)} preExistingCause=${causality.isPreExisting} agentTouchedCause=${causality.isTouched} classification=${isRevealed ? "REVEALED_BASELINE" : "NEW_TASK"}`
+          );
+
+          if (isRevealed) {
+            revealedBaselineDiagnostics.push(diag);
+          } else {
+            newTaskDiagnostics.push(diag);
+          }
         }
       } else {
         newTaskDiagnostics.push(diag);

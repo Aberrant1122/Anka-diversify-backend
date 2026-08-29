@@ -32,7 +32,7 @@ export interface TargetScopeExpanderParams {
 /**
  * Checks whether an import/export module specifier in sourceFile resolves to targetFile.
  */
-function matchesModuleSpecifier(sourceFile: string, specifier: string, targetFile: string): boolean {
+export function matchesModuleSpecifier(sourceFile: string, specifier: string, targetFile: string): boolean {
   if (!specifier || typeof specifier !== "string") return false;
 
   const normSource = normalizeRepoPath(sourceFile);

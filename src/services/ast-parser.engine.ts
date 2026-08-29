@@ -198,10 +198,87 @@ export class WasmASTParserEngine {
           if (node) {
             const line = node.startPosition.row + 1;
             const text = node.text;
+
+            // 1. Check for export_clause in Tree-Sitter AST node (e.g. export { default as Calculator } from './Calculator')
+            const exportClause = node.children.find((c) => c.type === "export_clause");
+            if (exportClause) {
+              const specifiers = exportClause.children.filter((c) => c.type === "export_specifier");
+              if (specifiers.length > 0) {
+                for (const spec of specifiers) {
+                  const nameNode = spec.childForFieldName("name");
+                  const aliasNode = spec.childForFieldName("alias");
+                  const originalName = nameNode ? nameNode.text : spec.text.trim();
+                  const aliasName = aliasNode ? aliasNode.text : undefined;
+
+                  let exportedName: string;
+                  let isDefault = false;
+
+                  if (aliasName) {
+                    if (aliasName === "default") {
+                      isDefault = true;
+                      exportedName = "default";
+                    } else {
+                      isDefault = false;
+                      exportedName = aliasName;
+                    }
+                  } else {
+                    if (originalName === "default") {
+                      isDefault = true;
+                      exportedName = "default";
+                    } else {
+                      isDefault = false;
+                      exportedName = originalName;
+                    }
+                  }
+
+                  exports.push({ line, name: exportedName, isDefault, type: "variable" });
+                }
+                continue;
+              }
+            }
+
+            // Fallback for clause exports if AST child traversal didn't capture specifiers: export { ... }
+            const clauseMatch = text.match(/export\s*\{([^}]+)\}/);
+            if (clauseMatch) {
+              const items = clauseMatch[1].split(",");
+              for (const item of items) {
+                const trimmed = item.trim();
+                if (!trimmed) continue;
+                if (trimmed.includes(" as ")) {
+                  const parts = trimmed.split(/\s+as\s+/);
+                  const orig = parts[0]?.trim();
+                  const alias = parts[1]?.trim();
+                  if (alias === "default") {
+                    exports.push({ line, name: "default", isDefault: true, type: "variable" });
+                  } else if (alias) {
+                    exports.push({ line, name: alias, isDefault: false, type: "variable" });
+                  }
+                } else {
+                  if (trimmed === "default") {
+                    exports.push({ line, name: "default", isDefault: true, type: "variable" });
+                  } else {
+                    exports.push({ line, name: trimmed, isDefault: false, type: "variable" });
+                  }
+                }
+              }
+              continue;
+            }
+
+            // 2. Declaration export (e.g. export const X, export function Y, export default class Z)
             const isDefault = text.includes("export default");
-            const nameMatch = text.match(/export\s+(?:default\s+)?(?:function|class|interface|type|const|let|var)\s+([A-Za-z0-9_]+)/);
-            const name = nameMatch ? nameMatch[1] : (isDefault ? "default" : "unknown");
-            exports.push({ line, name, isDefault, type: "function" });
+            const nameMatch = text.match(/export\s+(?:default\s+)?(?:function|class|interface|type|const|let|var|enum)\s+([A-Za-z0-9_]+)/);
+            if (nameMatch) {
+              const type = text.includes("class")
+                ? "class"
+                : text.includes("interface")
+                ? "interface"
+                : text.includes("type")
+                ? "type"
+                : "function";
+              exports.push({ line, name: nameMatch[1], isDefault, type });
+            } else if (isDefault) {
+              exports.push({ line, name: "default", isDefault: true, type: "function" });
+            }
           }
         }
       }

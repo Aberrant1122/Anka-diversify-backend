@@ -27,7 +27,7 @@ import { RepositorySnapshotData, loadPersistedRevision, savePersistedRevision } 
 import { ManifestValidator } from "../../services/manifest-validator";
 import { SemanticRetrievalEngine } from "../../services/semantic-retrieval.engine";
 import { buildGroundedSemanticQueries } from "../repository/RetrievalQueryBuilder";
-import { enrichFileContextWithSemanticResults } from "../repository/SemanticContextResolver";
+import { enrichFileContextWithSemanticResults, normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { rerankSemanticResults } from "../repository/CodeAwareReranker";
 import { packFileContext } from "../context/ContextPacker";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
@@ -37,7 +37,7 @@ import { decrypt } from "../../utils/encryption";
 import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
 import { ManifestCorrectionEngine } from "../planning/ManifestCorrectionEngine";
 import { AuthoritativeSourceHydrator } from "../manifest/AuthoritativeSourceHydrator";
-import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
+import { BaselineDeltaVerifier, createPreTaskSourceGetter } from "../../services/baseline-delta.verifier";
 import { TargetScopeExpander } from "../contracts/TargetScopeExpander";
 
 const prisma = new PrismaClient();
@@ -53,6 +53,7 @@ export class AgentPipeline {
       baselineDiagnostics?: BaselineDiagnostic[];
       targetedBaselineDiagnostics?: BaselineDiagnostic[];
       isBaselineDeltaTask?: boolean;
+      baseCommitSha?: string;
     },
   ): Promise<AgentResponse> {
     const session = await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
@@ -319,7 +320,7 @@ export class AgentPipeline {
                 if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
                   try {
                     optimizedContext.fileContext[diagPath] = fs.readFileSync(abs, "utf8");
-                  } catch {}
+                  } catch { }
                 }
               }
             }
@@ -352,8 +353,7 @@ export class AgentPipeline {
 
         if (process.env.NODE_ENV !== "production" || packed.excludedFiles.length > 0) {
           console.log(
-            `[AgentPipeline] Context packed: ${packed.telemetry.contextFilesAfterPacking}/${packed.telemetry.contextFilesBeforePacking} files (${packed.telemetry.estimatedTokensAfterPacking} tokens)${
-              packed.excludedFiles.length > 0 ? ` | Excluded by budget: ${packed.excludedFiles.join(", ")}` : ""
+            `[AgentPipeline] Context packed: ${packed.telemetry.contextFilesAfterPacking}/${packed.telemetry.contextFilesBeforePacking} files (${packed.telemetry.estimatedTokensAfterPacking} tokens)${packed.excludedFiles.length > 0 ? ` | Excluded by budget: ${packed.excludedFiles.join(", ")}` : ""
             }`
           );
         }
@@ -475,7 +475,7 @@ export class AgentPipeline {
               try {
                 const content = fs.readFileSync(abs, "utf8");
                 relevantPlanningFiles.push({ path: norm, content });
-              } catch {}
+              } catch { }
             }
           }
         }
@@ -497,7 +497,7 @@ export class AgentPipeline {
               if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
                 try {
                   relevantPlanningFiles.unshift({ path: diagPath, content: fs.readFileSync(abs, "utf8") });
-                } catch {}
+                } catch { }
               }
             }
           }
@@ -542,6 +542,31 @@ export class AgentPipeline {
             executionContract.searchScope = Array.from(
               new Set([...executionContract.searchScope, ...expansionResult.expandedTargetPaths])
             );
+          }
+          if (expansionResult.rejectedCandidates.length > 0) {
+            const rejectedPaths = new Set(
+              expansionResult.rejectedCandidates.map((candidate) =>
+                normalizeRepoPath(candidate.path)
+              )
+            );
+
+            const reconciledFiles = rawManifest.files.filter(
+              (file) => !rejectedPaths.has(normalizeRepoPath(file.path))
+            );
+
+            const removedCount = rawManifest.files.length - reconciledFiles.length;
+
+            if (removedCount > 0) {
+              console.log(
+                `[MANIFEST_RECONCILE] mode=BROAD_BUILD_REPAIR removed=${removedCount} remaining=${reconciledFiles.length}`
+              );
+
+              rawManifest = {
+                ...rawManifest,
+                files: reconciledFiles,
+                totalFiles: reconciledFiles.length,
+              };
+            }
           }
         }
 
@@ -835,6 +860,7 @@ export class AgentPipeline {
         executionContract,
         options?.baselineDiagnostics,
         options?.targetedBaselineDiagnostics,
+        options?.baseCommitSha,
       );
 
       if (!repairResult.success && !repairResult.infrastructureError && effectiveLocalPath && effectiveValidationCommands.length > 0) {
@@ -873,7 +899,13 @@ export class AgentPipeline {
         durationMs: 0,
       });
 
-      auditResult = await SecurityAuditor.runReflectionAndSecurityAudit(repairResult.finalChanges);
+      const preTaskSourceGetter = createPreTaskSourceGetter(effectiveLocalPath, fsManager, options?.baseCommitSha);
+      const baselineSourceGetter = (filePath: string) => {
+        const info = preTaskSourceGetter(filePath);
+        return info ? info.content : undefined;
+      };
+
+      auditResult = await SecurityAuditor.runReflectionAndSecurityAudit(repairResult.finalChanges, baselineSourceGetter);
       featureValidation = await ValidationDetector.runFeatureValidation(
         repairResult.finalChanges,
         effectiveSnapshot,

@@ -643,6 +643,7 @@ export class GitWorktreeService {
             baselineDiagnostics,
             targetedBaselineDiagnostics,
             isBaselineDeltaTask,
+            baseCommitSha: prepared.baseCommitSha,
           }
         );
       } catch (err: any) {

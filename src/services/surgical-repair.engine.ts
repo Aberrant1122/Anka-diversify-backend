@@ -70,9 +70,26 @@ export class ErrorDiagnosticsParser {
       const filePath = match[1].replace(/^\.\//, "").replace(/\\/g, "/");
       const line = parseInt(match[2], 10);
       const column = parseInt(match[3], 10);
-      const code = match[4] || "BUILD_ERR";
       const message = match[5].trim();
-      const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+      const noExportedMemberMatch = message.match(/has no exported member\s+['"`]([A-Za-z0-9_$]+)['"`]/i);
+      const unusedMatch = message.match(/['"`]([A-Za-z0-9_$]+)['"`]\s+is declared but (?:its value is never read|never used)/i);
+      let code = match[4] || "BUILD_ERR";
+      let symbolName: string | undefined;
+
+      if (noExportedMemberMatch) {
+        symbolName = noExportedMemberMatch[1];
+        if (code === "BUILD_ERR") {
+          code = /did you mean to use/i.test(message) ? "TS2614" : "TS2305";
+        }
+      } else if (unusedMatch) {
+        symbolName = unusedMatch[1];
+        if (code === "BUILD_ERR") {
+          code = "TS6133";
+        }
+      } else {
+        const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+        symbolName = symMatch ? symMatch[1] : undefined;
+      }
 
       diagnostics.push({
         file: filePath,
@@ -80,7 +97,7 @@ export class ErrorDiagnosticsParser {
         column,
         code,
         message,
-        symbolName: symMatch ? symMatch[1] : undefined,
+        symbolName,
         rawTrace: match[0],
       });
     }
@@ -93,8 +110,33 @@ export class ErrorDiagnosticsParser {
         const line = parseInt(match[2], 10);
         const column = parseInt(match[3], 10);
         const message = match[4].trim();
-        const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
-        const code = /cannot redeclare exported variable/i.test(message) ? "TS2440" : "BUILD_ERR";
+        let code = "BUILD_ERR";
+        let symbolName: string | undefined;
+
+        const noExportedMemberMatch = message.match(/has no exported member\s+['"`]([A-Za-z0-9_$]+)['"`]/i);
+        const unusedMatch = message.match(/['"`]([A-Za-z0-9_$]+)['"`]\s+is declared but (?:its value is never read|never used)/i);
+        if (noExportedMemberMatch) {
+          symbolName = noExportedMemberMatch[1];
+          code = /did you mean to use/i.test(message) ? "TS2614" : "TS2305";
+        } else if (unusedMatch) {
+          symbolName = unusedMatch[1];
+          code = "TS6133";
+        } else if (/cannot redeclare exported variable|duplicate identifier|already been declared/i.test(message)) {
+          code = "TS2440";
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        } else if (/cannot find name/i.test(message)) {
+          code = "TS2304";
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        } else if (/cannot find module/i.test(message)) {
+          code = "TS2307";
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        } else {
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        }
 
         diagnostics.push({
           file: filePath,
@@ -102,7 +144,7 @@ export class ErrorDiagnosticsParser {
           column,
           code,
           message,
-          symbolName: symMatch ? symMatch[1] : undefined,
+          symbolName,
           rawTrace: match[0],
         });
       }
@@ -115,9 +157,26 @@ export class ErrorDiagnosticsParser {
         const filePath = match[1].replace(/^\.\//, "").replace(/\\/g, "/");
         const line = parseInt(match[2], 10);
         const column = parseInt(match[3], 10);
-        const code = match[4] || "TS0000";
         const message = match[5].trim();
-        const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+        const noExportedMemberMatch = message.match(/has no exported member\s+['"`]([A-Za-z0-9_$]+)['"`]/i);
+        const unusedMatch = message.match(/['"`]([A-Za-z0-9_$]+)['"`]\s+is declared but (?:its value is never read|never used)/i);
+        let code = match[4] || "TS0000";
+        let symbolName: string | undefined;
+
+        if (noExportedMemberMatch) {
+          symbolName = noExportedMemberMatch[1];
+          if (code === "TS0000") {
+            code = /did you mean to use/i.test(message) ? "TS2614" : "TS2305";
+          }
+        } else if (unusedMatch) {
+          symbolName = unusedMatch[1];
+          if (code === "TS0000") {
+            code = "TS6133";
+          }
+        } else {
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        }
 
         diagnostics.push({
           file: filePath,
@@ -125,7 +184,7 @@ export class ErrorDiagnosticsParser {
           column,
           code,
           message,
-          symbolName: symMatch ? symMatch[1] : undefined,
+          symbolName,
           rawTrace: match[0],
         });
       }
@@ -139,15 +198,41 @@ export class ErrorDiagnosticsParser {
         const line = parseInt(match[2], 10);
         const column = parseInt(match[3], 10);
         const message = match[4].trim();
-        const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+        let code = "BUILD_ERR";
+        let symbolName: string | undefined;
+
+        const noExportedMemberMatch = message.match(/has no exported member\s+['"`]([A-Za-z0-9_$]+)['"`]/i);
+        const unusedMatch = message.match(/['"`]([A-Za-z0-9_$]+)['"`]\s+is declared but (?:its value is never read|never used)/i);
+        if (noExportedMemberMatch) {
+          symbolName = noExportedMemberMatch[1];
+          code = /did you mean to use/i.test(message) ? "TS2614" : "TS2305";
+        } else if (unusedMatch) {
+          symbolName = unusedMatch[1];
+          code = "TS6133";
+        } else if (/cannot redeclare exported variable|duplicate identifier|already been declared/i.test(message)) {
+          code = "TS2440";
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        } else if (/cannot find name/i.test(message)) {
+          code = "TS2304";
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        } else if (/cannot find module/i.test(message)) {
+          code = "TS2307";
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        } else {
+          const symMatch = message.match(/['"`]([A-Za-z0-9_]+)['"`]/);
+          symbolName = symMatch ? symMatch[1] : undefined;
+        }
 
         diagnostics.push({
           file: filePath,
           line,
           column,
-          code: "BUILD_ERR",
+          code,
           message,
-          symbolName: symMatch ? symMatch[1] : undefined,
+          symbolName,
           rawTrace: match[0],
         });
       }

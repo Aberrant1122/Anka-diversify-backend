@@ -114,6 +114,73 @@ async function runTests() {
   assertTrue(res6.passed, "overallPassed is TRUE for clean codebase");
   assertTrue(res6.metrics.analysisTimeMs < 50, "Deterministic analysis completes in < 50ms");
 
+  // 7. Live Calculator Re-Export Test (valid named re-export from barrel)
+  console.log("\n7️⃣  Live Calculator Re-Export Test:");
+  const liveCalcRepo = [
+    {
+      path: "src/app.ts",
+      content: `import React from 'react';\nimport { Calculator } from './components/calculator';\nexport default function App() { return <Calculator />; }`,
+    },
+    {
+      path: "src/components/calculator/index.ts",
+      content: `export { default as Calculator } from './Calculator';`,
+    },
+    {
+      path: "src/components/calculator/Calculator.tsx",
+      content: `import React from 'react';\nconst Calculator = () => <div>Calc</div>;\nexport default Calculator;`,
+    },
+  ];
+  const res7 = StaticValidationEngine.validate(liveCalcRepo);
+  const calcMissingExport = res7.issues.filter((i) => i.checkId === "missing_export");
+  assertEqual(calcMissingExport.length, 0, "No missing_export issues for valid 'export { default as Calculator }'");
+
+  // 8. Real Missing Export Negative Case (attempting to import unexported symbol from barrel)
+  console.log("\n8️⃣  Real Missing Export Negative Test:");
+  const missingFromBarrelRepo = [
+    {
+      path: "src/app.ts",
+      content: `import { Dashboard } from './components/calculator';`,
+    },
+    {
+      path: "src/components/calculator/index.ts",
+      content: `export { default as Calculator } from './Calculator';`,
+    },
+  ];
+  const res8 = StaticValidationEngine.validate(missingFromBarrelRepo);
+  assertEqual(res8.status, "FAIL", "Status is FAIL for unexported symbol from barrel");
+  assertTrue(res8.issues.some((i) => i.checkId === "missing_export" && i.reason.includes("Dashboard")), "Detects missing_export for unexported Dashboard");
+
+  // 9. Alias Negative Case (attempting to import original name instead of alias)
+  console.log("\n9️⃣  Alias Negative Test:");
+  const aliasNegativeRepo = [
+    {
+      path: "src/app.ts",
+      content: `import { Foo } from './index';`,
+    },
+    {
+      path: "src/index.ts",
+      content: `export { Foo as Bar } from './foo';`,
+    },
+  ];
+  const res9 = StaticValidationEngine.validate(aliasNegativeRepo);
+  assertEqual(res9.status, "FAIL", "Status is FAIL for importing pre-alias name");
+  assertTrue(res9.issues.some((i) => i.checkId === "missing_export" && i.reason.includes("Foo")), "Detects missing_export for pre-alias Foo");
+
+  // 10. Default Negative Case (attempting default import on named-only re-export barrel)
+  console.log("\n🔟 Default Import Negative Test:");
+  const defaultNegativeRepo = [
+    {
+      path: "src/app.ts",
+      content: `import Calculator from './components/calculator';`,
+    },
+    {
+      path: "src/components/calculator/index.ts",
+      content: `export { default as Calculator } from './Calculator';`,
+    },
+  ];
+  const res10 = StaticValidationEngine.validate(defaultNegativeRepo);
+  assertTrue(res10.issues.some((i) => i.checkId === "missing_export" && i.reason.includes("no default export")), "Warns when importing default from named-only barrel");
+
   console.log("\n✨ ALL STATIC VALIDATION ENGINE UNIT TESTS PASSED!\n");
 }
 

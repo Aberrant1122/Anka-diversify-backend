@@ -5,6 +5,7 @@ export interface SecurityViolation {
   reason: "UNSAFE_DYNAMIC_CODE_EXECUTION" | "UNSAFE_EVAL" | "UNSAFE_FUNCTION_CONSTRUCTOR" | "UNSAFE_MATHJS_EVALUATE";
   message: string;
   lineSnippet?: string;
+  provenance?: "PRE_EXISTING_BASELINE" | "INTRODUCED_BY_AGENT" | "WORSENED_BY_AGENT";
 }
 
 export interface SecurityPolicyResult {
@@ -62,6 +63,23 @@ export class SecurityPolicy {
   }
 
   /**
+   * Helper to count occurrences of a security violation construct in a given code string.
+   */
+  public static getPatternMatchesCount(reason: SecurityViolation["reason"], code: string): number {
+    if (!code) return 0;
+    switch (reason) {
+      case "UNSAFE_EVAL":
+        return (code.match(new RegExp(this.EVAL_REGEX.source, "g")) || []).length;
+      case "UNSAFE_FUNCTION_CONSTRUCTOR":
+        return (code.match(new RegExp(this.FUNCTION_CTOR_REGEX.source, "g")) || []).length;
+      case "UNSAFE_MATHJS_EVALUATE":
+        return (code.match(new RegExp(this.MATH_EVALUATE_REGEX.source, "g")) || []).length;
+      default:
+        return (code.match(/\beval\s*\(|\bnew\s+Function\s*\(|\b(?:math|mathjs)\.evaluate\s*\(/g) || []).length;
+    }
+  }
+
+  /**
    * Checks whether the code contains an actual dangerous dynamic execution primitive/sink:
    * eval(), new Function(), mathjs.evaluate, child_process execution, vm execution.
    */
@@ -82,7 +100,7 @@ export class SecurityPolicy {
   public static validateFindingEvidence(
     issue: string,
     code: string
-  ): { isEvidenceSupported: boolean; identifiedPrimitive?: string } {
+  ): { isEvidenceSupported: boolean; identifiedReason?: SecurityViolation["reason"] } {
     const isDynamicExecClaim =
       /\b(eval|eval-like|dynamic execution|dynamic code|function constructor|code injection|mathjs|arbitrary code)\b/i.test(
         issue
@@ -93,9 +111,20 @@ export class SecurityPolicy {
       return { isEvidenceSupported: true };
     }
 
-    const hasPrimitive = this.hasDangerousPrimitive(code);
-    if (hasPrimitive) {
-      return { isEvidenceSupported: true };
+    if (this.EVAL_REGEX.test(code) && /\beval\b/i.test(issue)) {
+      return { isEvidenceSupported: true, identifiedReason: "UNSAFE_EVAL" };
+    }
+    if (this.FUNCTION_CTOR_REGEX.test(code) && /\b(?:function|constructor)\b/i.test(issue)) {
+      return { isEvidenceSupported: true, identifiedReason: "UNSAFE_FUNCTION_CONSTRUCTOR" };
+    }
+    if (
+      (this.MATHJS_IMPORT_REGEX.test(code) || (/\bmathjs\b/.test(code) && this.MATH_EVALUATE_REGEX.test(code))) &&
+      /\b(?:math|mathjs|evaluate)\b/i.test(issue)
+    ) {
+      return { isEvidenceSupported: true, identifiedReason: "UNSAFE_MATHJS_EVALUATE" };
+    }
+    if (this.hasDangerousPrimitive(code)) {
+      return { isEvidenceSupported: true, identifiedReason: "UNSAFE_DYNAMIC_CODE_EXECUTION" };
     }
 
     return {
@@ -105,11 +134,12 @@ export class SecurityPolicy {
 
   /**
    * Inspect a batch of proposed changes against baseline repository files.
-   * Only flags violations if ANKA newly introduced or modified the unsafe construct.
+   * Classifies each violation as INTRODUCED_BY_AGENT, WORSENED_BY_AGENT, or PRE_EXISTING_BASELINE.
+   * Returns safe: true IF AND ONLY IF there are no INTRODUCED_BY_AGENT or WORSENED_BY_AGENT violations.
    */
   public static checkChanges(
     changes: readonly AgentFileChange[],
-    baselineFiles: Record<string, string> = {}
+    baselineFiles: Record<string, string> | ((filePath: string) => string | null | undefined) = {}
   ): SecurityPolicyResult {
     const allViolations: SecurityViolation[] = [];
 
@@ -119,21 +149,46 @@ export class SecurityPolicy {
 
       const fileCheck = this.checkCode(content, change.path);
       if (!fileCheck.safe) {
-        const baseline = baselineFiles[change.path] || "";
+        const baseline = typeof baselineFiles === "function"
+          ? baselineFiles(change.path) || ""
+          : baselineFiles[change.path] || "";
         const baselineCheck = this.checkCode(baseline, change.path);
         const baselineReasons = new Set(baselineCheck.violations.map((v) => v.reason));
 
         for (const violation of fileCheck.violations) {
-          // If baseline did not have this violation, it is newly introduced by ANKA
           if (!baselineReasons.has(violation.reason)) {
-            allViolations.push(violation);
+            // Not present in baseline at all -> newly introduced by agent
+            allViolations.push({
+              ...violation,
+              provenance: "INTRODUCED_BY_AGENT",
+            });
+          } else {
+            // Present in baseline -> check if worsened
+            const baseCount = this.getPatternMatchesCount(violation.reason, baseline);
+            const currCount = this.getPatternMatchesCount(violation.reason, content);
+            if (currCount > baseCount) {
+              allViolations.push({
+                ...violation,
+                provenance: "WORSENED_BY_AGENT",
+                message: `[WORSENED_BY_AGENT] ${violation.message} (Occurrences increased from ${baseCount} to ${currCount})`,
+              });
+            } else {
+              allViolations.push({
+                ...violation,
+                provenance: "PRE_EXISTING_BASELINE",
+              });
+            }
           }
         }
       }
     }
 
+    const introducedOrWorsened = allViolations.filter(
+      (v) => v.provenance === "INTRODUCED_BY_AGENT" || v.provenance === "WORSENED_BY_AGENT"
+    );
+
     return {
-      safe: allViolations.length === 0,
+      safe: introducedOrWorsened.length === 0,
       violations: allViolations,
     };
   }

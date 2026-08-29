@@ -146,7 +146,7 @@ export class StaticValidationEngine {
   }
 
   // ── File AST Parser ─────────────────────────────────────────────────────────
-  private static parseFile(p: string, content: string, fileMap: Map<string, string>): FileAST {
+  public static parseFile(p: string, content: string, fileMap: Map<string, string>): FileAST {
     const lines = content.split("\n");
     const imports: FileAST["imports"] = [];
     const exports: FileAST["exports"] = [];
@@ -172,11 +172,17 @@ export class StaticValidationEngine {
       }
 
       for (const exp of tsSymbols.exports) {
+        const mappedType: FileAST["exports"][0]["type"] =
+          exp.type === "variable"
+            ? "const"
+            : exp.type === "unknown"
+            ? "const"
+            : (exp.type as FileAST["exports"][0]["type"]) || "const";
         exports.push({
           line: exp.line,
           name: exp.name,
           kind: exp.isDefault ? "default" : "named",
-          type: exp.type as FileAST["exports"][0]["type"],
+          type: mappedType,
         });
       }
     } else {
@@ -206,11 +212,15 @@ export class StaticValidationEngine {
         });
       }
 
-      const exportRegex = /export\s+(default\s+)?(interface|class|function|type|const)\s+([A-Za-z0-9_]+)/g;
+      const exportRegex = /export\s+(default\s+)?(interface|class|function|type|const|let|var)\s+([A-Za-z0-9_]+)/g;
       while ((match = exportRegex.exec(content)) !== null) {
         const line = content.slice(0, match.index).split("\n").length;
         const isDefault = Boolean(match[1]);
-        const type = match[2] as FileAST["exports"][0]["type"];
+        const rawType = match[2];
+        const type: FileAST["exports"][0]["type"] =
+          rawType === "let" || rawType === "var"
+            ? "const"
+            : (rawType as FileAST["exports"][0]["type"]);
         const name = match[3];
 
         exports.push({
@@ -219,6 +229,44 @@ export class StaticValidationEngine {
           kind: isDefault ? "default" : "named",
           type,
         });
+      }
+
+      const defaultExportRegex = /export\s+default\s+([A-Za-z0-9_]+);?/g;
+      while ((match = defaultExportRegex.exec(content)) !== null) {
+        if (!["interface", "class", "function", "type", "const", "let", "var"].includes(match[1])) {
+          const line = content.slice(0, match.index).split("\n").length;
+          exports.push({
+            line,
+            name: "default",
+            kind: "default",
+            type: "const",
+          });
+        }
+      }
+
+      const clauseExportRegex = /export\s*\{([^}]+)\}/g;
+      while ((match = clauseExportRegex.exec(content)) !== null) {
+        const line = content.slice(0, match.index).split("\n").length;
+        const clause = match[1];
+        for (const item of clause.split(",")) {
+          const trimmed = item.trim();
+          if (!trimmed) continue;
+          if (trimmed.includes(" as ")) {
+            const parts = trimmed.split(/\s+as\s+/);
+            const alias = parts[1]?.trim();
+            if (alias === "default") {
+              exports.push({ line, name: "default", kind: "default", type: "const" });
+            } else if (alias) {
+              exports.push({ line, name: alias, kind: "named", type: "const" });
+            }
+          } else {
+            if (trimmed === "default") {
+              exports.push({ line, name: "default", kind: "default", type: "const" });
+            } else {
+              exports.push({ line, name: trimmed, kind: "named", type: "const" });
+            }
+          }
+        }
       }
     }
 

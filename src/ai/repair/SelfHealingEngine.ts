@@ -10,8 +10,30 @@ import { SecurityPolicy } from "../security/SecurityPolicy";
 import { ImportValidator } from "../validation/ImportValidator";
 import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
 import { ErrorClassifier } from "../validation/ErrorClassifier";
-import { ErrorDiagnosticsParser } from "./ErrorDiagnosticsParser";
+import { ErrorDiagnosticsParser, DiagnosticError } from "../../services/surgical-repair.engine";
 import { SurgicalPatchEngine, SurgicalPatchChunk } from "./SurgicalPatchEngine";
+
+function extractMissingDepKeys(diags: DiagnosticError[], rawErrors?: string): Set<string> {
+  const keys = new Set<string>();
+  for (const diag of diags) {
+    if (diag.code === "TS2307" || /cannot find module|module not found|err_module_not_found|could not resolve/i.test(diag.message || "")) {
+      const normFile = diag.file ? normalizeRepoPath(diag.file) : "";
+      let sym = (diag.symbolName || "").toLowerCase();
+      if (!sym && diag.message) {
+        const m = diag.message.match(/['"`]([^'"`]+)['"`]/);
+        if (m) sym = m[1].toLowerCase();
+      }
+      keys.add(`${normFile}|${sym}`);
+    }
+  }
+  if (keys.size === 0 && rawErrors) {
+    const quoteMatches = rawErrors.matchAll(/(?:cannot find module|module not found|could not resolve|cannot find name)\s+['"`]([^'"`]+)['"`]/gi);
+    for (const qm of quoteMatches) {
+      if (qm[1]) keys.add(`*|${qm[1].toLowerCase()}`);
+    }
+  }
+  return keys;
+}
 import { RepairSessionTracker } from "./RepairSessionTracker";
 import { buildSelfHealingRepairPrompt } from "../prompts/repair";
 import {
@@ -23,7 +45,12 @@ import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
 import { verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { PatchCorrectionEngine } from "../generation/PatchCorrectionEngine";
-import { BaselineDeltaVerifier, BaselineDeltaResult } from "../../services/baseline-delta.verifier";
+import {
+  BaselineDeltaVerifier,
+  BaselineDeltaResult,
+  createPreTaskSourceGetter,
+  PreTaskSourceInfo,
+} from "../../services/baseline-delta.verifier";
 
 export const MAX_TOTAL_REPAIR_CYCLES = 15;
 export const MAX_NO_PROGRESS_CYCLES = 2;
@@ -130,6 +157,7 @@ export class SelfHealingEngine {
     executionContract?: ExecutionContract | null,
     baselineDiagnostics?: BaselineDiagnostic[],
     targetedBaselineDiagnostics?: BaselineDiagnostic[],
+    baseCommitSha?: string,
   ): Promise<{
     finalChanges: AgentFileChange[];
     attempts: number;
@@ -189,6 +217,8 @@ export class SelfHealingEngine {
     const resolvedFailureSequence: string[] = [];
 
     const attemptedProposalFingerprints = new Set<string>();
+    /** Per-run memory of dynamically authorized revealed-baseline repair targets */
+    const authorizedRevealedBaselinePaths = new Set<string>();
     const repairAttemptsHistory: Array<{
       attempt: number;
       proposalResult?: string;
@@ -416,15 +446,15 @@ export class SelfHealingEngine {
         repairTrigger = localPath && commands.length > 0 ? "SHELL_VALIDATION_FAILURE" : "LLM_REVIEW_REJECTION";
         previousErrors = validation.errors;
 
+        const sourceInfoGetter = createPreTaskSourceGetter(localPath, fsManager, baseCommitSha);
+        const preTaskSourceGetter = (filePath: string) => {
+          const info = sourceInfoGetter(filePath);
+          return info ? info.content : undefined;
+        };
+
         if (baselineDiagnostics && baselineDiagnostics.length > 0) {
           const currentDiags = BaselineDeltaVerifier.extractDiagnostics(validation.errors, "CURRENT_TASK");
           const isBroad = BaselineDeltaVerifier.isBroadBuildRepairTask(originalMessage, executionContract);
-          const preTaskSourceGetter = (filePath: string) => {
-            if (fsManager) {
-              return fsManager.getOriginalContent(filePath);
-            }
-            return undefined;
-          };
 
           const deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
             baselineDiagnostics,
@@ -434,6 +464,7 @@ export class SelfHealingEngine {
               preTaskSourceGetter,
               changes: currentChanges,
               isBroadRepairTask: isBroad,
+              authorizedRevealedBaselinePaths,
             }
           );
 
@@ -505,6 +536,109 @@ export class SelfHealingEngine {
           };
         }
 
+        // For BROAD BUILD REPAIR ONLY: Dynamically authorize proven revealed baseline compiler targets
+        const isBroad = BaselineDeltaVerifier.isBroadBuildRepairTask(originalMessage, executionContract);
+        if (isBroad && approvedManifest && localPath) {
+          for (const diag of parsedDiags) {
+            if (!diag.file) continue;
+            const cleanPath = diag.file.replace(/^\.\//, "").replace(/\\/g, "/");
+            const sourceInfo = sourceInfoGetter(cleanPath);
+
+            if (sourceInfo) {
+              const changeForFile = currentChanges.find(
+                (c) => (c.path || "").replace(/^\.\//, "").replace(/\\/g, "/").toLowerCase() === cleanPath.toLowerCase()
+              );
+              const baseDiag: BaselineDiagnostic = {
+                errorType: diag.code?.startsWith("TS") ? "COMPILE_TS" : "COMPILE_NEXT",
+                filePath: cleanPath,
+                line: diag.line,
+                column: diag.column,
+                errorCode: diag.code,
+                message: diag.message,
+                symbolName: diag.symbolName,
+                rawTrace: diag.rawTrace,
+                origin: "CURRENT_TASK",
+                fingerprint: `${diag.code || "ERR"}|${cleanPath}|${diag.line || 0}`,
+              };
+              const causality = BaselineDeltaVerifier.isConstructPreExistingAndUntouched(
+                baseDiag,
+                sourceInfo.content,
+                changeForFile,
+                {
+                  preTaskSourceGetter,
+                  changes: currentChanges,
+                  isBroadRepairTask: isBroad,
+                  authorizedRevealedBaselinePaths,
+                }
+              );
+
+              if ((causality.isPreExisting && !causality.isTouched) || causality.isAuthorizedRepairFollowup) {
+                const abs = path.join(localPath, cleanPath);
+                if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+                  // 1. Extend approved manifest
+                  const normPath = normalizeRepoPath(cleanPath);
+                  if (!approvedManifest.files.some((f) => normalizeRepoPath(f.path) === normPath)) {
+                    approvedManifest.files.push({
+                      path: cleanPath,
+                      action: "modify",
+                      description: "Dynamically authorized revealed baseline diagnostic target",
+                      dependencies: [],
+                    });
+                    approvedManifest.totalFiles = approvedManifest.files.length;
+                  }
+
+                  // 2. Extend execution contract target paths and search scope
+                  if (executionContract) {
+                    if (!executionContract.targetPaths.some((p) => normalizeRepoPath(p) === normPath)) {
+                      executionContract.targetPaths.push(cleanPath);
+                    }
+                    if (!executionContract.searchScope.some((p) => normalizeRepoPath(p) === normPath)) {
+                      executionContract.searchScope.push(cleanPath);
+                    }
+                  }
+
+                  // 3. Hydrate on-disk content into currentChanges & snapshot into fsManager
+                  if (!currentChanges.some((c) => normalizeRepoPath(c.path) === normPath)) {
+                    try {
+                      const currentDiskContent = fs.readFileSync(abs, "utf8");
+                      currentChanges.push({
+                        path: cleanPath,
+                        content: currentDiskContent,
+                        action: "modify",
+                        description: "Hydrated revealed baseline target for repair",
+                      });
+                      if (fsManager) {
+                        await fsManager.snapshot(currentChanges, localPath);
+                      }
+                    } catch {}
+                  }
+
+                  // 4. Record authorization lineage for this repair run
+                  authorizedRevealedBaselinePaths.add(normPath);
+
+                  if (causality.isAuthorizedRepairFollowup) {
+                    console.log(
+                      `[REPAIR_FOLLOWUP] file=${cleanPath} diagnostic=${diag.code} symbol=${diag.symbolName} causedByAuthorizedRepair=true authorized=true`
+                    );
+                  } else {
+                    console.log(
+                      `[REVEALED_SCOPE] file=${cleanPath} baselineSource=${sourceInfo.origin} classification=REVEALED_BASELINE authorized=true`
+                    );
+                  }
+                }
+              } else {
+                console.log(
+                  `[REVEALED_SCOPE] file=${cleanPath} authorized=false reason=AGENT_TOUCHED_OR_REGRESSION`
+                );
+              }
+            } else {
+              console.log(
+                `[REVEALED_SCOPE] file=${cleanPath} authorized=false reason=NO_BASELINE_PROOF`
+              );
+            }
+          }
+        }
+
         // Dedicated MISSING_DEP routing: stop generic repair loop; allow at most 1 bounded dependency correction
         if (valErrClassification.type === "MISSING_DEP") {
           console.warn(`[SelfHealingEngine] Detected MISSING_DEP. Routing to bounded dependency-safe correction.`);
@@ -518,6 +652,54 @@ export class SelfHealingEngine {
                 const arch = detectRepositoryArchitecture([], pkgContent);
                 installedPackages = arch.installedPackages;
               } catch {}
+            }
+          }
+
+          // Build effective repair context for MISSING_DEP:
+          // 1. Start with existing currentChanges (deduplicated by normalized path)
+          const effectiveRepairContextChanges: AgentFileChange[] = [];
+          const seenPaths = new Set<string>();
+
+          for (const c of currentChanges) {
+            const norm = normalizeRepoPath(c.path);
+            if (!seenPaths.has(norm)) {
+              seenPaths.add(norm);
+              effectiveRepairContextChanges.push(c);
+            }
+          }
+
+          // 2. Hydrate any authorized diagnostic files from parsedDiags not already in currentChanges
+          for (const diag of parsedDiags) {
+            const rawPath = diag.file || (diag as any).filePath;
+            if (!rawPath) continue;
+            const cleanPath = rawPath.replace(/^\.\//, "").replace(/\\/g, "/");
+            const norm = normalizeRepoPath(cleanPath);
+
+            if (seenPaths.has(norm)) continue;
+
+            const isApprovedInManifest = approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm);
+            const isAuthorizedRevealed = authorizedRevealedBaselinePaths.has(norm);
+
+            if (isApprovedInManifest || isAuthorizedRevealed) {
+              let currentContent: string | null = null;
+              if (localPath) {
+                const abs = path.join(localPath, cleanPath);
+                if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+                  try {
+                    currentContent = fs.readFileSync(abs, "utf8");
+                  } catch {}
+                }
+              }
+
+              if (currentContent !== null) {
+                seenPaths.add(norm);
+                effectiveRepairContextChanges.push({
+                  path: cleanPath,
+                  content: currentContent,
+                  action: "modify",
+                  description: "Hydrated authorized target for dependency repair",
+                });
+              }
             }
           }
 
@@ -536,7 +718,7 @@ export class SelfHealingEngine {
                 },
                 {
                   role: "user",
-                  content: `ORIGINAL REQUEST: ${originalMessage}\nCURRENT CHANGES:\n${JSON.stringify(currentChanges.map(c => ({ path: c.path, content: c.content })))}`,
+                  content: `ORIGINAL REQUEST: ${originalMessage}\nCURRENT CHANGES:\n${JSON.stringify(effectiveRepairContextChanges.map(c => ({ path: c.path, content: c.content })))}`,
                 },
               ],
               temperature: 0.0,
@@ -549,17 +731,29 @@ export class SelfHealingEngine {
               const secCheck = SecurityPolicy.checkChanges(parsed.changes);
 
               if (importCheck.valid && secCheck.safe) {
-                depChanges = parsed.changes.map((c: any) => ({
+                const appliedDepChanges: AgentFileChange[] = parsed.changes.map((c: any) => ({
                   path: c.path,
                   content: c.content || "",
-                  action: "modify",
+                  action: "modify" as const,
                   description: "Fix missing dependency",
                 }));
+
+                const merged = [...currentChanges];
+                for (const change of appliedDepChanges) {
+                  const norm = normalizeRepoPath(change.path);
+                  const existingIdx = merged.findIndex((c) => normalizeRepoPath(c.path) === norm);
+                  if (existingIdx !== -1) {
+                    merged[existingIdx] = change;
+                  } else {
+                    merged.push(change);
+                  }
+                }
+                depChanges = merged;
                 if (localPath && fsManager) {
-                  await fsManager.apply(depChanges, localPath);
+                  await fsManager.apply(appliedDepChanges, localPath);
                 }
                 depCorrectionSucceeded = true;
-                patchesAppliedCount += depChanges.length;
+                patchesAppliedCount += appliedDepChanges.length;
               }
             }
           } catch (e: any) {
@@ -585,6 +779,68 @@ export class SelfHealingEngine {
                 patchesAppliedCount,
               };
             }
+
+            // Retry build failed. Determine whether the ORIGINAL missing dependency diagnostic is still present.
+            const originalMissingDeps = extractMissingDepKeys(parsedDiags, validation.errors);
+            const retryDiags = ErrorDiagnosticsParser.parse(retryBuild.errors);
+            const retryMissingDeps = extractMissingDepKeys(retryDiags, retryBuild.errors);
+
+            let sameDepStillPresent = false;
+            if (originalMissingDeps.size > 0) {
+              for (const depKey of originalMissingDeps) {
+                if (retryMissingDeps.has(depKey)) {
+                  sameDepStillPresent = true;
+                  break;
+                }
+                const pkgOnly = depKey.split("|")[1];
+                if (pkgOnly) {
+                  for (const retryKey of retryMissingDeps) {
+                    if (retryKey.split("|")[1] === pkgOnly) {
+                      sameDepStillPresent = true;
+                      break;
+                    }
+                  }
+                }
+                if (sameDepStillPresent) break;
+              }
+            } else {
+              const retryClass = ErrorClassifier.classify(retryBuild.errors);
+              if (retryClass.type === "MISSING_DEP" && retryBuild.errors.trim() === validation.errors.trim()) {
+                sameDepStillPresent = true;
+              }
+            }
+
+            if (!sameDepStillPresent) {
+              // PROGRESS: Original missing dependency was resolved; next cycle will handle the newly revealed diagnostic
+              console.log(`[SelfHealingEngine] MISSING_DEP progress: original missing dependency resolved. Transitioning to next repair cycle.`);
+              currentChanges = depChanges;
+              previousErrors = retryBuild.errors;
+              appliedPatchesInPrevCycle = true;
+              repairApplied = true;
+              continue;
+            }
+
+            return {
+              finalChanges: depChanges,
+              attempts: attempt,
+              success: false,
+              errorLog: `[MISSING_DEP] Unresolved missing dependency: ${retryBuild.errors}\n\nROOT BUILD FAILURE:\n${rootFailure?.stderr || validation.errors}`,
+              errorType: "MISSING_DEP",
+              rootFailure,
+              currentFailure: retryBuild.errors,
+              validationDetails: {
+                rootFailure,
+                currentFailure: retryBuild.errors,
+                repairAttempts: repairAttemptsHistory,
+                finalFailure: "MISSING_DEP",
+                modelRepairAttempts,
+                patchesApplied: patchesAppliedCount,
+                buildAttempts,
+              },
+              buildAttemptsCount: buildAttempts,
+              modelRepairAttempts,
+              patchesAppliedCount,
+            };
           }
 
           return {
