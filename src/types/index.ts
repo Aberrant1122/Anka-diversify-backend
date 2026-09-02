@@ -566,7 +566,7 @@ export interface AgentProgressEvent {
   stageName: string;
   label: string;
   detail: string;
-  color: string;
+  color?: string;
   badge: string;
   progress: number;
   log?: string;

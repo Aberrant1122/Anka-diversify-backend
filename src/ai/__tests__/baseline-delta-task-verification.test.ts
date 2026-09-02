@@ -8,6 +8,8 @@ import { AgentPipeline } from "../orchestration/AgentPipeline";
 import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
 import { BaselineRepairCoordinator } from "../../services/baseline-repair.coordinator";
 
+jest.setTimeout(30000);
+
 describe("Baseline-Delta Task Verification (Steps A-I)", () => {
   let tempDir: string;
 

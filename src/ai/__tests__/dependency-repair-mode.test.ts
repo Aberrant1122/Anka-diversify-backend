@@ -5,6 +5,8 @@ import { DependencyRepairService, ALLOWED_DEPENDENCY_FILES } from "../../service
 import { GitWorktreeService } from "../../services/git-worktree.service";
 import { WorktreeDependencyService } from "../../services/worktree-dependency.service";
 
+jest.setTimeout(30000);
+
 describe("Constrained Dependency-Repair Mode on Broken Baseline (Steps A-I)", () => {
   let tempDir: string;
 

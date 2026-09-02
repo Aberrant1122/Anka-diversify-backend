@@ -79,6 +79,16 @@ export class AgentPipeline {
 
     const pipelineStart = performance.now();
 
+    onProgress?.({
+      step: 1,
+      stageName: "INITIALIZING",
+      label: "Understand Goal & Scope",
+      detail: "Initializing repository environment and workspace context...",
+      badge: "INIT",
+      progress: 5,
+      log: "[Init] Initializing repository environment and analyzing workspace...",
+    });
+
     // Stage 1: Intent Analysis
     const s1Start = performance.now();
     const intentResult = await IntentClassifier.classifyIntentAndAmbiguity(request.message, projectContext);
@@ -512,6 +522,17 @@ export class AgentPipeline {
         baselineDiagnostics: baselineDiagnosticsList,
       };
 
+      onProgress?.({
+        step: 3,
+        stageName: "MANIFEST_PLANNING",
+        label: "Plan File Actions",
+        detail: "Formulating authoritative file action plan (create / modify / delete)...",
+        badge: "PLANNING",
+        progress: 58,
+        log: "[Plan] Formulating authoritative file manifest...",
+        executionContract,
+      });
+
       // 1. Authoritative FileManifest generation for ALL tasks
       let rawManifest: FileManifest | null = null;
       try {
@@ -644,6 +665,20 @@ export class AgentPipeline {
         }
       }
 
+      if (approvedManifest && Array.isArray(approvedManifest.files)) {
+        const fileListStr = approvedManifest.files.map((f) => `${f.action.toUpperCase()} ${f.path}`).join(", ");
+        onProgress?.({
+          step: 3,
+          stageName: "MANIFEST_APPROVED",
+          label: "Plan File Actions",
+          detail: `Approved plan: ${approvedManifest.files.length} file(s) [${fileListStr}]`,
+          badge: `PLAN · ${approvedManifest.files.length} FILES`,
+          progress: 68,
+          log: `[Plan] Approved manifest: ${fileListStr}`,
+          executionContract,
+        });
+      }
+
       // 2. Optional advisory decomposition for LARGE/COMPLEX NEW_FEATURE tasks
       const shouldDecompose =
         intentResult.taskType === "NEW_FEATURE" &&
@@ -726,6 +761,17 @@ export class AgentPipeline {
     }
 
     // Stage 7: Coding Agent File Generation
+    onProgress?.({
+      step: 4,
+      stageName: "CODE_GENERATION",
+      label: "Generate File Changes",
+      detail: "Synthesizing exact code changes and targeted search/replace patch edits...",
+      badge: "GENERATING",
+      progress: 75,
+      log: "[Generate] Synthesizing precise code changes and targeted search/replace patches...",
+      executionContract,
+    });
+
     const s7Start = performance.now();
     const roadmapAndDiff = await CodeGenerator.generateRoadmapAndDiffs(
       request.message,
@@ -738,6 +784,17 @@ export class AgentPipeline {
       hydrationResult.mergedSourceMap,
     );
     const s7Time = performance.now() - s7Start;
+
+    onProgress?.({
+      step: 4,
+      stageName: "CHANGES_SYNTHESIZED",
+      label: "Generate File Changes",
+      detail: `Synthesized ${roadmapAndDiff.changes.length} change proposal(s) in ${formatMs(s7Time)}`,
+      badge: `CODE · ${formatMs(s7Time)}`,
+      progress: 82,
+      log: `[Generate] Generated ${roadmapAndDiff.changes.length} file change(s) in ${formatMs(s7Time)}:\n${roadmapAndDiff.changes.map((c) => `  • ${c.action?.toUpperCase() || "MODIFY"}: ${c.path}`).join("\n")}`,
+      executionContract,
+    });
 
     // Execution Scope Enforcement Gate (Post-Generation / Pre-Disk)
     const existingFileList = Array.isArray(effectiveSnapshot)
@@ -810,6 +867,17 @@ export class AgentPipeline {
     }
 
     // Stage 8: Self-Healing Build Repair
+    onProgress?.({
+      step: 5,
+      stageName: "STATIC_VALIDATION",
+      label: "Validate & Verify",
+      detail: "Running static type validation, import checks, and build verification...",
+      badge: "VALIDATING",
+      progress: 86,
+      log: "[Validate] Running static AST, import checks, and verification...",
+      executionContract,
+    });
+
     const s8Start = performance.now();
     const effectiveValidationCommands = ValidationPlanner.detectValidationCommands(
       effectiveLocalPath,

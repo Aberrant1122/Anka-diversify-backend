@@ -242,8 +242,10 @@ BEFORE generating any code, you MUST output a complete File Manifest declaring A
 MINIMALITY & SCOPE GUIDELINES
 ═══════════════════════════════════════════════════════════════════════
 1. Choose the SMALLEST COHERENT FILE SET required to satisfy the user request.
-2. Do NOT modify global entry points (app/layout.*, global configuration, package.json, global providers) unless the requested change genuinely requires them.
-3. For visual/component refinements, prefer modifying existing component/style/page files directly involved in the feature.
+2. For requests improving or enhancing the existing dashboard or main page, modify the verified active entry point (e.g. app/page.tsx) or components directly rendered by it.
+3. Do NOT modify global entry points (app/layout.*, global configuration, package.json, global providers) unless the requested change genuinely requires them.
+4. Whenever you create a new stylesheet (*.css / *.module.css), ensure the component using it (or app/layout.tsx) declares the stylesheet in its dependencies and imports it. Never leave created stylesheets orphaned.
+5. Check REPOSITORY DESIGN SYSTEM context. Prefer reusing existing components (Card, Button, Sidebar, Header, Badge, etc.) when compatible with the requested feature rather than inventing duplicate primitives.
 
 Respond ONLY with valid JSON:
 {

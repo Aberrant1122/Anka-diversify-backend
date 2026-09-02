@@ -1,7 +1,15 @@
 import OpenAI from "openai";
 import { FileManifest, ExecutionContract, SubTask } from "../types";
 import { MANIFEST_GENERATION_PROMPT } from "./prompts";
-import { detectRepositoryArchitecture, RepositoryArchitectureSummary } from "../ai/planning/RepositoryArchitectureDetector";
+import {
+  detectRepositoryArchitecture,
+  detectPrimaryActiveEntryPoint,
+  isExistingPrimaryUIRefinement,
+  isFullPageDashboardRequest,
+  isUITask,
+  buildRepositoryUISystemPromptSection,
+  RepositoryArchitectureSummary,
+} from "../ai/planning/RepositoryArchitectureDetector";
 
 export interface ManifestPlanningContext {
   existingFiles?: string[];
@@ -58,6 +66,28 @@ export class ManifestGenerator {
       contextText += `- Dependency Rule: You MUST NOT declare uninstalled external packages in dependencies[]. Only use installed packages or standard Node modules.\n`;
     }
     contextText += `\n`;
+
+    const primaryActiveEntry = arch.primaryActiveEntryPoint || detectPrimaryActiveEntryPoint(existingFileList, arch);
+    const isPrimaryRefinement = isExistingPrimaryUIRefinement(userRequest);
+    const isFullDashboard = isFullPageDashboardRequest(userRequest);
+    const isUI = isUITask(userRequest);
+    const isSmallComp = !isFullDashboard && /(small|badge|button|tag|pill|icon|fix|minor|single)/i.test(userRequest);
+
+    if (primaryActiveEntry && isPrimaryRefinement) {
+      contextText += `ACTIVE PRIMARY ENTRY POINT GROUNDING:\n`;
+      contextText += `- Verified Primary Active UI File: "${primaryActiveEntry}" (renders application root "/")\n`;
+      contextText += `- Primary UI Requirement: The user requested to improve/enhance/update the dashboard or primary UI. You MUST include "${primaryActiveEntry}" with action "modify" (or modify an existing component directly rendered by it) so the active dashboard at "/" visibly reflects the requested improvements. Do NOT create isolated new sub-routes while leaving "${primaryActiveEntry}" untouched.\n\n`;
+    }
+
+    if (isUI) {
+      const uiSystemSection = buildRepositoryUISystemPromptSection(arch, {
+        isDashboard: isFullDashboard,
+        isSmallComponent: isSmallComp,
+      });
+      if (uiSystemSection) {
+        contextText += uiSystemSection;
+      }
+    }
 
     if (repositoryContext.relevantFiles && repositoryContext.relevantFiles.length > 0) {
       contextText += `RELEVANT EXISTING FILES IN REPOSITORY:\n`;

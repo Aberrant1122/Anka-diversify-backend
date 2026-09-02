@@ -388,12 +388,14 @@ export class AiController {
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
       res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("X-Accel-Buffering", "no");
+      (res as any).flushHeaders?.();
 
       const sendEvent = (event: string, data: any) => {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        (res as any).flush?.();
       };
 
       const result = await aiService.runCodingAgent(
@@ -410,6 +412,7 @@ export class AiController {
     } catch (error) {
       console.error("Agent stream error:", error);
       res.write(`event: error\ndata: ${JSON.stringify({ error: "Agent run failed", message: error instanceof Error ? error.message : "Unknown error" })}\n\n`);
+      (res as any).flush?.();
       res.end();
     }
   }

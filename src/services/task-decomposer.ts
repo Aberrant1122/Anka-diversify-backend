@@ -9,6 +9,14 @@ import {
   CrossRepoEdge,
 } from "../types";
 import { TASK_DECOMPOSITION_PROMPT } from "./prompts";
+import {
+  detectRepositoryArchitecture,
+  detectPrimaryActiveEntryPoint,
+  isExistingPrimaryUIRefinement,
+  isFullPageDashboardRequest,
+  isUITask,
+  buildRepositoryUISystemPromptSection,
+} from "../ai/planning/RepositoryArchitectureDetector";
 
 export class TaskDecomposer {
   private openai: OpenAI;
@@ -43,6 +51,29 @@ export class TaskDecomposer {
     contextText += `- Risk: ${intentResult.risk}\n`;
     contextText += `- Estimated Complexity: ${intentResult.estimatedComplexity}\n`;
     contextText += `- Target Path: ${intentResult.targetPath || "project-wide"}\n\n`;
+
+    const arch = detectRepositoryArchitecture(existingFiles);
+    const primaryActiveEntry = arch.primaryActiveEntryPoint || detectPrimaryActiveEntryPoint(existingFiles);
+    const isPrimaryRefinement = isExistingPrimaryUIRefinement(userRequest);
+    const isFullDashboard = isFullPageDashboardRequest(userRequest);
+    const isUI = isUITask(userRequest);
+    const isSmallComp = !isFullDashboard && /(small|badge|button|tag|pill|icon|fix|minor|single)/i.test(userRequest);
+
+    if (primaryActiveEntry && isPrimaryRefinement) {
+      contextText += `ACTIVE PRIMARY ENTRY POINT GROUNDING:\n`;
+      contextText += `- Verified Primary Active UI File: "${primaryActiveEntry}" (renders root "/")\n`;
+      contextText += `- Requirement: User requested to improve/enhance the dashboard/primary UI. Subtasks must include modifying "${primaryActiveEntry}" (or its direct child components) so the active root UI changes visibly.\n\n`;
+    }
+
+    if (isUI) {
+      const uiSystemSection = buildRepositoryUISystemPromptSection(arch, {
+        isDashboard: isFullDashboard,
+        isSmallComponent: isSmallComp,
+      });
+      if (uiSystemSection) {
+        contextText += uiSystemSection;
+      }
+    }
 
     if (isMultiRepo) {
       contextText += `MULTIPLE REPOSITORIES AVAILABLE — every sub-task MUST include a "repositoryId" field set to one of these exact IDs:\n`;

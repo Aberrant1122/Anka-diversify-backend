@@ -554,7 +554,7 @@ FILE MANIFEST REQUIREMENTS
 CRITICAL RULES:
 1. Generate the File Manifest BEFORE any code generation begins.
 2. Declare EVERY file you will create, modify, or delete — no exceptions.
-3. MINIMALITY & SCOPE: Choose the SMALLEST COHERENT FILE SET required to satisfy the request. Do NOT modify global entry points (app/layout.*, global config, package.json) unless the change genuinely requires global setup.
+3. MINIMALITY & SCOPE: Choose the SMALLEST COHERENT FILE SET required to satisfy the request. For requests improving or enhancing the existing dashboard or main page, modify the verified active entry point (e.g. app/page.tsx) or components directly rendered by it. Do NOT modify global entry points (app/layout.*, global config, package.json) unless the change genuinely requires global setup.
 4. For each file, list ALL its dependencies (import paths).
 5. Ensure every import path resolves to either:
    - A file in this manifest (with action "create" or "modify")
@@ -563,6 +563,8 @@ CRITICAL RULES:
 6. Do NOT create orphaned files — every non-entry-point file must be imported/used by another file.
 7. Respect the maxFiles limit from the Execution Contract.
 8. All file paths must be within the allowed targetPaths from the Execution Contract.
+9. STYLESHEET WIRING: Whenever you declare a stylesheet (*.css / *.module.css) with action "create", you MUST ensure that the component or layout importing it is also in the manifest with the stylesheet in its dependencies array. Never leave created stylesheets unimported.
+10. COMPONENT REUSE: Before declaring new UI primitives, check the provided REPOSITORY DESIGN SYSTEM context. Prefer reusing existing Card, Button, Sidebar, Header, Badge components and global stylesheets when compatible with the requested feature.
 
 FILE MANIFEST JSON SCHEMA:
 {

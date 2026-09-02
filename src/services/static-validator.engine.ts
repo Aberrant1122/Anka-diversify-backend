@@ -11,6 +11,7 @@ export type ValidationCheckType =
   | "unused_api"
   | "dead_route"
   | "missing_navigation"
+  | "missing_stylesheet_import"
   | "invalid_prisma"
   | "circular_dependency"
   | "missing_provider";
@@ -76,7 +77,7 @@ export class StaticValidationEngine {
    */
   static validate(
     snapshotFiles: SnapshotFile[],
-    modifiedFiles?: Array<{ path: string; content: string }>,
+    modifiedFiles?: Array<{ path: string; content?: string; action?: string; isDeleted?: boolean }>,
   ): StaticValidationResult {
     const startTime = performance.now();
     const issues: StaticValidationIssue[] = [];
@@ -84,13 +85,31 @@ export class StaticValidationEngine {
     // Merge snapshot and modified files
     const fileMap = new Map<string, string>();
     for (const f of snapshotFiles) {
-      if (f.path && f.content !== undefined) {
+      if (f.path && typeof f.content === "string") {
         fileMap.set(f.path.replace(/\\/g, "/"), f.content);
       }
     }
     if (modifiedFiles) {
       for (const mf of modifiedFiles) {
-        fileMap.set(mf.path.replace(/\\/g, "/"), mf.content);
+        if (!mf || !mf.path) continue;
+        const normPath = mf.path.replace(/\\/g, "/");
+        const isDelete = mf.action === "delete" || mf.isDeleted === true;
+        if (isDelete) {
+          fileMap.delete(normPath);
+        } else {
+          if (typeof mf.content === "string") {
+            fileMap.set(normPath, mf.content);
+          } else {
+            issues.push({
+              checkId: "broken_import",
+              severity: "FAIL",
+              file: normPath,
+              line: 1,
+              reason: `File change for '${normPath}' has action '${mf.action || "modify"}' but missing required string content`,
+              suggestedFix: `Provide valid string content for file '${normPath}' or mark action as 'delete'`,
+            });
+          }
+        }
       }
     }
 
@@ -121,6 +140,9 @@ export class StaticValidationEngine {
 
     // 7. Check: Invalid Prisma Usage
     StaticValidationEngine.checkPrismaUsage(asts, fileMap, issues);
+
+    // 8. Check: Created/Modified Stylesheet Integration (Task-Delta Aware)
+    StaticValidationEngine.checkStylesheetIntegration(modifiedFiles, asts, fileMap, issues);
 
     const endTime = performance.now();
     const hasFailures = issues.some((i) => i.severity === "FAIL");
@@ -310,18 +332,41 @@ export class StaticValidationEngine {
     rawImport: string,
     fileMap: Map<string, string>,
   ): string | null {
-    let target = "";
+    const extensions = [
+      "",
+      ".ts",
+      ".tsx",
+      ".js",
+      ".jsx",
+      "/index.ts",
+      "/index.tsx",
+      "/index.js",
+      ".css",
+      ".scss",
+      ".sass",
+      ".less",
+      ".module.css",
+      ".module.scss",
+    ];
+
+    const candidates: string[] = [];
     if (rawImport.startsWith("@/")) {
-      target = rawImport.replace("@/", "src/");
+      candidates.push(rawImport.replace("@/", "src/"));
+      candidates.push(rawImport.replace("@/", "app/"));
+      candidates.push(rawImport.replace("@/", ""));
+    } else if (rawImport.startsWith("~/")) {
+      candidates.push(rawImport.replace("~/", "src/"));
+      candidates.push(rawImport.replace("~/", ""));
     } else {
       const dir = path.dirname(currentFile);
-      target = path.normalize(path.join(dir, rawImport)).replace(/\\/g, "/");
+      candidates.push(path.normalize(path.join(dir, rawImport)).replace(/\\/g, "/"));
     }
 
-    const extensions = ["", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"];
-    for (const ext of extensions) {
-      const candidate = target + ext;
-      if (fileMap.has(candidate)) return candidate;
+    for (const target of candidates) {
+      for (const ext of extensions) {
+        const candidate = target + ext;
+        if (fileMap.has(candidate)) return candidate;
+      }
     }
 
     return null;
@@ -585,6 +630,82 @@ export class StaticValidationEngine {
             suggestedFix: `Add "model ${modelProp.charAt(0).toUpperCase() + modelProp.slice(1)} { ... }" to schema.prisma or fix call`,
           });
         }
+      }
+    }
+  }
+
+  // ── Check 8: Created/Modified Stylesheet Integration (Task-Delta Aware) ────
+  private static checkStylesheetIntegration(
+    modifiedFiles: Array<{ path: string; content?: string; action?: string; isDeleted?: boolean }> | undefined,
+    asts: FileAST[],
+    fileMap: Map<string, string>,
+    issues: StaticValidationIssue[],
+  ): void {
+    if (!modifiedFiles || !modifiedFiles.length) return;
+
+    // Filter strictly to created/modified stylesheets in the current task delta
+    const createdStylesheets = modifiedFiles.filter((mf) => {
+      if (!mf || !mf.path) return false;
+      const isDelete = mf.action === "delete" || mf.isDeleted === true;
+      if (isDelete) return false;
+      const norm = mf.path.replace(/\\/g, "/").toLowerCase();
+      return (
+        norm.endsWith(".css") ||
+        norm.endsWith(".scss") ||
+        norm.endsWith(".sass") ||
+        norm.endsWith(".less")
+      );
+    });
+
+    if (!createdStylesheets.length) return;
+
+    // Collect all resolved import paths and raw import strings across all ASTs
+    const allImportedPaths = new Set<string>();
+    const allRawImports = new Set<string>();
+
+    for (const ast of asts) {
+      for (const imp of ast.imports) {
+        if (imp.resolvedPath) {
+          allImportedPaths.add(imp.resolvedPath.replace(/\\/g, "/").toLowerCase());
+        }
+        if (imp.rawPath) {
+          allRawImports.add(imp.rawPath.replace(/\\/g, "/").toLowerCase());
+        }
+      }
+
+      // Regex scan for side-effect imports or CSS imports in TS/TSX/JS/CSS
+      const content = ast.content;
+      const cssImports = content.matchAll(/(?:import\s+(?:[^"';]+\s+from\s+)?["']([^"']+\.(?:css|scss|sass|less))["']|@import\s+["']([^"']+)["'])/gi);
+      for (const ci of cssImports) {
+        const raw = (ci[1] || ci[2] || "").replace(/\\/g, "/").toLowerCase();
+        if (raw) allRawImports.add(raw);
+      }
+    }
+
+    for (const sf of createdStylesheets) {
+      const normPath = sf.path.replace(/\\/g, "/").toLowerCase();
+      const filename = path.basename(normPath);
+
+      const isDirectlyResolved = allImportedPaths.has(normPath);
+      const isRawMatched = Array.from(allRawImports).some((raw) => {
+        return (
+          normPath.endsWith(raw.replace(/^\.\//, "")) ||
+          raw.endsWith(normPath) ||
+          raw.endsWith(filename) ||
+          raw === filename ||
+          raw === normPath
+        );
+      });
+
+      if (!isDirectlyResolved && !isRawMatched) {
+        issues.push({
+          checkId: "missing_stylesheet_import",
+          severity: "FAIL",
+          file: sf.path,
+          line: 1,
+          reason: `Created stylesheet '${sf.path}' is not imported by any component, layout, or page in the active render tree`,
+          suggestedFix: `Import '${sf.path}' in the component that uses it (e.g. import './${filename}') or in 'app/layout.tsx'`,
+        });
       }
     }
   }

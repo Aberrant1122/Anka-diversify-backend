@@ -1,11 +1,11 @@
-/**
- * TargetPathExtractor
- *
- * Deterministically extracts intended filesystem target paths from user messages.
- * Requires strong evidence (directory separators, canonical repository matches,
- * explicit quoted paths, or explicit action verbs) to prevent technology/framework
- * names (e.g. Next.js, Node.js, React.js) from being misidentified as file paths.
- */
+import path from "path";
+
+export type PathProvenance = "EXPLICIT_USER_PATH" | "REPOSITORY_GROUNDED" | "CLASSIFIER_HINT";
+
+export interface ExtractedPathInfo {
+  path: string;
+  provenance: PathProvenance;
+}
 
 export interface PathExtractionOptions {
   repoFiles?: string[];
@@ -40,30 +40,72 @@ export class TargetPathExtractor {
     "vanilla.js",
   ]);
 
+  // Generic broad root directories that must not become hard target paths when merely guessed
+  private static readonly BROAD_GENERIC_DIRS = new Set([
+    "src",
+    "app",
+    "lib",
+    "components",
+    "pages",
+    "styles",
+    "public",
+    "utils",
+    "api",
+    ".",
+    "/",
+  ]);
+
   /**
-   * Extracts verified target paths from a user message with high confidence.
+   * Extracts verified target paths from a user message with high confidence and provenance.
    */
   public static extract(
     message: string,
     options: PathExtractionOptions = {}
   ): string[] {
-    const rawPaths: string[] = [];
+    const infos = this.extractWithProvenance(message, options);
+    // Hard targets: only EXPLICIT_USER_PATH and REPOSITORY_GROUNDED
+    return infos
+      .filter((i) => i.provenance === "EXPLICIT_USER_PATH" || i.provenance === "REPOSITORY_GROUNDED")
+      .map((i) => i.path);
+  }
+
+  /**
+   * Extracts target paths along with their provenance classification.
+   */
+  public static extractWithProvenance(
+    message: string,
+    options: PathExtractionOptions = {}
+  ): ExtractedPathInfo[] {
+    const results: ExtractedPathInfo[] = [];
+    const seenPaths = new Set<string>();
     const repoFiles = (options.repoFiles || []).map((f) => f.replace(/\\/g, "/").replace(/^\//, ""));
 
-    // 1. If the classifier provided a concrete target path that looks like a real path or folder
-    if (options.classifierTarget && options.classifierTarget.trim()) {
-      const ct = options.classifierTarget.trim().replace(/\\/g, "/").replace(/^\//, "");
-      const isExistingInRepo = repoFiles.includes(ct) || repoFiles.some((rf) => rf.startsWith(ct + "/"));
-      const isExplicitInMessage = message.includes(ct);
+    const addPath = (p: string, provenance: PathProvenance) => {
+      const clean = p.replace(/\\/g, "/").replace(/^\//, "").replace(/\/$/, "");
+      if (
+        clean.length > 0 &&
+        !this.NON_PATH_TECHNOLOGIES.has(clean.toLowerCase()) &&
+        !seenPaths.has(clean)
+      ) {
+        seenPaths.add(clean);
+        results.push({ path: clean, provenance });
+      }
+    };
 
-      if (options.taskType !== "NEW_FEATURE" && options.taskType !== "FILE_CREATION") {
-        if (this.isValidPathCandidate(ct, repoFiles)) {
-          rawPaths.push(ct);
-        }
-      } else if (isExistingInRepo || isExplicitInMessage) {
-        if (this.isValidPathCandidate(ct, repoFiles)) {
-          rawPaths.push(ct);
-        }
+    // 1. Classifier Target Handling with Strict Provenance Rules
+    if (options.classifierTarget && options.classifierTarget.trim()) {
+      const ct = options.classifierTarget.trim().replace(/\\/g, "/").replace(/^\//, "").replace(/\/$/, "");
+      const isExistingInRepo = repoFiles.includes(ct) || repoFiles.some((rf) => rf.startsWith(ct + "/"));
+      const isExplicitInMessage = message.toLowerCase().includes(ct.toLowerCase());
+      const isBroad = this.BROAD_GENERIC_DIRS.has(ct.toLowerCase());
+
+      if (isExplicitInMessage && this.isValidPathCandidate(ct, repoFiles)) {
+        addPath(ct, "EXPLICIT_USER_PATH");
+      } else if (isExistingInRepo && !isBroad && this.isValidPathCandidate(ct, repoFiles)) {
+        addPath(ct, "REPOSITORY_GROUNDED");
+      } else {
+        // Classifier guess that is either nonexistent or generic broad dir is a hint only
+        // Does NOT get added as an authorized hard target
       }
     }
 
@@ -72,7 +114,7 @@ export class TargetPathExtractor {
     for (const m of quotedMatches) {
       const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").trim();
       if (this.isValidPathCandidate(candidate, repoFiles)) {
-        rawPaths.push(candidate);
+        addPath(candidate, "EXPLICIT_USER_PATH");
       }
     }
 
@@ -81,7 +123,7 @@ export class TargetPathExtractor {
     for (const m of dirSeparatedMatches) {
       const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").trim();
       if (this.isValidPathCandidate(candidate, repoFiles)) {
-        rawPaths.push(candidate);
+        addPath(candidate, "EXPLICIT_USER_PATH");
       }
     }
 
@@ -93,7 +135,7 @@ export class TargetPathExtractor {
       const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").trim();
       if (!this.NON_PATH_TECHNOLOGIES.has(candidate.toLowerCase())) {
         const resolved = this.resolveAgainstRepo(candidate, repoFiles);
-        rawPaths.push(resolved || candidate);
+        addPath(resolved || candidate, "EXPLICIT_USER_PATH");
       }
     }
 
@@ -109,24 +151,45 @@ export class TargetPathExtractor {
       // If this bare filename exists uniquely in repo (e.g. "page.tsx" matching "app/page.tsx")
       const matchedRepoPath = this.resolveAgainstRepo(candidate, repoFiles);
       if (matchedRepoPath) {
-        // Only include if the message has intent to touch this file (not just mentioning common words)
         const wordRegex = new RegExp(`\\b(?:fix|edit|update|modify|change|in|file|inside)\\s+${candidate}`, "i");
-        if (wordRegex.test(message) || rawPaths.length === 0) {
-          rawPaths.push(matchedRepoPath);
+        if (wordRegex.test(message) || seenPaths.size === 0) {
+          addPath(matchedRepoPath, "EXPLICIT_USER_PATH");
         }
       }
     }
 
-    // Deduplicate and filter out any accidental empty strings
-    const unique = Array.from(
-      new Set(
-        rawPaths
-          .map((p) => p.replace(/\/$/, ""))
-          .filter((p) => p.length > 0 && !this.NON_PATH_TECHNOLOGIES.has(p.toLowerCase()))
-      )
-    );
+    return results;
+  }
 
-    return unique;
+  /**
+   * Deterministically resolves named entities in user messages to existing repository files.
+   */
+  public static extractGroundedEntities(message: string, repoFiles: string[]): string[] {
+    if (!repoFiles || repoFiles.length === 0) return [];
+    const normalizedRepo = repoFiles.map((f) => f.replace(/\\/g, "/").replace(/^\//, ""));
+    const grounded: string[] = [];
+
+    const entityTokens = new Set<string>();
+    const actionEntityRegex = /\b(?:remove|delete|drop|prune|clean|fix|update|modify|edit|enhance|add|create|build)\s+(?:the\s+|a\s+|an\s+)?([a-zA-Z0-9_\-]+)\b/gi;
+    let match: RegExpExecArray | null;
+    while ((match = actionEntityRegex.exec(message)) !== null) {
+      const token = match[1].toLowerCase();
+      if (token.length >= 3 && !this.NON_PATH_TECHNOLOGIES.has(token) && !this.BROAD_GENERIC_DIRS.has(token)) {
+        entityTokens.add(token);
+      }
+    }
+
+    for (const token of entityTokens) {
+      for (const rf of normalizedRepo) {
+        const baseName = path.basename(rf).toLowerCase();
+        const stem = baseName.replace(/\.[^.]+$/, "");
+        if (stem === token || stem.includes(token) || rf.toLowerCase().includes(`/${token}/`) || rf.toLowerCase().includes(`/${token}.`)) {
+          grounded.push(rf);
+        }
+      }
+    }
+
+    return Array.from(new Set(grounded));
   }
 
   /**

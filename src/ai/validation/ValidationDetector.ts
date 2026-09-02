@@ -2,6 +2,10 @@ import { getOpenAI } from "../shared/utils";
 import { AgentFileChange, ExecutionContract, FeatureValidationResult } from "../shared/types";
 import { StaticValidationEngine } from "../../services/static-validator.engine";
 import { FEATURE_VALIDATOR_PROMPT } from "../prompts/validation";
+import {
+  detectPrimaryActiveEntryPoint,
+  isExistingPrimaryUIRefinement,
+} from "../planning/RepositoryArchitectureDetector";
 
 export class ValidationDetector {
   static async runFeatureValidation(
@@ -20,11 +24,13 @@ export class ValidationDetector {
     }
 
     if (contract?.pipeline === "STANDALONE" || contract?.environment === "HTML_CSS_JS") {
-      const hasHtml = changes.some((c) => c.path.endsWith(".html") || c.path.includes("index"));
-      const hasCss = changes.some((c) => c.path.endsWith(".css") || c.content.includes("css"));
-      const hasJs = changes.some((c) => c.path.endsWith(".js") || c.content.includes("addEventListener"));
+      const isDelete = (c: AgentFileChange) => c.action === "delete" || c.isDeleted === true;
+      const activeChanges = changes.filter((c) => !isDelete(c) && typeof c.content === "string");
+      const hasHtml = activeChanges.some((c) => c.path.endsWith(".html") || c.path.includes("index"));
+      const hasCss = activeChanges.some((c) => c.path.endsWith(".css") || (typeof c.content === "string" && c.content.includes("css")));
+      const hasJs = activeChanges.some((c) => c.path.endsWith(".js") || (typeof c.content === "string" && c.content.includes("addEventListener")));
 
-      const htmlContent = changes.find((c) => c.path.endsWith(".html"))?.content || "";
+      const htmlContent = activeChanges.find((c) => c.path.endsWith(".html"))?.content || "";
       const hasDoctype = /<!doctype\s+html>/i.test(htmlContent) || /<html/i.test(htmlContent);
       const linksStyle = /<link[^>]+href=["']?style\.css["']?/i.test(htmlContent);
       const linksScript = /<script[^>]+src=["']?script\.js["']?/i.test(htmlContent);
@@ -75,6 +81,35 @@ export class ValidationDetector {
       const relevantIssues = rawStaticResult.issues.filter((i) => changedFilePaths.has(i.file));
       const staticResult = { ...rawStaticResult, issues: relevantIssues };
 
+      const existingFilePaths = projectFilesOnly.map((f) => f.path);
+      const isRefinement = isExistingPrimaryUIRefinement(originalMessage);
+      const activeEntry = detectPrimaryActiveEntryPoint(existingFilePaths);
+      let activeTargetSatisfied = true;
+      let activeTargetDetails = "Intent targets verified";
+
+      if (isRefinement && activeEntry) {
+        const normTarget = activeEntry.replace(/\\/g, "/").toLowerCase();
+        const touchesActive = changes.some((c) => {
+          const norm = c.path.replace(/\\/g, "/").toLowerCase();
+          return norm === normTarget || norm.endsWith(normTarget);
+        });
+
+        if (!touchesActive) {
+          activeTargetSatisfied = false;
+          activeTargetDetails = `User requested to improve dashboard UI, but active entry point "${activeEntry}" was not modified.`;
+        }
+      }
+
+      const hasMissingNav = staticResult.issues.some((i) => i.checkId === "missing_navigation");
+      const hasRouteOrNavChanges = changes.some(
+        (c) =>
+          c.path.includes("page.") ||
+          c.path.includes("Navigation") ||
+          c.path.includes("Sidebar") ||
+          c.path.includes("Header") ||
+          c.path.includes("layout.")
+      );
+
       const checks = [
         {
           id: "import_export",
@@ -82,6 +117,13 @@ export class ValidationDetector {
           status: staticResult.issues.some((i) => i.checkId === "broken_import" || i.checkId === "missing_export") ? ("FAIL" as const) : ("PASS" as const),
           checked: true,
           details: staticResult.issues.filter((i) => i.checkId === "broken_import" || i.checkId === "missing_export").map((i) => `${i.file}:${i.line} ${i.reason}`).join("; ") || "All imports and exports resolve cleanly",
+        },
+        {
+          id: "component_rendering",
+          label: "Component Rendering Verification",
+          status: staticResult.issues.some((i) => i.checkId === "orphan_component") ? ("WARN" as const) : ("PASS" as const),
+          checked: true,
+          details: staticResult.issues.find((i) => i.checkId === "orphan_component")?.reason || "Component rendering verified",
         },
         {
           id: "circular_dependencies",
@@ -103,6 +145,33 @@ export class ValidationDetector {
           status: staticResult.issues.some((i) => i.checkId === "dead_route" || i.checkId === "missing_navigation") ? ("WARN" as const) : ("PASS" as const),
           checked: true,
           details: staticResult.issues.filter((i) => i.checkId === "dead_route" || i.checkId === "missing_navigation").map((i) => `${i.file}:${i.line} ${i.reason}`).join("; ") || "All route pages are reachable",
+        },
+        {
+          id: "nav_integration",
+          label: "Navigation & Link Integration",
+          status: hasMissingNav
+            ? ("FAIL" as const)
+            : hasRouteOrNavChanges
+            ? ("PASS" as const)
+            : ("WARN" as const),
+          checked: true,
+          details: staticResult.issues.find((i) => i.checkId === "missing_navigation")?.reason || "Navigation integration verified",
+        },
+        {
+          id: "style_integration",
+          label: "Stylesheet Wiring & Integration",
+          status: staticResult.issues.some((i) => i.checkId === "missing_stylesheet_import")
+            ? ("FAIL" as const)
+            : ("PASS" as const),
+          checked: true,
+          details: staticResult.issues.find((i) => i.checkId === "missing_stylesheet_import")?.reason || "All created stylesheets are integrated into the render tree",
+        },
+        {
+          id: "intent_satisfaction",
+          label: "Active Target Intent Satisfaction",
+          status: activeTargetSatisfied ? ("PASS" as const) : ("FAIL" as const),
+          checked: true,
+          details: activeTargetDetails,
         },
         {
           id: "api_connection",
@@ -131,6 +200,10 @@ export class ValidationDetector {
         .filter((i) => i.severity === "FAIL")
         .map((i) => `[${i.checkId}] ${i.file}:${i.line} - ${i.reason} (Fix: ${i.suggestedFix})`);
 
+      if (!activeTargetSatisfied) {
+        failedChecks.push(`[intent_satisfaction] ${activeTargetDetails}`);
+      }
+
       const repairActions = staticResult.issues
         .filter((i) => i.severity === "FAIL")
         .map((i) => ({
@@ -140,14 +213,25 @@ export class ValidationDetector {
         }));
 
       return {
-        overallPassed: staticResult.passed,
+        overallPassed: Boolean(staticResult.passed && activeTargetSatisfied),
         checks,
         failedChecks,
         repairActions,
       };
     } catch {}
 
-    const changesText = changes.map((c) => `=== NEW/MODIFIED FILE: ${c.path} ===\n${c.content.slice(0, 1500)}`).join("\n\n");
+    const changesText = changes
+      .map((c) => {
+        const isDelete = c.action === "delete" || c.isDeleted === true;
+        if (isDelete) {
+          return `=== DELETED FILE: ${c.path} ===\nFile removed by agent.`;
+        }
+        if (typeof c.content === "string") {
+          return `=== NEW/MODIFIED FILE: ${c.path} ===\n${c.content.slice(0, 1500)}`;
+        }
+        return `=== UNKNOWN/INVALID CHANGE: ${c.path} ===\n(Missing file content)`;
+      })
+      .join("\n\n");
     const snapshotFilesFallback = ((snapshot?.keyFiles || snapshot?.repoSnapshot || []) as Array<{ path: string; content?: string }>);
     const existingFiles = snapshotFilesFallback.map((f) => `${f.path}`).join("\n");
 

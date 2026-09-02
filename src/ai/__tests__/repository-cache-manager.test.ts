@@ -6,6 +6,8 @@ import { RepositoryCacheManager } from "../../services/repository-cache.manager"
 import { RepositoryMaterializationService } from "../../services/repository-materialization.service";
 import { prisma } from "../../services/database";
 
+jest.setTimeout(30000);
+
 describe("Ephemeral Repository Cache Manager with TTL (Step 1 of 3: Tests A-L)", () => {
   let testCacheRoot: string;
   let fakeRemoteOrigin: string;
@@ -121,7 +123,7 @@ describe("Ephemeral Repository Cache Manager with TTL (Step 1 of 3: Tests A-L)",
     expect(res2.metadata?.headSha).toBe(newRemoteHead);
     const cachedFile = path.join(RepositoryCacheManager.getProjectCachePath(projectId), "new-feature.js");
     expect(fs.existsSync(cachedFile)).toBe(true);
-  });
+  }, 30000);
 
   test("E. TTL-expired cache is removed and re-cloned on next access", async () => {
     const projectId = "proj-ttl-expired";

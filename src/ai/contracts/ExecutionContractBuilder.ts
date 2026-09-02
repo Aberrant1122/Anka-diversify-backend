@@ -67,6 +67,29 @@ const CONTRACT_RULES: Record<TaskType, ContractRules> = {
 
 import { TargetPathExtractor } from "./TargetPathExtractor";
 
+export interface CompoundIntentAnalysis {
+  isCompound: boolean;
+  hasDeletion: boolean;
+  hasEnhancementOrCreation: boolean;
+  operations: string[];
+}
+
+export function detectCompoundIntent(message: string): CompoundIntentAnalysis {
+  const hasDeletion = /\b(?:remove|delete|drop|prune|clean\s+up|purge)\b/i.test(message);
+  const hasEnhancementOrCreation = /\b(?:enhance|improve|add|create|build|update|modify|redesign|style|implement)\b/i.test(message);
+  const isCompound = hasDeletion && hasEnhancementOrCreation;
+  const operations: string[] = [];
+  if (hasDeletion) operations.push("DELETE");
+  if (hasEnhancementOrCreation) operations.push("ENHANCE_OR_CREATE");
+
+  return {
+    isCompound,
+    hasDeletion,
+    hasEnhancementOrCreation,
+    operations,
+  };
+}
+
 function resolveContextScope(
   taskType: TaskType,
   targetPaths: string[],
@@ -117,12 +140,38 @@ export function buildExecutionContract(
 ): ExecutionContract {
   const { taskType, risk, estimatedComplexity } = classification;
   const rules = CONTRACT_RULES[taskType] || CONTRACT_RULES.NEW_FEATURE;
+  const compound = detectCompoundIntent(message);
 
-  const targetPaths = TargetPathExtractor.extract(message, {
+  let targetPaths = TargetPathExtractor.extract(message, {
     repoFiles: repoFileNames,
     taskType,
     classifierTarget: classification.targetPath,
   });
+
+  // If no explicit targets extracted, resolve repository-grounded targets for named entities
+  if (targetPaths.length === 0 && repoFileNames.length > 0) {
+    const grounded = TargetPathExtractor.extractGroundedEntities(message, repoFileNames);
+    if (grounded.length > 0) {
+      targetPaths = grounded;
+    }
+  }
+
+  // If deletion is requested and grounded files exist, also include direct reference files (e.g. app/page.tsx)
+  if ((taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" || compound.hasDeletion) && targetPaths.length > 0) {
+    const additionalGrounded = new Set<string>(targetPaths);
+    for (const tp of targetPaths) {
+      const baseName = tp.split("/").pop()?.replace(/\.[\w]+$/, "") || tp;
+      if (baseName.length > 2) {
+        for (const file of repoFileNames) {
+          const normFile = file.replace(/\\/g, "/");
+          if (normFile === "app/page.tsx" || normFile === "pages/index.tsx" || normFile === "src/app/page.tsx") {
+            additionalGrounded.add(normFile);
+          }
+        }
+      }
+    }
+    targetPaths = Array.from(additionalGrounded);
+  }
 
   const contextScope = resolveContextScope(taskType, targetPaths, repoFileNames);
   const searchScope = [...contextScope];
@@ -132,6 +181,26 @@ export function buildExecutionContract(
   let forbiddenActions = [...rules.forbiddenActions];
   let diffCriticEnabled = rules.diffCriticEnabled;
 
+  if (compound.isCompound && compound.hasDeletion && compound.hasEnhancementOrCreation) {
+    const compoundAllowed = [
+      "delete_folder",
+      "delete_file",
+      "remove_imports",
+      "update_references",
+      "clean_barrel_exports",
+      "modify_file",
+      "create_components",
+      "create_files",
+      "add_imports",
+      "write_types",
+    ];
+    allowedActions = Array.from(new Set([...allowedActions, ...compoundAllowed]));
+    const allowedSet = new Set(allowedActions);
+    forbiddenActions = forbiddenActions.filter(
+      (act) => !allowedSet.has(act) && act !== "create_components" && act !== "create_utilities" && act !== "create_files" && act !== "modify_file" && act !== "refactor"
+    );
+  }
+
   if (route.pipeline === "STANDALONE") {
     allowedActions = ["create_standalone_assets", "write_html", "write_css", "write_js", "modify_standalone_files"];
     forbiddenActions = ["create_react_components", "add_next_pages", "create_typescript_interfaces", "import_backend_modules"];
@@ -139,7 +208,9 @@ export function buildExecutionContract(
   }
 
   let maxFilesCap = rules.maxFiles;
-  if (taskType === "NEW_FEATURE" && (estimatedComplexity === "LARGE" || estimatedComplexity === "COMPLEX")) {
+  if (compound.isCompound) {
+    maxFilesCap = Math.max(maxFilesCap, 15);
+  } else if (taskType === "NEW_FEATURE" && (estimatedComplexity === "LARGE" || estimatedComplexity === "COMPLEX")) {
     maxFilesCap = 15;
   } else if (taskType === "NEW_FEATURE") {
     maxFilesCap = 7;
@@ -161,7 +232,9 @@ export function buildExecutionContract(
     OPTIMIZATION: "Optimize performance for",
   };
   const primaryTarget = targetPaths[0] || "";
-  const goal = `${goalPrefix[classification.taskType]} ${primaryTarget ? `"${primaryTarget}"` : "(project-wide)"} — ${message.slice(0, 80)}`;
+  const goal = compound.isCompound
+    ? `Execute compound task: remove references and enhance UI — ${message.slice(0, 80)}`
+    : `${goalPrefix[classification.taskType]} ${primaryTarget ? `"${primaryTarget}"` : "(project-wide)"} — ${message.slice(0, 80)}`;
 
   return {
     goal,

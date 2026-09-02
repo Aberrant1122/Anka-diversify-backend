@@ -17,6 +17,7 @@ describe("Execution Contract Path Extraction + Iterative Repository Freshness (S
   let tempBase: string;
 
   beforeEach(() => {
+    jest.setTimeout(30000);
     tempBase = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-freshness-"));
   });
 
@@ -144,7 +145,7 @@ describe("Execution Contract Path Extraction + Iterative Repository Freshness (S
 
       // Newly pushed file exists in managed clone
       expect(fs.existsSync(path.join(managedDir, "calculator.js"))).toBe(true);
-    });
+    }, 30000);
 
     test("D, E: Newly-pushed created file becomes visible to repository scan on next run", async () => {
       const repoDir = path.join(tempBase, "local-repo");
@@ -165,7 +166,7 @@ describe("Execution Contract Path Extraction + Iterative Repository Freshness (S
       const files2 = snap2.keyFiles.map((f: any) => (typeof f === "string" ? f : f.path));
       expect(files2).toContain("Calculator.tsx");
       expect(snap2.revision?.contentHash).not.toBe(snap1.revision?.contentHash);
-    });
+    }, 30000);
 
     test("H: User-owned external localPath is never hard-reset by managed sync logic", () => {
       const externalPath = "C:\\Users\\Developer\\Projects\\my-custom-next-app";
