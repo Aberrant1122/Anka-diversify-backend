@@ -380,12 +380,91 @@ When using an existing local component, conform to its authoritative exported pr
       response_format: { type: "json_object" },
     });
 
-    const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
-    const rawChanges: any[] = Array.isArray(parsed.changes) ? parsed.changes : [];
-    const explanation = parsed.explanation || "Agent generated code diffs.";
-    const commitMessage =
+    let parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
+    let rawChanges: any[] = Array.isArray(parsed.changes) ? parsed.changes : [];
+    let explanation = parsed.explanation || "Agent generated code diffs.";
+    let commitMessage =
       parsed.commitMessage ||
       `feat(${(intentResult?.intent || "build").toLowerCase()}): implementation updates`;
+
+    // ── Deterministic Manifest Contract Enforcement ──
+    if (approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0) {
+      const approvedPathSet = new Set(
+        approvedManifest.files
+          .map((f) => (f && f.path ? normalizeRepoPath(f.path) : ""))
+          .filter(Boolean)
+      );
+
+      const findUndeclaredPaths = (changesList: any[]): string[] => {
+        return changesList
+          .map((c) => (c && typeof c.path === "string" ? c.path : ""))
+          .filter((p) => p && !approvedPathSet.has(normalizeRepoPath(p)));
+      };
+
+      let undeclared = findUndeclaredPaths(rawChanges);
+
+      if (undeclared.length > 0) {
+        console.warn(
+          `[CodeGenerator] Generated file(s) outside approved manifest: [${undeclared.join(", ")}]. Approved paths: [${Array.from(approvedPathSet).join(", ")}]. Triggering bounded corrective regeneration (Attempt 1/1)...`
+        );
+
+        let retrySucceeded = false;
+        try {
+          const approvedPathsListStr = Array.from(approvedPathSet).join(", ");
+          const correctiveUserMessage = `[CODEGEN_MANIFEST_VIOLATION] You generated files outside the approved manifest: [${undeclared.join(", ")}].
+You are strictly forbidden from generating undeclared files.
+Generate changes ONLY for these approved paths: [${approvedPathsListStr}].
+Respond ONLY with valid JSON matching the required format.`;
+
+          const retryCompletion = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+              { role: "system", content: effectiveCodingPrompt },
+              { role: "user", content: userPrompt },
+              { role: "assistant", content: completion.choices[0]?.message?.content || "{}" },
+              { role: "user", content: correctiveUserMessage },
+            ],
+            temperature: 0.1,
+            max_tokens: 16000,
+            response_format: { type: "json_object" },
+          });
+
+          const retryParsed = JSON.parse(retryCompletion.choices[0]?.message?.content || "{}");
+          const retryChanges: any[] = Array.isArray(retryParsed.changes) ? retryParsed.changes : [];
+          const retryUndeclared = findUndeclaredPaths(retryChanges);
+
+          if (retryUndeclared.length === 0 && retryChanges.length > 0) {
+            console.log(
+              `[CodeGenerator] Bounded corrective regeneration succeeded. All ${retryChanges.length} generated changes are within approved manifest.`
+            );
+            rawChanges = retryChanges;
+            parsed = retryParsed;
+            explanation = retryParsed.explanation || explanation;
+            commitMessage = retryParsed.commitMessage || commitMessage;
+            retrySucceeded = true;
+          } else {
+            console.warn(
+              `[CodeGenerator] Bounded corrective regeneration failed. Undeclared files remain: [${retryUndeclared.join(", ")}]. Failing closed.`
+            );
+            undeclared = retryUndeclared.length > 0 ? retryUndeclared : undeclared;
+          }
+        } catch (retryErr: any) {
+          console.warn(
+            `[CodeGenerator] Bounded corrective regeneration encountered error: ${retryErr?.message || retryErr}`
+          );
+        }
+
+        if (!retrySucceeded) {
+          const violationErr: any = new Error(
+            `[CODEGEN_MANIFEST_VIOLATION] Generated file(s) outside approved manifest: [${undeclared.join(", ")}]. Approved paths: [${Array.from(approvedPathSet).join(", ")}].`
+          );
+          violationErr.code = "CODEGEN_MANIFEST_VIOLATION";
+          violationErr.undeclaredPaths = undeclared;
+          violationErr.approvedPaths = Array.from(approvedPathSet);
+          throw violationErr;
+        }
+      }
+    }
 
     // ── Resolve raw LLM proposals into AgentFileChange[] ──
     const hasManifestContext = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
