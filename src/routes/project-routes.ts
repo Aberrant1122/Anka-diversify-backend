@@ -1,13 +1,16 @@
 import { Router } from 'express';
 import { ProjectController } from '../controllers/project-controller';
+import { AiController } from '../controllers/ai-controller';
 import sprintRoutes from './sprint-routes';
 import phaseRoutes from './phase-routes';
 import kanbanRoutes from './kanban-routes';
 import projectRepositoryRoutes from './project-repository-routes';
+import terminalRoutes from './terminal-routes';
 import { requireRole } from '../middleware/rbac';
 
 const router = Router();
 const projectController = new ProjectController();
+const aiController = new AiController();
 
 // Get all documents across all projects
 router.get('/documents/all', projectController.getAllDocuments.bind(projectController));
@@ -122,5 +125,9 @@ router.use('/:projectId/kanban', kanbanRoutes);
 
 // Multi-repository support (Anka OS v2.0 spec §11)
 router.use('/:projectId/repositories', projectRepositoryRoutes);
+router.post('/:projectId/agent/multi-repo/run', aiController.runMultiRepoAgent.bind(aiController));
+
+// Bounded developer terminal session support
+router.use('/:projectId/terminal', terminalRoutes);
 
 export default router;

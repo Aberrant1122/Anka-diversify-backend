@@ -1082,6 +1082,34 @@ export class RepositoryToolEngine {
     return this.semanticSearch(params);
   }
 
+  // ── Tool 10: Grep Search ────────────────────────────────────────────────────────
+  grepSearch(params: { pattern: string; caseSensitive?: boolean; limit?: number }): { results: Array<{ file: string; line: number; match: string }> } {
+    const { pattern, caseSensitive = false, limit = 50 } = params || {};
+    if (!pattern || typeof pattern !== "string") return { results: [] };
+
+    const results: Array<{ file: string; line: number; match: string }> = [];
+    const query = caseSensitive ? pattern : pattern.toLowerCase();
+
+    for (const [filePath, fileEntry] of this.index.filesMap.entries()) {
+      for (let i = 0; i < fileEntry.lines.length; i++) {
+        const lineContent = fileEntry.lines[i];
+        const target = caseSensitive ? lineContent : lineContent.toLowerCase();
+        if (target.includes(query)) {
+          results.push({
+            file: filePath,
+            line: i + 1,
+            match: lineContent.trim(),
+          });
+          if (results.length >= limit) {
+            return { results };
+          }
+        }
+      }
+    }
+
+    return { results };
+  }
+
   // ── OpenAI Tool Definitions ────────────────────────────────────────────────────
   static getOpenAIToolDefinitions(): any[] {
     return [
@@ -1225,6 +1253,22 @@ export class RepositoryToolEngine {
           },
         },
       },
+      {
+        type: "function",
+        function: {
+          name: "repo_grepSearch",
+          description: "Grep/text search for patterns or keywords across repository files.",
+          parameters: {
+            type: "object",
+            properties: {
+              pattern: { type: "string", description: "Search pattern or keyword" },
+              caseSensitive: { type: "boolean" },
+              limit: { type: "number" },
+            },
+            required: ["pattern"],
+          },
+        },
+      },
     ];
   }
 
@@ -1242,6 +1286,7 @@ export class RepositoryToolEngine {
         case "repo_findReferences":    return JSON.stringify(this.findReferences(safeArgs as any));
         case "repo_searchArchitecture":return JSON.stringify(this.searchArchitecture(safeArgs as any));
         case "repo_semanticSearch":    return JSON.stringify(this.semanticSearch(safeArgs as any));
+        case "repo_grepSearch":        return JSON.stringify(this.grepSearch(safeArgs as any));
         default:
           return JSON.stringify({ error: `Unknown tool: ${toolName}` });
       }

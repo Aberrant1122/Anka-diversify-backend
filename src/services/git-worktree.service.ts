@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { exec } from "child_process";
+import { exec, execSync } from "child_process";
 import { promisify } from "util";
 import { AgentPipeline } from "../ai/orchestration/AgentPipeline";
 import { AgentFileChange, AgentProgressEvent, AgentResponse, ChatRequest, BaselineDiagnostic } from "../types";
@@ -13,6 +13,10 @@ import { ErrorClassifier } from "../ai/validation/ErrorClassifier";
 import { BaselineRepairCoordinator } from "./baseline-repair.coordinator";
 import { BaselineDeltaVerifier, BaselineDeltaResult } from "./baseline-delta.verifier";
 import { RuntimePreflightService } from "./runtime-preflight.service";
+import { RepositoryCacheManager } from "./repository-cache.manager";
+import { VisualVerifierService } from "./visual-verifier.service";
+import { detectRepositoryArchitecture } from "../ai/planning/RepositoryArchitectureDetector";
+import { VisualVerificationResult } from "../types";
 
 const execAsync = promisify(exec);
 
@@ -45,6 +49,7 @@ export interface RepositoryRunSummary {
   validationPassed: boolean;
   validationCommands: string[];
   validationErrors?: string;
+  visualVerification?: VisualVerificationResult;
   agentResponse: AgentResponse;
 }
 
@@ -358,12 +363,13 @@ export class GitWorktreeService {
   static async runIsolatedAgent(options: RunIsolatedAgentOptions): Promise<RepositoryRunSummary> {
     const { userId, projectId, repositoryPath, runId, request, onProgress } = options;
 
-    const prepared = await this.prepareRepositoryRun({ repositoryPath, runId });
-    console.log(`[ANKA_EXEC] worktree=${prepared.worktreePath}`);
+    return RepositoryCacheManager.withLease(projectId, async () => {
+      const prepared = await this.prepareRepositoryRun({ repositoryPath, runId });
+      console.log(`[ANKA_EXEC] worktree=${prepared.worktreePath}`);
 
-    try {
-      // 2. Prepare dependencies inside isolated worktree
-      const depPrep = await WorktreeDependencyService.prepareDependencies(prepared.worktreePath);
+      try {
+        // 2. Prepare dependencies inside isolated worktree
+        const depPrep = await WorktreeDependencyService.prepareDependencies(prepared.worktreePath);
       if (!depPrep.success) {
         const errorType = depPrep.errorType || "INFRASTRUCTURE";
         const isRepairableDep =
@@ -556,14 +562,21 @@ export class GitWorktreeService {
 
           if (!baselineBuildPassed) {
             baselineDiagnostics = BaselineDeltaVerifier.extractDiagnostics(baselineCheck.errors || "", "BASELINE");
+            const isBroadBuildRepair = BaselineDeltaVerifier.isBroadBuildRepairTask(request.message || "");
             const matchResult = BaselineDeltaVerifier.matchUserTaskToBaseline(
               request.message || "",
               baselineDiagnostics
             );
-            targetedBaselineDiagnostics = matchResult.targetedDiagnostics;
+            targetedBaselineDiagnostics = isBroadBuildRepair
+              ? baselineDiagnostics
+              : matchResult.targetedDiagnostics;
 
             if (targetedBaselineDiagnostics.length > 0) {
-              console.log(`[BASELINE_DELTA] User request targets ${targetedBaselineDiagnostics.length} pre-existing baseline diagnostic(s). Allowing constrained task repair.`);
+              if (isBroadBuildRepair) {
+                console.log(`[BASELINE_DELTA] User request is a broad build repair task targeting all ${targetedBaselineDiagnostics.length} visible baseline diagnostic(s). Allowing constrained task repair.`);
+              } else {
+                console.log(`[BASELINE_DELTA] User request targets ${targetedBaselineDiagnostics.length} pre-existing baseline diagnostic(s). Allowing constrained task repair.`);
+              }
               isBaselineDeltaTask = true;
             } else {
               console.log(`[REPO_HEALTH] baselineHealthy=false`);
@@ -634,6 +647,7 @@ export class GitWorktreeService {
             baselineDiagnostics,
             targetedBaselineDiagnostics,
             isBaselineDeltaTask,
+            baseCommitSha: prepared.baseCommitSha,
           }
         );
       } catch (err: any) {
@@ -658,20 +672,43 @@ export class GitWorktreeService {
       if (baselineCommands.length > 0 && isBaselineDeltaTask) {
         if (agentResponse.taskVerified) {
           validationPassed = true;
-          agentResponse.buildVerified = true;
+          agentResponse.buildVerified = Boolean(agentResponse.repositoryClean);
           agentResponse.healthStatus = agentResponse.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY";
+          if (!agentResponse.repositoryClean && agentResponse.deltaResult) {
+            agentResponse.explanation = BaselineDeltaVerifier.formatDeltaExplanation(agentResponse.deltaResult);
+          }
         } else {
           const postBuild = await ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands);
           const postChangeDiagnostics = BaselineDeltaVerifier.extractDiagnostics(postBuild.errors, "CURRENT_TASK");
+
+          const preTaskSourceGetter = (filePath: string) => {
+            try {
+              const absPath = path.join(prepared.worktreePath, filePath);
+              // If git show baseCommitSha is available
+              return execSync(`git show ${prepared.baseCommitSha}:${filePath}`, {
+                cwd: prepared.worktreePath,
+                encoding: "utf8",
+                stdio: ["pipe", "pipe", "ignore"],
+              });
+            } catch {
+              return null;
+            }
+          };
+
           deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
             baselineDiagnostics,
             postChangeDiagnostics,
-            targetedBaselineDiagnostics
+            targetedBaselineDiagnostics,
+            {
+              preTaskSourceGetter,
+              changes: agentResponse.changes,
+              isBroadRepairTask: BaselineDeltaVerifier.isBroadBuildRepairTask(request.message),
+            }
           );
 
           if (deltaResult.taskVerified) {
             validationPassed = true;
-            agentResponse.buildVerified = true;
+            agentResponse.buildVerified = Boolean(deltaResult.repositoryClean);
             agentResponse.taskVerified = true;
             agentResponse.repositoryClean = deltaResult.repositoryClean;
             agentResponse.healthStatus = deltaResult.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY";
@@ -684,7 +721,49 @@ export class GitWorktreeService {
           }
         }
       } else {
-        validationPassed = Boolean(agentResponse.buildVerified !== false && !executionError);
+        validationPassed = Boolean(agentResponse.buildVerified === true && !executionError);
+      }
+
+      const totalChanges = [...baselineRepairedChanges, ...(agentResponse.changes || [])];
+      const isSuccessfulNoOp = agentResponse.successfulNoOp === true;
+
+      if (totalChanges.length === 0 && !isSuccessfulNoOp) {
+        validationPassed = false;
+        agentResponse.buildVerified = false;
+        if (!agentResponse.buildErrors) {
+          agentResponse.buildErrors = agentResponse.explanation || "Zero changes generated without explicit verified no-op.";
+        }
+      }
+
+      // Step 4: Bounded Playwright Visual Verification for supported frontend apps
+      let visualVerification: VisualVerificationResult | undefined;
+      if (validationPassed && Boolean(agentResponse.buildVerified === true) && !executionError) {
+        try {
+          const pkgPath = path.join(prepared.worktreePath, "package.json");
+          const pkgJsonContent = fs.existsSync(pkgPath) ? fs.readFileSync(pkgPath, "utf8") : undefined;
+          const arch = detectRepositoryArchitecture(
+            diffInfo.changedFiles,
+            pkgJsonContent
+          );
+
+          visualVerification = await VisualVerifierService.verify({
+            worktreePath: prepared.worktreePath,
+            changedFiles: totalChanges,
+            framework: arch.framework,
+            runId,
+            taskPrompt: request.message,
+          });
+        } catch (visErr: any) {
+          visualVerification = {
+            status: "RUNTIME_FAILED",
+            framework: "UNKNOWN",
+            route: "/",
+            pageErrors: [`Visual verification encountered unhandled error: ${visErr?.message || visErr}`],
+            consoleErrors: [],
+            failedRequests: [],
+            durationMs: 0,
+          };
+        }
       }
 
       return {
@@ -696,10 +775,11 @@ export class GitWorktreeService {
         diffSummary: diffInfo.diffSummary,
         validationPassed,
         validationCommands: agentResponse.validationCommands || baselineCommands,
-        validationErrors: !validationPassed ? agentResponse.explanation : undefined,
+        validationErrors: !validationPassed ? (agentResponse.buildErrors || agentResponse.explanation) : undefined,
+        visualVerification,
         agentResponse: {
           ...agentResponse,
-          changes: [...baselineRepairedChanges, ...(agentResponse.changes || [])],
+          changes: totalChanges,
           dependencyPreparationAttempted: depPrep.attempted,
           dependencyPreparationSucceeded: depPrep.success,
           packageManager: depPrep.packageManager,
@@ -708,29 +788,33 @@ export class GitWorktreeService {
           worktreePath: prepared.worktreePath,
           branchName: prepared.branchName,
           baseCommitSha: prepared.baseCommitSha,
+          buildVerified: Boolean(agentResponse.buildVerified === true),
           healthStatus: agentResponse.healthStatus || (validationPassed ? "HEALTHY" : "BASELINE_REPOSITORY_UNHEALTHY"),
           baselineDependencyInstall: "PASS",
           baselineBuild: baselineBuildPassed ? "PASS" : "FAIL",
           baselineReady: baselineBuildPassed,
           buildReady: baselineBuildPassed,
-          origin: validationPassed ? (deltaResult && !deltaResult.repositoryClean ? "BASELINE" : undefined) : "CURRENT_TASK",
+          origin: validationPassed ? (deltaResult && !deltaResult.repositoryClean ? "BASELINE" : (agentResponse.repositoryClean === false ? "BASELINE" : undefined)) : "CURRENT_TASK",
           agentIntroduced: Boolean(!validationPassed && (deltaResult ? deltaResult.newTaskDiagnostics.length > 0 : !agentResponse.buildVerified)),
           taskVerified: deltaResult ? deltaResult.taskVerified : (agentResponse.taskVerified ?? validationPassed),
-          repositoryClean: deltaResult ? deltaResult.repositoryClean : (agentResponse.repositoryClean ?? validationPassed),
+          repositoryClean: deltaResult ? deltaResult.repositoryClean : (agentResponse.repositoryClean ?? (agentResponse.buildVerified && validationPassed)),
           baselineDiagnosticCount: deltaResult?.baselineDiagnosticCount ?? agentResponse.baselineDiagnosticCount,
           targetedBaselineDiagnostics: deltaResult?.targetedBaselineDiagnostics ?? agentResponse.targetedBaselineDiagnostics,
           resolvedTargetDiagnostics: deltaResult?.resolvedTargetDiagnostics ?? agentResponse.resolvedTargetDiagnostics,
           remainingBaselineDiagnostics: deltaResult?.remainingBaselineDiagnostics ?? agentResponse.remainingBaselineDiagnostics,
+          revealedBaselineDiagnostics: deltaResult?.revealedBaselineDiagnostics ?? agentResponse.revealedBaselineDiagnostics,
           newTaskDiagnostics: deltaResult?.newTaskDiagnostics ?? agentResponse.newTaskDiagnostics,
+          visualVerification,
         },
       };
-    } finally {
-      await this.cleanupWorktree(
-        prepared.worktreePath,
-        prepared.repositoryRoot,
-        prepared.branchName,
-        runId
-      );
-    }
+      } finally {
+        await this.cleanupWorktree(
+          prepared.worktreePath,
+          prepared.repositoryRoot,
+          prepared.branchName,
+          runId
+        );
+      }
+    });
   }
 }

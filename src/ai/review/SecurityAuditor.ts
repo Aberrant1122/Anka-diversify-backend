@@ -7,6 +7,7 @@ export interface SecurityVulnerability {
   file: string;
   issue: string;
   severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  provenance?: "PRE_EXISTING_BASELINE" | "INTRODUCED_BY_AGENT" | "WORSENED_BY_AGENT";
 }
 
 export interface SecurityAuditResult {
@@ -23,6 +24,7 @@ export interface SecurityAuditResult {
 export class SecurityAuditor {
   static async runReflectionAndSecurityAudit(
     changes: AgentFileChange[],
+    baselineSourceGetter?: ((filePath: string) => string | undefined | null) | Record<string, string>,
   ): Promise<SecurityAuditResult> {
     if (!changes.length) {
       return {
@@ -69,7 +71,16 @@ export class SecurityAuditor {
     let vulnerabilities: SecurityVulnerability[] = [];
     let recommendations: string[] = [];
 
-    let deterministicPolicyPass = true;
+    // 1. Deterministic static safety check: evaluate delta against immutable baseline first
+    const policyDelta = SecurityPolicy.checkChanges(changes, baselineSourceGetter || {});
+    const introducedOrWorsenedViolations = policyDelta.violations.filter(
+      (v) => v.provenance === "INTRODUCED_BY_AGENT" || v.provenance === "WORSENED_BY_AGENT"
+    );
+    const preExistingViolations = policyDelta.violations.filter(
+      (v) => v.provenance === "PRE_EXISTING_BASELINE"
+    );
+
+    let deterministicPolicyPass = policyDelta.safe;
     let llmReviewPass = true;
 
     try {
@@ -84,7 +95,6 @@ export class SecurityAuditor {
         response_format: { type: "json_object" },
       });
       const secResult = JSON.parse(secCompletion.choices[0]?.message?.content || "{}");
-      if (typeof secResult.passed === "boolean") llmReviewPass = secResult.passed;
       if (["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(secResult.riskLevel)) {
         riskLevel = secResult.riskLevel;
       }
@@ -107,57 +117,138 @@ export class SecurityAuditor {
               issue: `[UNSUPPORTED_SECURITY_FINDING] ${issue} (No dangerous execution primitive or sink detected in code)`,
               severity: "LOW",
             });
+            continue;
+          }
+
+          // Reconcile LLM finding against deterministic baseline delta by structural evidence
+          const normPath = file.replace(/\\/g, "/").replace(/^\.\//, "");
+          const matchingDeterministic = policyDelta.violations.find((v) => {
+            const vNorm = v.path.replace(/\\/g, "/").replace(/^\.\//, "");
+            if (vNorm !== normPath && !normPath.endsWith(vNorm) && !vNorm.endsWith(normPath)) return false;
+            if (evidenceCheck.identifiedReason && v.reason === evidenceCheck.identifiedReason) return true;
+            if (/\b(?:math|mathjs|evaluate)\b/i.test(issue) && v.reason === "UNSAFE_MATHJS_EVALUATE") return true;
+            if (/\beval\b/i.test(issue) && v.reason === "UNSAFE_EVAL") return true;
+            if (/\b(?:function|constructor)\b/i.test(issue) && v.reason === "UNSAFE_FUNCTION_CONSTRUCTOR") return true;
+            return false;
+          });
+
+          let findingProvenance: SecurityVulnerability["provenance"] = undefined;
+          if (matchingDeterministic) {
+            findingProvenance = matchingDeterministic.provenance;
           } else {
-            vulnerabilities.push({ file, issue, severity });
+            // Check if baseline file had the exact same construct/content for novel findings
+            let baselineContent: string | null | undefined = undefined;
+            if (typeof baselineSourceGetter === "function") {
+              baselineContent = baselineSourceGetter(file);
+            } else if (baselineSourceGetter && typeof baselineSourceGetter === "object") {
+              baselineContent = baselineSourceGetter[file];
+            }
+            if (baselineContent && (baselineContent === targetContent || baselineContent.includes(issue))) {
+              findingProvenance = "PRE_EXISTING_BASELINE";
+            } else {
+              findingProvenance = "INTRODUCED_BY_AGENT";
+            }
+          }
+
+          if (findingProvenance === "PRE_EXISTING_BASELINE") {
+            vulnerabilities.push({
+              file,
+              issue: `[PRE_EXISTING_BASELINE] ${issue}`,
+              severity,
+              provenance: "PRE_EXISTING_BASELINE",
+            });
+          } else {
+            vulnerabilities.push({
+              file,
+              issue,
+              severity,
+              provenance: findingProvenance || "INTRODUCED_BY_AGENT",
+            });
           }
         }
       }
       if (Array.isArray(secResult.recommendations)) {
         recommendations = secResult.recommendations.map(String);
       }
-
-      // If all vulnerabilities are LOW or unsupported, LLM review is considered passed
-      const hasSevereLlmFindings = vulnerabilities.some(
-        (v) => (v.severity === "HIGH" || v.severity === "CRITICAL") && !v.issue.startsWith("[UNSUPPORTED_SECURITY_FINDING]")
-      );
-      if (!hasSevereLlmFindings) {
-        llmReviewPass = true;
-        if (riskLevel === "HIGH" || riskLevel === "CRITICAL") {
-          riskLevel = "LOW";
-        }
-      } else {
-        llmReviewPass = false;
-      }
     } catch {
       llmReviewPass = true;
       riskLevel = "LOW";
     }
 
-    // Deterministic static safety check: flag dangerous dynamic execution constructs via SecurityPolicy
-    for (const c of changes) {
-      const policyCheck = SecurityPolicy.checkCode(c.content || "", c.path);
-      if (!policyCheck.safe) {
-        deterministicPolicyPass = false;
-        riskLevel = "HIGH";
-        for (const v of policyCheck.violations) {
+    if (!policyDelta.safe) {
+      riskLevel = "HIGH";
+      for (const v of introducedOrWorsenedViolations) {
+        const normV = v.path.replace(/\\/g, "/").replace(/^\.\//, "");
+        const alreadyCovered = vulnerabilities.some((existing) => {
+          const existNorm = existing.file.replace(/\\/g, "/").replace(/^\.\//, "");
+          if (existNorm !== normV && !existNorm.endsWith(normV) && !normV.endsWith(existNorm)) return false;
+          if (v.reason === "UNSAFE_MATHJS_EVALUATE" && /\b(?:math|mathjs|evaluate)\b/i.test(existing.issue)) return true;
+          if (v.reason === "UNSAFE_EVAL" && /\beval\b/i.test(existing.issue)) return true;
+          if (v.reason === "UNSAFE_FUNCTION_CONSTRUCTOR" && /\b(?:function|constructor)\b/i.test(existing.issue)) return true;
+          return existing.issue.includes(v.message);
+        });
+
+        if (!alreadyCovered) {
           vulnerabilities.push({
-            file: c.path,
+            file: v.path,
             issue: v.message,
             severity: "HIGH",
+            provenance: v.provenance,
           });
         }
-        if (!recommendations.includes("Replace unsafe dynamic execution with explicit allowlisted operators or a deterministic mathematical parser.")) {
-          recommendations.push("Replace unsafe dynamic execution with explicit allowlisted operators or a deterministic mathematical parser.");
+      }
+      if (!recommendations.includes("Replace unsafe dynamic execution with explicit allowlisted operators or a deterministic mathematical parser.")) {
+        recommendations.push("Replace unsafe dynamic execution with explicit allowlisted operators or a deterministic mathematical parser.");
+      }
+    }
+
+    if (preExistingViolations.length > 0) {
+      riskLevel = "HIGH";
+      for (const v of preExistingViolations) {
+        const normV = v.path.replace(/\\/g, "/").replace(/^\.\//, "");
+        const alreadyCovered = vulnerabilities.some((existing) => {
+          const existNorm = existing.file.replace(/\\/g, "/").replace(/^\.\//, "");
+          if (existNorm !== normV && !existNorm.endsWith(normV) && !normV.endsWith(existNorm)) return false;
+          if (v.reason === "UNSAFE_MATHJS_EVALUATE" && /\b(?:math|mathjs|evaluate)\b/i.test(existing.issue)) return true;
+          if (v.reason === "UNSAFE_EVAL" && /\beval\b/i.test(existing.issue)) return true;
+          if (v.reason === "UNSAFE_FUNCTION_CONSTRUCTOR" && /\b(?:function|constructor)\b/i.test(existing.issue)) return true;
+          return existing.issue.includes(v.message);
+        });
+
+        if (!alreadyCovered) {
+          vulnerabilities.push({
+            file: v.path,
+            issue: `[PRE_EXISTING_BASELINE] ${v.message}`,
+            severity: "HIGH",
+            provenance: "PRE_EXISTING_BASELINE",
+          });
         }
       }
+      if (!recommendations.includes("Pre-existing baseline security advisory: consider replacing dynamic mathjs evaluation in future tasks.")) {
+        recommendations.push("Pre-existing baseline security advisory: consider replacing dynamic mathjs evaluation in future tasks.");
+      }
+    }
+
+    // Compute llmReviewPass after provenance reconciliation
+    const hasSevereLlmFindings = vulnerabilities.some(
+      (v) => (v.severity === "HIGH" || v.severity === "CRITICAL") &&
+             v.provenance !== "PRE_EXISTING_BASELINE" &&
+             !v.issue.startsWith("[UNSUPPORTED_SECURITY_FINDING]") &&
+             !v.issue.startsWith("[PRE_EXISTING_BASELINE]")
+    );
+
+    if (!hasSevereLlmFindings) {
+      llmReviewPass = true;
+    } else {
+      llmReviewPass = false;
     }
 
     const securityPass = deterministicPolicyPass && llmReviewPass;
     const passed = securityPass && critiqueScore >= 0.80;
 
     let summary = `Reflection Pass Score: ${(critiqueScore * 100).toFixed(0)}%. Deterministic Policy: ${deterministicPolicyPass ? "PASS" : "FAIL"}. LLM Review: ${llmReviewPass ? "PASS" : "FLAGGED"} (${riskLevel} risk).`;
-    if (!securityPass && vulnerabilities.length > 0) {
-      summary += ` Findings: ${vulnerabilities.map((v) => `[${v.severity}] ${v.file}: ${v.issue}`).join("; ")}`;
+    if (vulnerabilities.length > 0) {
+      summary += ` Findings: ${vulnerabilities.map((v) => `[${v.severity}${v.provenance ? `:${v.provenance}` : ""}] ${v.file}: ${v.issue}`).join("; ")}`;
     }
 
     return {

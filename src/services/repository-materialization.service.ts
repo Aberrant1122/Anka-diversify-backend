@@ -35,6 +35,7 @@ export class RepositoryMaterializationService {
 
   /**
    * Checks whether a directory is inside an ANKA managed repository cache (current ephemeral or legacy).
+   * Robust across Windows and POSIX path separators and drive case differences.
    */
   public static isManagedRepositoryPath(dirPath: string): boolean {
     if (!dirPath) return false;
@@ -42,17 +43,17 @@ export class RepositoryMaterializationService {
     const currentBase = path.resolve(RepositoryCacheManager.getCacheRoot());
     const legacyBase = path.resolve(process.cwd(), ".anka-cache", "managed-repos");
 
-    const isUnderCurrent =
-      resolvedTarget.startsWith(currentBase + path.sep) ||
-      resolvedTarget.startsWith(currentBase + "/") ||
-      resolvedTarget === currentBase;
+    const normalize = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
+    const targetNorm = normalize(resolvedTarget);
+    const currentNorm = normalize(currentBase);
+    const legacyNorm = normalize(legacyBase);
 
-    const isUnderLegacy =
-      resolvedTarget.startsWith(legacyBase + path.sep) ||
-      resolvedTarget.startsWith(legacyBase + "/") ||
-      resolvedTarget === legacyBase;
+    const isUnder = (base: string, target: string) => {
+      const rel = path.relative(base, target);
+      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    };
 
-    return isUnderCurrent || isUnderLegacy;
+    return isUnder(currentNorm, targetNorm) || isUnder(legacyNorm, targetNorm);
   }
 
   /**
@@ -466,6 +467,10 @@ export class RepositoryMaterializationService {
         };
       } catch (err: any) {
         const cleanError = RepositoryCacheManager.redactCredentials(err?.message || String(err));
+        // Clean partial failed clone to avoid corrupted cache remaining
+        try {
+          await RepositoryCacheManager.removeProjectCache(projectId);
+        } catch {}
         return {
           success: false,
           errorType: "CLONE_FAILED",

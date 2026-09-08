@@ -11,12 +11,14 @@ import {
   extractPackageRoot,
   detectRepositoryArchitecture,
 } from "../ai/planning/RepositoryArchitectureDetector";
+import { MonorepoDetector, MonorepoDescriptor } from "../ai/workspace/MonorepoDetector";
 
 export interface RepositoryContext {
   existingFiles: string[];
   installedPackages?: string[];
   packageVersions?: Record<string, string>;
   packageJsonContent?: string | object;
+  monorepo?: MonorepoDescriptor | null;
 }
 
 export class ManifestValidator {
@@ -34,10 +36,21 @@ export class ManifestValidator {
       if (Array.isArray(repoContext.installedPackages)) {
         this.installedPackages = new Set(repoContext.installedPackages);
       } else if (repoContext.packageJsonContent) {
-        const arch = detectRepositoryArchitecture(repoContext.existingFiles, repoContext.packageJsonContent);
+        const arch = detectRepositoryArchitecture(repoContext.existingFiles, repoContext.packageJsonContent, repoContext.monorepo);
         this.installedPackages = new Set(arch.installedPackages);
       } else {
         this.installedPackages = new Set();
+      }
+
+      // If monorepo is present, register all workspace packages and their dependencies
+      const monorepo = repoContext.monorepo || MonorepoDetector.detectMonorepo(null, repoContext.existingFiles.map((f) => ({ path: f })));
+      if (monorepo?.isMonorepo) {
+        for (const ws of monorepo.workspaces) {
+          this.installedPackages.add(ws.name);
+          for (const dep of ws.dependencies) {
+            this.installedPackages.add(dep);
+          }
+        }
       }
     } else {
       this.existingFiles = new Set();

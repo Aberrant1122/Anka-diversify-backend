@@ -28,7 +28,7 @@ export interface HealthTelemetry {
 
 export class RepositoryCacheManager {
   private static locks = new Map<string, Promise<any>>();
-  private static activeLeases = new Set<string>();
+  private static activeLeaseCounts = new Map<string, number>();
   private static lastSweepAt: string | null = null;
 
   /**
@@ -54,6 +54,23 @@ export class RepositoryCacheManager {
     return process.env.ANKA_REPO_CACHE_DIR
       ? path.resolve(process.env.ANKA_REPO_CACHE_DIR)
       : path.join(os.tmpdir(), "anka", "repo-cache");
+  }
+
+  /**
+   * Returns the root directory for cache metadata, strictly OUTSIDE repository clones.
+   * Defaults to os.tmpdir()/anka/repo-cache-meta, overrideable via ANKA_REPO_META_DIR.
+   */
+  public static getMetaRoot(): string {
+    return process.env.ANKA_REPO_META_DIR
+      ? path.resolve(process.env.ANKA_REPO_META_DIR)
+      : path.join(path.dirname(this.getCacheRoot()), "repo-cache-meta");
+  }
+
+  /**
+   * Returns the external metadata file path for a project.
+   */
+  public static getProjectMetaPath(projectId: string): string {
+    return path.join(this.getMetaRoot(), `${projectId}.json`);
   }
 
   /**
@@ -85,6 +102,27 @@ export class RepositoryCacheManager {
    */
   public static getProjectCachePath(projectId: string): string {
     return path.join(this.getCacheRoot(), projectId);
+  }
+
+  /**
+   * Cleans legacy in-repo `.anka-cache-meta.json` from managed clone if present.
+   * Migrates metadata to external directory and removes file from repo root.
+   */
+  public static cleanupLegacyInRepoMetadata(projectId: string): void {
+    const projectPath = this.getProjectCachePath(projectId);
+    const legacyFile = path.join(projectPath, ".anka-cache-meta.json");
+    if (fs.existsSync(legacyFile)) {
+      try {
+        const metaPath = this.getProjectMetaPath(projectId);
+        const raw = fs.readFileSync(legacyFile, "utf8");
+        fs.mkdirSync(this.getMetaRoot(), { recursive: true });
+        fs.writeFileSync(metaPath, raw, "utf8");
+        fs.unlinkSync(legacyFile);
+        console.log(`[RepoCache] Cleaned legacy in-repo metadata file from "${legacyFile}"`);
+      } catch (err) {
+        console.warn(`[RepoCache] Failed removing legacy metadata file "${legacyFile}":`, err);
+      }
+    }
   }
 
   /**
@@ -135,12 +173,14 @@ export class RepositoryCacheManager {
 
   /**
    * Touches/refreshes the last-used timestamp for a project's cache.
+   * Metadata is written strictly to an external directory outside the Git clone.
    */
   public static touch(projectId: string): void {
-    const projectPath = this.getProjectCachePath(projectId);
-    if (!fs.existsSync(projectPath)) return;
+    // Clean legacy in-repo file if exists
+    this.cleanupLegacyInRepoMetadata(projectId);
 
-    const metaFile = path.join(projectPath, ".anka-cache-meta.json");
+    const metaRoot = this.getMetaRoot();
+    const metaFile = this.getProjectMetaPath(projectId);
     const existing = this.readMeta(projectId);
     const now = Date.now();
     const meta: RepositoryCacheMeta = {
@@ -150,6 +190,7 @@ export class RepositoryCacheManager {
     };
 
     try {
+      fs.mkdirSync(metaRoot, { recursive: true });
       fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2), "utf8");
     } catch (err) {
       console.warn(`[RepoCache] Failed writing metadata for project "${projectId}":`, err);
@@ -157,16 +198,19 @@ export class RepositoryCacheManager {
   }
 
   /**
-   * Reads metadata for a project's cache.
+   * Reads metadata for a project's cache from the external metadata directory.
    */
   public static readMeta(projectId: string): RepositoryCacheMeta | null {
-    const metaFile = path.join(this.getProjectCachePath(projectId), ".anka-cache-meta.json");
+    this.cleanupLegacyInRepoMetadata(projectId);
+
+    const metaFile = this.getProjectMetaPath(projectId);
     if (fs.existsSync(metaFile)) {
       try {
         const raw = fs.readFileSync(metaFile, "utf8");
         return JSON.parse(raw);
       } catch {}
     }
+
     return null;
   }
 
@@ -194,7 +238,7 @@ export class RepositoryCacheManager {
   }
 
   /**
-   * Safely deletes a project's cache directory.
+   * Safely deletes a project's cache directory and its external metadata file.
    */
   public static async removeProjectCache(projectId: string): Promise<void> {
     const projectPath = this.getProjectCachePath(projectId);
@@ -205,6 +249,14 @@ export class RepositoryCacheManager {
       } catch (err) {
         console.warn(`[RepoCache] Failed removing cache for project "${projectId}":`, err);
       }
+    }
+
+    // Remove external metadata file
+    const metaFile = this.getProjectMetaPath(projectId);
+    if (fs.existsSync(metaFile)) {
+      try {
+        await fs.promises.unlink(metaFile);
+      } catch {}
     }
   }
 
@@ -222,7 +274,7 @@ export class RepositoryCacheManager {
       for (const entry of entries) {
         if (entry.isDirectory()) {
           const projectId = entry.name;
-          if (this.activeLeases.has(projectId)) {
+          if (this.isProjectActive(projectId)) {
             continue;
           }
 
@@ -288,7 +340,7 @@ export class RepositoryCacheManager {
             projectPath,
             lastUsedAt,
             sizeBytes,
-            isActive: this.activeLeases.has(projectId),
+            isActive: this.isProjectActive(projectId),
           });
         }
       }
@@ -330,8 +382,9 @@ export class RepositoryCacheManager {
 
     try {
       await fs.promises.mkdir(this.getCacheRoot(), { recursive: true });
+      await fs.promises.mkdir(this.getMetaRoot(), { recursive: true });
     } catch (err) {
-      console.warn(`[StartupSweep] Cache root directory creation warning:`, err);
+      console.warn(`[StartupSweep] Directory creation warning:`, err);
     }
 
     let sweptCaches = 0;
@@ -396,28 +449,62 @@ export class RepositoryCacheManager {
     return {
       repoCacheEntries,
       repoCacheBytes,
-      activeRepoLeases: this.activeLeases.size,
+      activeRepoLeases: this.activeLeaseCounts.size,
       activeRuns,
       lastSweepAt: this.lastSweepAt || null,
     };
   }
 
   /**
+   * Acquires a reference-counted lease on a project's repository cache.
+   */
+  public static acquireLease(projectId: string): void {
+    if (!projectId) return;
+    const count = (this.activeLeaseCounts.get(projectId) || 0) + 1;
+    this.activeLeaseCounts.set(projectId, count);
+  }
+
+  /**
+   * Releases a reference-counted lease on a project's repository cache.
+   */
+  public static releaseLease(projectId: string): void {
+    if (!projectId) return;
+    const count = (this.activeLeaseCounts.get(projectId) || 0) - 1;
+    if (count <= 0) {
+      this.activeLeaseCounts.delete(projectId);
+    } else {
+      this.activeLeaseCounts.set(projectId, count);
+    }
+  }
+
+  /**
    * Returns whether a project is currently actively leased.
    */
   public static isProjectActive(projectId: string): boolean {
-    return this.activeLeases.has(projectId);
+    return (this.activeLeaseCounts.get(projectId) || 0) > 0;
   }
 
   /**
-   * Returns count of active project leases.
+   * Returns count of distinct actively leased projects.
    */
   public static getActiveLeaseCount(): number {
-    return this.activeLeases.size;
+    return this.activeLeaseCounts.size;
   }
 
   /**
-   * Serializes operations on the same project using an in-process project-scoped mutex.
+   * Executes an async operation with guaranteed active lease protection across its full lifecycle.
+   */
+  public static async withLease<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+    this.acquireLease(projectId);
+    try {
+      return await fn();
+    } finally {
+      this.releaseLease(projectId);
+    }
+  }
+
+  /**
+   * Serializes mutation operations on the same project using an in-process project-scoped mutex.
    * Different projects run concurrently. Active lease is tracked during execution.
    */
   public static async withProjectLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
@@ -435,10 +522,8 @@ export class RepositoryCacheManager {
 
     try {
       await currentLock;
-      this.activeLeases.add(projectId);
-      return await fn();
+      return await this.withLease(projectId, fn);
     } finally {
-      this.activeLeases.delete(projectId);
       releaseLock!();
       if (this.locks.get(projectId) === newLock) {
         this.locks.delete(projectId);
@@ -453,6 +538,7 @@ export class RepositoryCacheManager {
     if (!text || typeof text !== "string") return text;
     return text
       .replace(/https:\/\/[^@\s]+@github\.com/gi, "https://***@github.com")
-      .replace(/https:\/\/[^:\s]+:[^@\s]+@/gi, "https://***@");
+      .replace(/https:\/\/[^:\s]+:[^@\s]+@/gi, "https://***@")
+      .replace(/(?:gh[pousr]_[A-Za-z0-9_]{10,255}|github_pat_[A-Za-z0-9_]{10,255})/g, "***");
   }
 }

@@ -56,7 +56,14 @@ export class WorktreeDependencyService {
       (parsedPkg.devDependencies && Object.keys(parsedPkg.devDependencies).length > 0)
     );
 
-    if (!hasDeps) {
+    const hasWorkspaces = Boolean(
+      parsedPkg.workspaces && (
+        (Array.isArray(parsedPkg.workspaces) && parsedPkg.workspaces.length > 0) ||
+        (typeof parsedPkg.workspaces === "object" && Array.isArray(parsedPkg.workspaces.packages) && parsedPkg.workspaces.packages.length > 0)
+      )
+    ) || fs.existsSync(path.join(worktreePath, "pnpm-workspace.yaml"));
+
+    if (!hasDeps && !hasWorkspaces) {
       return {
         needed: false,
         packageManager: null,
@@ -79,20 +86,25 @@ export class WorktreeDependencyService {
         installCommand = "corepack pnpm install --frozen-lockfile";
       } else if (pmField.startsWith("yarn")) {
         packageManager = "yarn";
-        installCommand = "yarn install --immutable";
+        const isYarnClassic = fs.existsSync(path.join(worktreePath, "yarn.lock")) && !fs.existsSync(path.join(worktreePath, ".yarnrc.yml"));
+        installCommand = isYarnClassic ? "yarn install --frozen-lockfile" : "yarn install --immutable";
       } else if (pmField.startsWith("npm")) {
         packageManager = "npm";
         installCommand = "npm ci --no-audit --no-fund";
       }
-    } else if (hasPnpmLock) {
+    } else if (hasPnpmLock || fs.existsSync(path.join(worktreePath, "pnpm-workspace.yaml"))) {
       packageManager = "pnpm";
-      installCommand = "pnpm install --frozen-lockfile";
+      installCommand = hasPnpmLock ? "pnpm install --frozen-lockfile" : "pnpm install";
     } else if (hasYarnLock) {
       packageManager = "yarn";
-      installCommand = "yarn install --frozen-lockfile";
+      const isYarnClassic = !fs.existsSync(path.join(worktreePath, ".yarnrc.yml"));
+      installCommand = isYarnClassic ? "yarn install --frozen-lockfile" : "yarn install --immutable";
     } else if (hasPackageLock) {
       packageManager = "npm";
       installCommand = "npm ci --no-audit --no-fund";
+    } else if (hasWorkspaces) {
+      packageManager = "npm";
+      installCommand = "npm install --no-audit --no-fund";
     } else {
       return {
         needed: true,

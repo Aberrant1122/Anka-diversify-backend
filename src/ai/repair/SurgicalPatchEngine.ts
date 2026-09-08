@@ -1,1 +1,6 @@
-export { SurgicalPatchEngine, SurgicalPatchChunk } from "../../services/surgical-repair.engine";
+export {
+  SurgicalPatchEngine,
+  SurgicalPatchChunk,
+  DeterministicTs6133Repair,
+  DeterministicTs6133RepairInput,
+} from "../../services/surgical-repair.engine";

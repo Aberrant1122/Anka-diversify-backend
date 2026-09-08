@@ -39,6 +39,7 @@ router.post('/projects/:projectId/sprints/generate', aiController.generateSprint
 // Coding Agent Routes
 router.post('/projects/:projectId/agent/run', aiController.runAgent.bind(aiController));
 router.post('/projects/:projectId/agent/stream', aiController.streamAgent.bind(aiController));
+router.post('/projects/:projectId/agent/multi-repo/run', aiController.runMultiRepoAgent.bind(aiController));
 router.post('/projects/:projectId/agent/push', aiController.pushAgentChanges.bind(aiController));
 router.post('/projects/:projectId/tasks/suggest-order', aiController.suggestTaskOrder.bind(aiController));
 

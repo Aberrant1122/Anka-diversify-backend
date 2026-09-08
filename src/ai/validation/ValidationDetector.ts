@@ -2,6 +2,11 @@ import { getOpenAI } from "../shared/utils";
 import { AgentFileChange, ExecutionContract, FeatureValidationResult } from "../shared/types";
 import { StaticValidationEngine } from "../../services/static-validator.engine";
 import { FEATURE_VALIDATOR_PROMPT } from "../prompts/validation";
+import {
+  detectPrimaryActiveEntryPoint,
+  detectAllActiveEntryRoots,
+  detectRepositoryArchitecture,
+} from "../planning/RepositoryArchitectureDetector";
 
 export class ValidationDetector {
   static async runFeatureValidation(
@@ -20,11 +25,13 @@ export class ValidationDetector {
     }
 
     if (contract?.pipeline === "STANDALONE" || contract?.environment === "HTML_CSS_JS") {
-      const hasHtml = changes.some((c) => c.path.endsWith(".html") || c.path.includes("index"));
-      const hasCss = changes.some((c) => c.path.endsWith(".css") || c.content.includes("css"));
-      const hasJs = changes.some((c) => c.path.endsWith(".js") || c.content.includes("addEventListener"));
+      const isDelete = (c: AgentFileChange) => c.action === "delete" || c.isDeleted === true;
+      const activeChanges = changes.filter((c) => !isDelete(c) && typeof c.content === "string");
+      const hasHtml = activeChanges.some((c) => c.path.endsWith(".html") || c.path.includes("index"));
+      const hasCss = activeChanges.some((c) => c.path.endsWith(".css") || (typeof c.content === "string" && c.content.includes("css")));
+      const hasJs = activeChanges.some((c) => c.path.endsWith(".js") || (typeof c.content === "string" && c.content.includes("addEventListener")));
 
-      const htmlContent = changes.find((c) => c.path.endsWith(".html"))?.content || "";
+      const htmlContent = activeChanges.find((c) => c.path.endsWith(".html"))?.content || "";
       const hasDoctype = /<!doctype\s+html>/i.test(htmlContent) || /<html/i.test(htmlContent);
       const linksStyle = /<link[^>]+href=["']?style\.css["']?/i.test(htmlContent);
       const linksScript = /<script[^>]+src=["']?script\.js["']?/i.test(htmlContent);
@@ -73,7 +80,101 @@ export class ValidationDetector {
 
       const changedFilePaths = new Set(changes.map((c) => c.path));
       const relevantIssues = rawStaticResult.issues.filter((i) => changedFilePaths.has(i.file));
-      const staticResult = { ...rawStaticResult, issues: relevantIssues };
+      const relevantPassed = !relevantIssues.some((i) => i.severity === "FAIL");
+      const staticResult = {
+        ...rawStaticResult,
+        issues: relevantIssues,
+        passed: relevantPassed,
+        status: relevantIssues.some((i) => i.severity === "FAIL")
+          ? ("FAIL" as const)
+          : relevantIssues.some((i) => i.severity === "WARNING")
+          ? ("WARNING" as const)
+          : ("PASS" as const),
+      };
+
+      const existingFilePaths = projectFilesOnly.map((f) => f.path);
+      const pkgFile = projectFilesOnly.find((f) => f.path && f.path.endsWith("package.json"));
+      const arch = detectRepositoryArchitecture(existingFilePaths, pkgFile?.content);
+      const isBackendOnly = arch.framework === "EXPRESS" || arch.framework === "NODE_JS";
+      const isDelete = (c: AgentFileChange) => c.action === "delete" || c.isDeleted === true;
+      const frontendChanges = changes.filter((c) => {
+        if (isDelete(c)) return false;
+        const norm = c.path.replace(/\\/g, "/").toLowerCase();
+        return (
+          norm.endsWith(".tsx") ||
+          norm.endsWith(".jsx") ||
+          norm.endsWith(".css") ||
+          norm.endsWith(".scss") ||
+          norm.endsWith(".html") ||
+          (norm.endsWith(".ts") && !norm.endsWith(".d.ts") && !norm.includes(".test.") && !norm.includes(".spec.")) ||
+          (norm.endsWith(".js") && !norm.includes(".test.") && !norm.includes(".spec."))
+        );
+      });
+
+      const hasFrontendChanges = frontendChanges.length > 0;
+      const isUiTaskFromContract = contract
+        ? contract.environment === "REACT_TS" || contract.taskType === "NEW_FEATURE"
+        : hasFrontendChanges;
+
+      let activeTargetSatisfied = true;
+      let activeTargetDetails = "Intent targets verified";
+
+      if (!isBackendOnly && (hasFrontendChanges || isUiTaskFromContract)) {
+        const activeRoots = detectAllActiveEntryRoots(existingFilePaths, arch);
+
+        if (activeRoots.length > 0) {
+
+          if (frontendChanges.length === 0) {
+            activeTargetSatisfied = false;
+            activeTargetDetails = "Modified UI target is not reachable from any active frontend entry point.";
+          } else {
+            const reachableFiles = StaticValidationEngine.computeReachableFiles(
+              activeRoots,
+              rawStaticResult.dependencyGraph || new Map(),
+            );
+
+            const isChangeActive = (c: AgentFileChange): boolean => {
+              const normPath = c.path.replace(/\\/g, "/");
+              const lowerPath = normPath.toLowerCase();
+
+              // 1. active entry file itself was modified
+              const touchesActiveEntry = activeRoots.some((r) => {
+                const normRoot = r.replace(/\\/g, "/").toLowerCase();
+                return lowerPath === normRoot || lowerPath.endsWith("/" + normRoot);
+              });
+              if (touchesActiveEntry) return true;
+
+              // 2. modified existing file is deterministically reachable from active entry
+              // 3. newly-created file is integrated by a reachable modified/existing file
+              if (reachableFiles.has(lowerPath) || reachableFiles.has(normPath)) {
+                return true;
+              }
+
+              return false;
+            };
+
+            const hasActiveModification = frontendChanges.some(isChangeActive);
+
+            if (!hasActiveModification) {
+              activeTargetSatisfied = false;
+              activeTargetDetails = "Modified UI target is not reachable from any active frontend entry point.";
+            } else {
+              activeTargetSatisfied = true;
+              activeTargetDetails = "Active target reachability verified";
+            }
+          }
+        }
+      }
+
+      const hasMissingNav = staticResult.issues.some((i) => i.checkId === "missing_navigation");
+      const hasRouteOrNavChanges = changes.some(
+        (c) =>
+          c.path.includes("page.") ||
+          c.path.includes("Navigation") ||
+          c.path.includes("Sidebar") ||
+          c.path.includes("Header") ||
+          c.path.includes("layout.")
+      );
 
       const checks = [
         {
@@ -82,6 +183,13 @@ export class ValidationDetector {
           status: staticResult.issues.some((i) => i.checkId === "broken_import" || i.checkId === "missing_export") ? ("FAIL" as const) : ("PASS" as const),
           checked: true,
           details: staticResult.issues.filter((i) => i.checkId === "broken_import" || i.checkId === "missing_export").map((i) => `${i.file}:${i.line} ${i.reason}`).join("; ") || "All imports and exports resolve cleanly",
+        },
+        {
+          id: "component_rendering",
+          label: "Component Rendering Verification",
+          status: staticResult.issues.some((i) => i.checkId === "orphan_component") ? ("WARN" as const) : ("PASS" as const),
+          checked: true,
+          details: staticResult.issues.find((i) => i.checkId === "orphan_component")?.reason || "Component rendering verified",
         },
         {
           id: "circular_dependencies",
@@ -103,6 +211,33 @@ export class ValidationDetector {
           status: staticResult.issues.some((i) => i.checkId === "dead_route" || i.checkId === "missing_navigation") ? ("WARN" as const) : ("PASS" as const),
           checked: true,
           details: staticResult.issues.filter((i) => i.checkId === "dead_route" || i.checkId === "missing_navigation").map((i) => `${i.file}:${i.line} ${i.reason}`).join("; ") || "All route pages are reachable",
+        },
+        {
+          id: "nav_integration",
+          label: "Navigation & Link Integration",
+          status: hasMissingNav
+            ? ("FAIL" as const)
+            : hasRouteOrNavChanges
+            ? ("PASS" as const)
+            : ("WARN" as const),
+          checked: true,
+          details: staticResult.issues.find((i) => i.checkId === "missing_navigation")?.reason || "Navigation integration verified",
+        },
+        {
+          id: "style_integration",
+          label: "Stylesheet Wiring & Integration",
+          status: staticResult.issues.some((i) => i.checkId === "missing_stylesheet_import")
+            ? ("FAIL" as const)
+            : ("PASS" as const),
+          checked: true,
+          details: staticResult.issues.find((i) => i.checkId === "missing_stylesheet_import")?.reason || "All created stylesheets are integrated into the render tree",
+        },
+        {
+          id: "intent_satisfaction",
+          label: "Active Target Intent Satisfaction",
+          status: activeTargetSatisfied ? ("PASS" as const) : ("FAIL" as const),
+          checked: true,
+          details: activeTargetDetails,
         },
         {
           id: "api_connection",
@@ -131,6 +266,10 @@ export class ValidationDetector {
         .filter((i) => i.severity === "FAIL")
         .map((i) => `[${i.checkId}] ${i.file}:${i.line} - ${i.reason} (Fix: ${i.suggestedFix})`);
 
+      if (!activeTargetSatisfied) {
+        failedChecks.push(`[intent_satisfaction] ${activeTargetDetails}`);
+      }
+
       const repairActions = staticResult.issues
         .filter((i) => i.severity === "FAIL")
         .map((i) => ({
@@ -140,14 +279,25 @@ export class ValidationDetector {
         }));
 
       return {
-        overallPassed: staticResult.passed,
+        overallPassed: Boolean(staticResult.passed && activeTargetSatisfied),
         checks,
         failedChecks,
         repairActions,
       };
     } catch {}
 
-    const changesText = changes.map((c) => `=== NEW/MODIFIED FILE: ${c.path} ===\n${c.content.slice(0, 1500)}`).join("\n\n");
+    const changesText = changes
+      .map((c) => {
+        const isDelete = c.action === "delete" || c.isDeleted === true;
+        if (isDelete) {
+          return `=== DELETED FILE: ${c.path} ===\nFile removed by agent.`;
+        }
+        if (typeof c.content === "string") {
+          return `=== NEW/MODIFIED FILE: ${c.path} ===\n${c.content.slice(0, 1500)}`;
+        }
+        return `=== UNKNOWN/INVALID CHANGE: ${c.path} ===\n(Missing file content)`;
+      })
+      .join("\n\n");
     const snapshotFilesFallback = ((snapshot?.keyFiles || snapshot?.repoSnapshot || []) as Array<{ path: string; content?: string }>);
     const existingFiles = snapshotFilesFallback.map((f) => `${f.path}`).join("\n");
 

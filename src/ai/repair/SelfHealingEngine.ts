@@ -10,8 +10,31 @@ import { SecurityPolicy } from "../security/SecurityPolicy";
 import { ImportValidator } from "../validation/ImportValidator";
 import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
 import { ErrorClassifier } from "../validation/ErrorClassifier";
-import { ErrorDiagnosticsParser } from "./ErrorDiagnosticsParser";
+import { ErrorDiagnosticsParser, DiagnosticError, PublicContractGuard, DeterministicTs6133Repair } from "../../services/surgical-repair.engine";
 import { SurgicalPatchEngine, SurgicalPatchChunk } from "./SurgicalPatchEngine";
+import { applyPatchToFile } from "../patch/PatchApplicator";
+
+function extractMissingDepKeys(diags: DiagnosticError[], rawErrors?: string): Set<string> {
+  const keys = new Set<string>();
+  for (const diag of diags) {
+    if (diag.code === "TS2307" || /cannot find module|module not found|err_module_not_found|could not resolve/i.test(diag.message || "")) {
+      const normFile = diag.file ? normalizeRepoPath(diag.file) : "";
+      let sym = (diag.symbolName || "").toLowerCase();
+      if (!sym && diag.message) {
+        const m = diag.message.match(/['"`]([^'"`]+)['"`]/);
+        if (m) sym = m[1].toLowerCase();
+      }
+      keys.add(`${normFile}|${sym}`);
+    }
+  }
+  if (keys.size === 0 && rawErrors) {
+    const quoteMatches = rawErrors.matchAll(/(?:cannot find module|module not found|could not resolve|cannot find name)\s+['"`]([^'"`]+)['"`]/gi);
+    for (const qm of quoteMatches) {
+      if (qm[1]) keys.add(`*|${qm[1].toLowerCase()}`);
+    }
+  }
+  return keys;
+}
 import { RepairSessionTracker } from "./RepairSessionTracker";
 import { buildSelfHealingRepairPrompt } from "../prompts/repair";
 import {
@@ -23,7 +46,12 @@ import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
 import { verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { PatchCorrectionEngine } from "../generation/PatchCorrectionEngine";
-import { BaselineDeltaVerifier, BaselineDeltaResult } from "../../services/baseline-delta.verifier";
+import {
+  BaselineDeltaVerifier,
+  BaselineDeltaResult,
+  createPreTaskSourceGetter,
+  PreTaskSourceInfo,
+} from "../../services/baseline-delta.verifier";
 
 export const MAX_TOTAL_REPAIR_CYCLES = 15;
 export const MAX_NO_PROGRESS_CYCLES = 2;
@@ -37,6 +65,9 @@ export const SPECIFIC_GATE_ERRORS = new Set([
   "SCOPE_EXPANSION_REQUIRED",
   "REPAIR_ACTION_MISMATCH",
   "SCOPE_VIOLATION",
+  "UNAUTHORIZED_SCOPE_ERROR",
+  "PUBLIC_CONTRACT_DRIFT",
+  "OSCILLATING_REPAIR_CYCLE",
   "MODIFY_PATCH_REQUIRED",
   "NO_OP_PATCH_EDIT",
   "PATCH_TARGET_NOT_FOUND",
@@ -130,6 +161,8 @@ export class SelfHealingEngine {
     executionContract?: ExecutionContract | null,
     baselineDiagnostics?: BaselineDiagnostic[],
     targetedBaselineDiagnostics?: BaselineDiagnostic[],
+    baseCommitSha?: string,
+    baselineBuildPassed?: boolean,
   ): Promise<{
     finalChanges: AgentFileChange[];
     attempts: number;
@@ -189,6 +222,8 @@ export class SelfHealingEngine {
     const resolvedFailureSequence: string[] = [];
 
     const attemptedProposalFingerprints = new Set<string>();
+    /** Per-run memory of dynamically authorized revealed-baseline repair targets */
+    const authorizedRevealedBaselinePaths = new Set<string>();
     const repairAttemptsHistory: Array<{
       attempt: number;
       proposalResult?: string;
@@ -200,7 +235,20 @@ export class SelfHealingEngine {
     let identicalFailureCount = 0;
     let noProgressCount = 0;
     let previousDiagnosticCount: number | null = null;
+    let previousDiagnostics: DiagnosticError[] = [];
+    let previousProposalFingerprint: string | null = null;
+    let alternativeRepairAttempt = false;
+    let alternativeAttemptFeedback: string | undefined = undefined;
+    let alternativeAttemptsCount = 0;
+    const MAX_ALTERNATIVE_ATTEMPTS = 1;
     let totalCyclesExecuted = 0;
+    const diagnosticStateHistory: string[] = [];
+
+    const sourceInfoGetter = createPreTaskSourceGetter(localPath, fsManager, baseCommitSha);
+    const preTaskSourceGetter = (filePath: string) => {
+      const info = sourceInfoGetter(filePath);
+      return info ? info.content : undefined;
+    };
 
     for (let attempt = 1; attempt <= MAX_TOTAL_REPAIR_CYCLES; attempt++) {
       totalCyclesExecuted = attempt;
@@ -418,10 +466,18 @@ export class SelfHealingEngine {
 
         if (baselineDiagnostics && baselineDiagnostics.length > 0) {
           const currentDiags = BaselineDeltaVerifier.extractDiagnostics(validation.errors, "CURRENT_TASK");
+          const isBroad = BaselineDeltaVerifier.isBroadBuildRepairTask(originalMessage, executionContract);
+
           const deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
             baselineDiagnostics,
             currentDiags,
-            targetedBaselineDiagnostics || []
+            targetedBaselineDiagnostics || [],
+            {
+              preTaskSourceGetter,
+              changes: currentChanges,
+              isBroadRepairTask: isBroad,
+              authorizedRevealedBaselinePaths,
+            }
           );
 
           if (deltaResult.taskVerified) {
@@ -492,6 +548,158 @@ export class SelfHealingEngine {
           };
         }
 
+        // For BROAD BUILD REPAIR ONLY: Dynamically authorize proven revealed baseline compiler targets
+        const isBroad = BaselineDeltaVerifier.isBroadBuildRepairTask(originalMessage, executionContract);
+        if (isBroad && approvedManifest && localPath) {
+          for (const diag of parsedDiags) {
+            if (!diag.file) continue;
+            const cleanPath = diag.file.replace(/^\.\//, "").replace(/\\/g, "/");
+            const sourceInfo = sourceInfoGetter(cleanPath);
+
+            if (sourceInfo) {
+              const changeForFile = currentChanges.find(
+                (c) => (c.path || "").replace(/^\.\//, "").replace(/\\/g, "/").toLowerCase() === cleanPath.toLowerCase()
+              );
+              const baseDiag: BaselineDiagnostic = {
+                errorType: diag.code?.startsWith("TS") ? "COMPILE_TS" : "COMPILE_NEXT",
+                filePath: cleanPath,
+                line: diag.line,
+                column: diag.column,
+                errorCode: diag.code,
+                message: diag.message,
+                symbolName: diag.symbolName,
+                rawTrace: diag.rawTrace,
+                origin: "CURRENT_TASK",
+                fingerprint: `${diag.code || "ERR"}|${cleanPath}|${diag.line || 0}`,
+              };
+              const causality = BaselineDeltaVerifier.isConstructPreExistingAndUntouched(
+                baseDiag,
+                sourceInfo.content,
+                changeForFile,
+                {
+                  preTaskSourceGetter,
+                  changes: currentChanges,
+                  isBroadRepairTask: isBroad,
+                  authorizedRevealedBaselinePaths,
+                }
+              );
+
+              if ((causality.isPreExisting && !causality.isTouched) || causality.isAuthorizedRepairFollowup) {
+                const abs = path.join(localPath, cleanPath);
+                if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+                  // 1. Extend approved manifest
+                  const normPath = normalizeRepoPath(cleanPath);
+                  if (!approvedManifest.files.some((f) => normalizeRepoPath(f.path) === normPath)) {
+                    approvedManifest.files.push({
+                      path: cleanPath,
+                      action: "modify",
+                      description: "Dynamically authorized revealed baseline diagnostic target",
+                      dependencies: [],
+                    });
+                    approvedManifest.totalFiles = approvedManifest.files.length;
+                  }
+
+                  // 2. Extend execution contract target paths and search scope
+                  if (executionContract) {
+                    if (!executionContract.targetPaths.some((p) => normalizeRepoPath(p) === normPath)) {
+                      executionContract.targetPaths.push(cleanPath);
+                    }
+                    if (!executionContract.searchScope.some((p) => normalizeRepoPath(p) === normPath)) {
+                      executionContract.searchScope.push(cleanPath);
+                    }
+                  }
+
+                  // 3. Hydrate on-disk content into currentChanges & snapshot into fsManager
+                  if (!currentChanges.some((c) => normalizeRepoPath(c.path) === normPath)) {
+                    try {
+                      const currentDiskContent = fs.readFileSync(abs, "utf8");
+                      currentChanges.push({
+                        path: cleanPath,
+                        content: currentDiskContent,
+                        action: "modify",
+                        description: "Hydrated revealed baseline target for repair",
+                      });
+                      if (fsManager) {
+                        await fsManager.snapshot(currentChanges, localPath);
+                      }
+                    } catch {}
+                  }
+
+                  // 4. Record authorization lineage for this repair run
+                  authorizedRevealedBaselinePaths.add(normPath);
+
+                  if (causality.isAuthorizedRepairFollowup) {
+                    console.log(
+                      `[REPAIR_FOLLOWUP] file=${cleanPath} diagnostic=${diag.code} symbol=${diag.symbolName} causedByAuthorizedRepair=true authorized=true`
+                    );
+                  } else {
+                    console.log(
+                      `[REVEALED_SCOPE] file=${cleanPath} baselineSource=${sourceInfo.origin} classification=REVEALED_BASELINE authorized=true`
+                    );
+                  }
+                }
+              } else {
+                console.log(
+                  `[REVEALED_SCOPE] file=${cleanPath} authorized=false reason=AGENT_TOUCHED_OR_REGRESSION`
+                );
+              }
+            } else {
+              console.log(
+                `[REVEALED_SCOPE] file=${cleanPath} authorized=false reason=NO_BASELINE_PROOF`
+              );
+            }
+          }
+        }
+
+        // PART L: Preserve baseline causality safety — do not repair unrelated healthy baseline files
+        const isDiagnosticAuthorized = (diag: DiagnosticError): boolean => {
+          if (!diag.file) return false;
+          const norm = normalizeRepoPath(diag.file);
+          return (
+            currentChanges.some((c) => normalizeRepoPath(c.path) === norm) ||
+            Boolean(approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm)) ||
+            authorizedRevealedBaselinePaths.has(norm)
+          );
+        };
+
+        const authorizedDiags = parsedDiags.filter(isDiagnosticAuthorized);
+        const unauthorizedDiags = parsedDiags.filter((d) => !isDiagnosticAuthorized(d));
+
+        if (isRepositoryMode && !isBroad && parsedDiags.length > 0 && authorizedDiags.length === 0) {
+          console.warn(
+            `[SelfHealingEngine] Diagnostics only affect unrelated files outside authorized scope: ${parsedDiags.map((d) => d.file).join(", ")}. Preserving baseline causality safety.`
+          );
+
+          const hasCleanBaselineProof =
+            baselineBuildPassed === true ||
+            (Array.isArray(baselineDiagnostics) && baselineDiagnostics.length === 0);
+
+          const hasBaselineProof =
+            !hasCleanBaselineProof &&
+            Boolean(
+              (Array.isArray(baselineDiagnostics) &&
+                baselineDiagnostics.length > 0 &&
+                baselineDiagnostics.some((bd) => {
+                  const bdFile = normalizeRepoPath(bd.filePath || (bd as any).file || "");
+                  return unauthorizedDiags.some((ud) => normalizeRepoPath(ud.file) === bdFile);
+                })) ||
+              (baselineDiagnostics === undefined && baselineBuildPassed === undefined)
+            );
+
+          if (hasBaselineProof) {
+            if (!SPECIFIC_GATE_ERRORS.has(lastErrorType)) {
+              lastErrorType = "BASELINE_REPOSITORY_UNHEALTHY";
+            }
+            previousErrors = `[BASELINE_REPOSITORY_UNHEALTHY] Compiler errors detected in unrelated pre-existing file(s) outside task scope: ${unauthorizedDiags.map((d) => d.file).join(", ")}.`;
+          } else {
+            if (!SPECIFIC_GATE_ERRORS.has(lastErrorType)) {
+              lastErrorType = "UNAUTHORIZED_SCOPE_ERROR";
+            }
+            previousErrors = `[UNAUTHORIZED_SCOPE_ERROR] Post-change compiler error detected in unauthorized file(s) outside task scope: ${unauthorizedDiags.map((d) => d.file).join(", ")}. Unauthorized diagnostics cannot be repaired.`;
+          }
+          break;
+        }
+
         // Dedicated MISSING_DEP routing: stop generic repair loop; allow at most 1 bounded dependency correction
         if (valErrClassification.type === "MISSING_DEP") {
           console.warn(`[SelfHealingEngine] Detected MISSING_DEP. Routing to bounded dependency-safe correction.`);
@@ -505,6 +713,54 @@ export class SelfHealingEngine {
                 const arch = detectRepositoryArchitecture([], pkgContent);
                 installedPackages = arch.installedPackages;
               } catch {}
+            }
+          }
+
+          // Build effective repair context for MISSING_DEP:
+          // 1. Start with existing currentChanges (deduplicated by normalized path)
+          const effectiveRepairContextChanges: AgentFileChange[] = [];
+          const seenPaths = new Set<string>();
+
+          for (const c of currentChanges) {
+            const norm = normalizeRepoPath(c.path);
+            if (!seenPaths.has(norm)) {
+              seenPaths.add(norm);
+              effectiveRepairContextChanges.push(c);
+            }
+          }
+
+          // 2. Hydrate any authorized diagnostic files from parsedDiags not already in currentChanges
+          for (const diag of parsedDiags) {
+            const rawPath = diag.file || (diag as any).filePath;
+            if (!rawPath) continue;
+            const cleanPath = rawPath.replace(/^\.\//, "").replace(/\\/g, "/");
+            const norm = normalizeRepoPath(cleanPath);
+
+            if (seenPaths.has(norm)) continue;
+
+            const isApprovedInManifest = approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm);
+            const isAuthorizedRevealed = authorizedRevealedBaselinePaths.has(norm);
+
+            if (isApprovedInManifest || isAuthorizedRevealed) {
+              let currentContent: string | null = null;
+              if (localPath) {
+                const abs = path.join(localPath, cleanPath);
+                if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+                  try {
+                    currentContent = fs.readFileSync(abs, "utf8");
+                  } catch {}
+                }
+              }
+
+              if (currentContent !== null) {
+                seenPaths.add(norm);
+                effectiveRepairContextChanges.push({
+                  path: cleanPath,
+                  content: currentContent,
+                  action: "modify",
+                  description: "Hydrated authorized target for dependency repair",
+                });
+              }
             }
           }
 
@@ -523,7 +779,7 @@ export class SelfHealingEngine {
                 },
                 {
                   role: "user",
-                  content: `ORIGINAL REQUEST: ${originalMessage}\nCURRENT CHANGES:\n${JSON.stringify(currentChanges.map(c => ({ path: c.path, content: c.content })))}`,
+                  content: `ORIGINAL REQUEST: ${originalMessage}\nCURRENT CHANGES:\n${JSON.stringify(effectiveRepairContextChanges.map(c => ({ path: c.path, content: c.content })))}`,
                 },
               ],
               temperature: 0.0,
@@ -536,17 +792,29 @@ export class SelfHealingEngine {
               const secCheck = SecurityPolicy.checkChanges(parsed.changes);
 
               if (importCheck.valid && secCheck.safe) {
-                depChanges = parsed.changes.map((c: any) => ({
+                const appliedDepChanges: AgentFileChange[] = parsed.changes.map((c: any) => ({
                   path: c.path,
                   content: c.content || "",
-                  action: "modify",
+                  action: "modify" as const,
                   description: "Fix missing dependency",
                 }));
+
+                const merged = [...currentChanges];
+                for (const change of appliedDepChanges) {
+                  const norm = normalizeRepoPath(change.path);
+                  const existingIdx = merged.findIndex((c) => normalizeRepoPath(c.path) === norm);
+                  if (existingIdx !== -1) {
+                    merged[existingIdx] = change;
+                  } else {
+                    merged.push(change);
+                  }
+                }
+                depChanges = merged;
                 if (localPath && fsManager) {
-                  await fsManager.apply(depChanges, localPath);
+                  await fsManager.apply(appliedDepChanges, localPath);
                 }
                 depCorrectionSucceeded = true;
-                patchesAppliedCount += depChanges.length;
+                patchesAppliedCount += appliedDepChanges.length;
               }
             }
           } catch (e: any) {
@@ -572,6 +840,68 @@ export class SelfHealingEngine {
                 patchesAppliedCount,
               };
             }
+
+            // Retry build failed. Determine whether the ORIGINAL missing dependency diagnostic is still present.
+            const originalMissingDeps = extractMissingDepKeys(parsedDiags, validation.errors);
+            const retryDiags = ErrorDiagnosticsParser.parse(retryBuild.errors);
+            const retryMissingDeps = extractMissingDepKeys(retryDiags, retryBuild.errors);
+
+            let sameDepStillPresent = false;
+            if (originalMissingDeps.size > 0) {
+              for (const depKey of originalMissingDeps) {
+                if (retryMissingDeps.has(depKey)) {
+                  sameDepStillPresent = true;
+                  break;
+                }
+                const pkgOnly = depKey.split("|")[1];
+                if (pkgOnly) {
+                  for (const retryKey of retryMissingDeps) {
+                    if (retryKey.split("|")[1] === pkgOnly) {
+                      sameDepStillPresent = true;
+                      break;
+                    }
+                  }
+                }
+                if (sameDepStillPresent) break;
+              }
+            } else {
+              const retryClass = ErrorClassifier.classify(retryBuild.errors);
+              if (retryClass.type === "MISSING_DEP" && retryBuild.errors.trim() === validation.errors.trim()) {
+                sameDepStillPresent = true;
+              }
+            }
+
+            if (!sameDepStillPresent) {
+              // PROGRESS: Original missing dependency was resolved; next cycle will handle the newly revealed diagnostic
+              console.log(`[SelfHealingEngine] MISSING_DEP progress: original missing dependency resolved. Transitioning to next repair cycle.`);
+              currentChanges = depChanges;
+              previousErrors = retryBuild.errors;
+              appliedPatchesInPrevCycle = true;
+              repairApplied = true;
+              continue;
+            }
+
+            return {
+              finalChanges: depChanges,
+              attempts: attempt,
+              success: false,
+              errorLog: `[MISSING_DEP] Unresolved missing dependency: ${retryBuild.errors}\n\nROOT BUILD FAILURE:\n${rootFailure?.stderr || validation.errors}`,
+              errorType: "MISSING_DEP",
+              rootFailure,
+              currentFailure: retryBuild.errors,
+              validationDetails: {
+                rootFailure,
+                currentFailure: retryBuild.errors,
+                repairAttempts: repairAttemptsHistory,
+                finalFailure: "MISSING_DEP",
+                modelRepairAttempts,
+                patchesApplied: patchesAppliedCount,
+                buildAttempts,
+              },
+              buildAttemptsCount: buildAttempts,
+              modelRepairAttempts,
+              patchesAppliedCount,
+            };
           }
 
           return {
@@ -597,19 +927,76 @@ export class SelfHealingEngine {
           };
         }
 
-        // Progress Tracking & Identical Failure Breakers
+        // Progress Tracking & Identical Failure Breakers (Part G, H, I)
         const currentDiagCount = parsedDiags.length;
         const currentFingerprint = computeFailureFingerprint(valErrClassification.type, validation.errors, parsedDiags);
         const currentFailureCode = parsedDiags[0]?.code || valErrClassification.type;
+
+        const getDiagnosticIdentity = (d: DiagnosticError): string => {
+          const normFile = (d.file || "").replace(/\\/g, "/").replace(/^\.\//, "");
+          return `${d.code || "ERR"}|${normFile}|${d.symbolName || ""}`;
+        };
+
+        const currentIdentities = new Set(parsedDiags.map(getDiagnosticIdentity));
+        const prevIdentities = new Set(previousDiagnostics.map(getDiagnosticIdentity));
+
+        // Fix 6 & 7: Historical diagnostic state tracking and oscillation detection
+        const currentStateKey = parsedDiags
+          .map(getDiagnosticIdentity)
+          .sort()
+          .join(";");
+
+        let isOscillation = false;
+        if (parsedDiags.length > 0 && currentStateKey) {
+          const firstIdx = diagnosticStateHistory.indexOf(currentStateKey);
+          // Oscillation requires repeating a failure state after one or more intervening different states (A -> B -> A)
+          if (firstIdx !== -1) {
+            for (let j = firstIdx + 1; j < diagnosticStateHistory.length; j++) {
+              if (diagnosticStateHistory[j] !== currentStateKey) {
+                isOscillation = true;
+                break;
+              }
+            }
+          }
+          diagnosticStateHistory.push(currentStateKey);
+        }
+
+        if (isOscillation) {
+          console.warn(
+            `[SelfHealingEngine] Emergency breaker tripped: Oscillating repair cycle detected for state [${currentStateKey}]. Halting.`
+          );
+          if (!SPECIFIC_GATE_ERRORS.has(lastErrorType)) {
+            lastErrorType = "OSCILLATING_REPAIR_CYCLE";
+          }
+          previousErrors = `[OSCILLATING_REPAIR_CYCLE] Repair loop oscillation detected: compiler diagnostic state returned to a previously seen failure state (${currentStateKey}) after intervening repair attempts.`;
+          break;
+        }
 
         let progressMade = false;
         if (previousFingerprint === null) {
           progressMade = true;
         } else if (appliedPatchesInPrevCycle) {
-          if (currentDiagCount < (previousDiagnosticCount ?? Infinity)) {
-            progressMade = true; // Error count decreased
-          } else if (currentFingerprint !== previousFingerprint) {
-            progressMade = true; // Failure fingerprint evolved
+          // Progress signals:
+          // 1. Diagnostic removed: any previous diagnostic identity is absent from current
+          const diagnosticRemoved = [...prevIdentities].some((id) => !currentIdentities.has(id));
+          // 2. Diagnostic count decreased
+          const countDecreased = currentDiagCount < (previousDiagnosticCount ?? Infinity);
+          // 3. Build failure code evolved (advanced to later phase or downstream diagnostic)
+          const failureCodeAdvanced = Boolean(
+            previousFailureCode &&
+            previousFailureCode !== currentFailureCode &&
+            (diagnosticRemoved || countDecreased)
+          );
+          // 4. Exact affected file cleaned
+          const prevFiles = new Set(previousDiagnostics.map((d) => normalizeRepoPath(d.file)));
+          const currFiles = new Set(parsedDiags.map((d) => normalizeRepoPath(d.file)));
+          const fileCleaned = [...prevFiles].some((f) => !currFiles.has(f));
+
+          // Fix 7: Alternating files cannot count as progress if state was seen before in history
+          const stateRepeatedInHistory = diagnosticStateHistory.filter((k) => k === currentStateKey).length > 1;
+
+          if (!stateRepeatedInHistory && (diagnosticRemoved || countDecreased || failureCodeAdvanced || fileCleaned)) {
+            progressMade = true;
           }
         }
 
@@ -619,17 +1006,35 @@ export class SelfHealingEngine {
           }
           identicalFailureCount = 0;
           noProgressCount = 0;
+          alternativeRepairAttempt = false;
+          alternativeAttemptFeedback = undefined;
+          alternativeAttemptsCount = 0;
         } else {
-          if (currentFingerprint === previousFingerprint) {
-            identicalFailureCount++;
-          }
+          identicalFailureCount++;
           noProgressCount++;
           noProgressCyclesCount++;
+
+          // PART I: Bounded Alternative Repair Budget (max 1 alternative repair attempt for identical failure)
+          if (alternativeAttemptsCount < MAX_ALTERNATIVE_ATTEMPTS) {
+            alternativeRepairAttempt = true;
+            alternativeAttemptsCount++;
+            const unresolvedSym = parsedDiags[0]?.symbolName ? ` for symbol "${parsedDiags[0].symbolName}"` : "";
+            alternativeAttemptFeedback = `The previous repair attempt (${previousProposalFingerprint || "initial proposal"}) produced NO deterministic compiler progress. Diagnostic [${parsedDiags[0]?.code || "ERROR"}] in "${parsedDiags[0]?.file || "target file"}"${unresolvedSym} persisted identically. You must propose an alternative minimal fix that directly eliminates the diagnostic (e.g. remove the unused declaration or unused import).`;
+            console.log(`[SelfHealingEngine] No progress made. Triggering bounded alternative repair attempt (1/${MAX_ALTERNATIVE_ATTEMPTS})...`);
+          } else {
+            console.warn(`[SelfHealingEngine] Emergency breaker tripped: No repair progress after initial repair and bounded alternative attempt. Halting.`);
+            if (!SPECIFIC_GATE_ERRORS.has(lastErrorType)) {
+              lastErrorType = "NO_REPAIR_PROGRESS";
+            }
+            previousErrors = `[${lastErrorType}] No repair progress made across consecutive repair cycles.`;
+            break;
+          }
         }
 
         previousFailureCode = currentFailureCode;
         previousFingerprint = currentFingerprint;
         previousDiagnosticCount = currentDiagCount;
+        previousDiagnostics = [...parsedDiags];
         appliedPatchesInPrevCycle = false;
 
         // Emergency Breaker 2: Identical failure repeated
@@ -653,12 +1058,97 @@ export class SelfHealingEngine {
         }
       }
 
-      const diagnostics = ErrorDiagnosticsParser.parse(previousErrors);
+      const rawDiagnostics = ErrorDiagnosticsParser.parse(previousErrors);
+      const isDiagAuthorized = (d: DiagnosticError): boolean => {
+        if (!d.file) return false;
+        const norm = normalizeRepoPath(d.file);
+        return (
+          currentChanges.some((c) => normalizeRepoPath(c.path) === norm) ||
+          Boolean(approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm)) ||
+          authorizedRevealedBaselinePaths.has(norm)
+        );
+      };
+      const authDiagnostics = rawDiagnostics.filter(isDiagAuthorized);
+      const unauthDiagnostics = rawDiagnostics.filter((d) => !isDiagAuthorized(d));
+      // Prioritize authorized diagnostics for repair; retain unauthorized diagnostics as causal evidence
+      const diagnostics = [...authDiagnostics, ...unauthDiagnostics];
       const patchesApplied: SurgicalPatchChunk[] = [];
       let totalLinesChanged = 0;
       let totalFileLines = 0;
 
-      if (diagnostics.length > 0) {
+      // ── Deterministic TS6133 Fast Path (Cluster D) ───────────────────────────
+      const ts6133AuthDiag = authDiagnostics.find((d) => d.code === "TS6133");
+      if (ts6133AuthDiag && ts6133AuthDiag.file) {
+        let targetChangeIdx = currentChanges.findIndex(
+          (c) => c.path.replace(/\\/g, "/").endsWith(ts6133AuthDiag.file) || ts6133AuthDiag.file.endsWith(c.path.replace(/\\/g, "/"))
+        );
+
+        if (targetChangeIdx < 0 && localPath && approvedManifest) {
+          const manifestMatch = approvedManifest.files.find(
+            (f) => f.path.replace(/\\/g, "/").endsWith(ts6133AuthDiag.file) || ts6133AuthDiag.file.endsWith(f.path.replace(/\\/g, "/"))
+          );
+          if (manifestMatch) {
+            const abs = path.join(localPath, manifestMatch.path);
+            if (fs.existsSync(abs)) {
+              try {
+                const content = fs.readFileSync(abs, "utf8");
+                currentChanges.push({
+                  path: manifestMatch.path,
+                  content,
+                  action: manifestMatch.action as any,
+                  description: "Hydrated for TS6133 deterministic repair",
+                });
+                targetChangeIdx = currentChanges.length - 1;
+              } catch {}
+            }
+          }
+        }
+
+        if (targetChangeIdx >= 0) {
+          const originalFile = currentChanges[targetChangeIdx];
+          const preTaskSource = preTaskSourceGetter(originalFile.path);
+
+          const deterministicPatch = DeterministicTs6133Repair.tryRepair({
+            filePath: originalFile.path,
+            fileContent: originalFile.content,
+            diagnostic: ts6133AuthDiag,
+            preTaskSource,
+            userMessage: originalMessage,
+          });
+
+          if (deterministicPatch) {
+            const patchResult = applyPatchToFile(originalFile.content, [deterministicPatch]);
+            if (patchResult.success) {
+              currentChanges[targetChangeIdx].content = patchResult.content;
+              const addedLines = deterministicPatch.newText ? deterministicPatch.newText.split("\n").length : 0;
+              const removedLines = deterministicPatch.oldText ? deterministicPatch.oldText.split("\n").length : 0;
+              patchesApplied.push({
+                file: originalFile.path,
+                startLine: ts6133AuthDiag.line,
+                endLine: ts6133AuthDiag.line,
+                targetContent: deterministicPatch.oldText,
+                replacementContent: deterministicPatch.newText,
+                affectedNodeName: `TS6133 Deterministic (${ts6133AuthDiag.symbolName || "binding"})`,
+                linesAdded: addedLines,
+                linesRemoved: removedLines,
+              });
+              patchesAppliedCount++;
+              totalLinesChanged += Math.max(addedLines, removedLines);
+              appliedPatchesInPrevCycle = true;
+              repairApplied = true;
+
+              repairAttemptsHistory.push({
+                attempt,
+                proposalResult: "APPLIED",
+                patchResult: `[DETERMINISTIC_TS6133] Applied deterministic AST repair for ${ts6133AuthDiag.symbolName || "symbol"} in ${originalFile.path}`,
+                validationResult: "PENDING_VERIFICATION",
+              });
+            }
+          }
+        }
+      }
+
+      if (patchesApplied.length === 0 && diagnostics.length > 0) {
         for (const diag of diagnostics.slice(0, 3)) {
           let targetChangeIdx = currentChanges.findIndex(
             (c) => c.path.replace(/\\/g, "/").endsWith(diag.file) || diag.file.endsWith(c.path.replace(/\\/g, "/")),
@@ -744,6 +1234,8 @@ export class SelfHealingEngine {
           originalMessage,
           attempt,
           maxRetries: MAX_TOTAL_REPAIR_CYCLES,
+          alternativeAttemptFeedback,
+          localPath,
         });
 
         const repairCompletion = await openai.chat.completions.create({
@@ -764,7 +1256,7 @@ export class SelfHealingEngine {
             : [];
 
           if (proposals.length > 0) {
-            // Emergency Breaker 4: Proposal fingerprint check
+            // Emergency Breaker 4: Proposal fingerprint check (Part H)
             const proposalFingerprint = proposals
               .map(
                 (p) =>
@@ -785,13 +1277,23 @@ export class SelfHealingEngine {
                 validationResult: "UNRESOLVED",
               });
 
-              if (!SPECIFIC_GATE_ERRORS.has(lastErrorType)) {
-                lastErrorType = "REPEATED_REPAIR_PROPOSAL";
+              console.warn(`[SelfHealingEngine] Repeated repair proposal detected: ${proposalFingerprint}`);
+
+              if (alternativeAttemptsCount < MAX_ALTERNATIVE_ATTEMPTS) {
+                alternativeAttemptsCount++;
+                alternativeRepairAttempt = true;
+                alternativeAttemptFeedback = `The repair proposal (${proposalFingerprint}) was identical to an earlier ineffective proposal. Do NOT repeat the same proposal. Provide an alternative, minimal fix.`;
+                continue;
+              } else {
+                if (!SPECIFIC_GATE_ERRORS.has(lastErrorType)) {
+                  lastErrorType = "REPEATED_REPAIR_PROPOSAL";
+                }
+                previousErrors = `[${lastErrorType}] Stopping repair loop: Model proposed identical repair that was already attempted.`;
+                break;
               }
-              previousErrors = `[${lastErrorType}] Stopping repair loop: Model proposed identical repair that was already attempted.`;
-              break;
             }
             attemptedProposalFingerprints.add(proposalFingerprint);
+            previousProposalFingerprint = proposalFingerprint;
 
             if (isRepositoryMode || approvedManifest) {
               const manifestPrecheck = validateRepairManifestScope(proposals, approvedManifest);
@@ -809,42 +1311,77 @@ export class SelfHealingEngine {
 
               let resolution = resolveRepairProposals(proposals, currentFileContext);
 
-              // Bounded repair correction (max 1 correction attempt)
+              // Bounded repair correction (up to 3 proposals, 1 attempt each)
               if (!resolution.success) {
-                const err = resolution.error;
-                const isEligibleForCorrection =
-                  (err.code === "NO_OP_PATCH_EDIT" ||
-                    err.code === "PATCH_TARGET_NOT_FOUND" ||
-                    err.code === "AMBIGUOUS_PATCH_TARGET") &&
-                  typeof err.proposalIndex === "number" &&
-                  proposals[err.proposalIndex]?.action === "modify";
+                const MAX_CORRECTABLE_REPAIR_PROPOSALS = 3;
+                let repairCorrectionsAttempted = 0;
 
-                if (isEligibleForCorrection) {
-                  const failedProposal = proposals[err.proposalIndex!] as {
-                    path: string;
-                    action: "modify";
-                    edits: any[];
-                    description: string;
-                  };
+                for (let pIdx = 0; pIdx < proposals.length && repairCorrectionsAttempted < MAX_CORRECTABLE_REPAIR_PROPOSALS; pIdx++) {
+                  const p = proposals[pIdx];
+                  if (p.action !== "modify") continue;
 
-                  const correction = await PatchCorrectionEngine.correctPatch({
-                    filePath: failedProposal.path,
-                    currentContent: currentFileContext[failedProposal.path] || "",
-                    userMessage: `Fix compiler build error: ${rootFailure?.stderr || previousErrors}`,
-                    manifestAction: "modify",
-                    failedEdits: failedProposal.edits,
-                    errorCode: err.code === "AMBIGUOUS_PATCH_TARGET" ? "AMBIGUOUS_PATCH_TARGET" : "PATCH_TARGET_NOT_FOUND",
-                    errorMessage: err.message,
-                  });
+                  const normPPath = normalizeRepoPath(p.path);
+                  let originalContent = currentFileContext[p.path];
+                  if (originalContent === undefined) {
+                    for (const [k, v] of Object.entries(currentFileContext)) {
+                      if (normalizeRepoPath(k) === normPPath) {
+                        originalContent = v;
+                        break;
+                      }
+                    }
+                  }
 
-                  if (correction.succeeded && correction.correctedEdits) {
-                    failedProposal.edits = correction.correctedEdits;
-                    const retryRes = resolveRepairProposals(proposals, currentFileContext);
-                    if (retryRes.success) {
-                      resolution = retryRes;
+                  if (originalContent === undefined) continue;
+
+                  if (!p.edits || p.edits.length === 0) {
+                    repairCorrectionsAttempted++;
+                    const correction = await PatchCorrectionEngine.correctPatch({
+                      filePath: p.path,
+                      currentContent: originalContent,
+                      userMessage: `Fix compiler build error: ${rootFailure?.stderr || previousErrors}`,
+                      manifestAction: "modify",
+                      failedEdits: [],
+                      errorCode: "MODIFY_PATCH_REQUIRED",
+                      errorMessage: "MODIFY action requires a non-empty edits[] array.",
+                    });
+
+                    if (correction.succeeded && correction.correctedEdits && correction.correctedEdits.length > 0) {
+                      p.edits = correction.correctedEdits;
+                    }
+                  } else {
+                    const testRes = applyPatchToFile(originalContent, p.edits);
+                    if (!testRes.success) {
+                      const errCode = testRes.error.code;
+                      const eligibleCodes = [
+                        "NO_OP_PATCH_EDIT",
+                        "PATCH_TARGET_NOT_FOUND",
+                        "AMBIGUOUS_PATCH_TARGET",
+                        "MODIFY_PATCH_REQUIRED",
+                        "EMPTY_PATCH_TARGET",
+                        "OVERLAPPING_PATCH_EDITS",
+                        "NO_PATCH_EDITS",
+                      ];
+                      if (eligibleCodes.includes(errCode)) {
+                        repairCorrectionsAttempted++;
+                        const correction = await PatchCorrectionEngine.correctPatch({
+                          filePath: p.path,
+                          currentContent: originalContent,
+                          userMessage: `Fix compiler build error: ${rootFailure?.stderr || previousErrors}`,
+                          manifestAction: "modify",
+                          failedEdits: p.edits,
+                          errorCode: errCode as any,
+                          errorMessage: testRes.error.message,
+                        });
+
+                        if (correction.succeeded && correction.correctedEdits && correction.correctedEdits.length > 0) {
+                          p.edits = correction.correctedEdits;
+                        }
+                      }
                     }
                   }
                 }
+
+                resolution = resolveRepairProposals(proposals, currentFileContext);
               }
 
               if (!resolution.success) {
@@ -885,6 +1422,47 @@ export class SelfHealingEngine {
                   };
                 }
                 continue;
+              }
+
+              // Public Contract Drift Guard (Fix 1, 3, 4, 5)
+              let contractDriftError: string | null = null;
+              for (const change of resolution.changes) {
+                if (change.action !== "modify") continue;
+                const baselineContent = preTaskSourceGetter(change.path);
+                if (!baselineContent) continue;
+
+                const driftResult = PublicContractGuard.validatePublicContract({
+                  filePath: change.path,
+                  baselineContent,
+                  proposedContent: change.content,
+                  userMessage: originalMessage,
+                });
+
+                if (!driftResult.valid) {
+                  contractDriftError = driftResult.message || "Public contract drift detected";
+                  break;
+                }
+              }
+
+              if (contractDriftError) {
+                console.warn(`[SelfHealingEngine] Public contract drift rejected: ${contractDriftError}`);
+                lastErrorType = "PUBLIC_CONTRACT_DRIFT";
+                previousErrors = `[PUBLIC_CONTRACT_DRIFT] ${contractDriftError}`;
+                repairAttemptsHistory.push({
+                  attempt,
+                  proposalResult: "CONTRACT_DRIFT",
+                  patchResult: `[PUBLIC_CONTRACT_DRIFT] ${contractDriftError}`,
+                  validationResult: "UNRESOLVED",
+                });
+
+                if (alternativeAttemptsCount < MAX_ALTERNATIVE_ATTEMPTS) {
+                  alternativeAttemptsCount++;
+                  alternativeRepairAttempt = true;
+                  alternativeAttemptFeedback = contractDriftError;
+                  continue;
+                } else {
+                  break;
+                }
               }
 
               // ExecutionScopeEnforcer on resolved changes

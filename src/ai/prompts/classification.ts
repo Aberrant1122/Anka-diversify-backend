@@ -54,10 +54,13 @@ Output JSON:
   "reasoning": "End-to-end authentication system implementation requiring routes, controllers, and services."
 }
 
-AUTONOMOUS BIAS FOR ACTION (CRITICAL):
-- NEVER set "requiresClarification": true for requests asking to create, build, design, generate, remove, or delete files or features.
-- For all creative/feature building or deletion prompts, set "confidence": 0.95 and "requiresClarification": false.
-- Only set "requiresClarification": true if the request contains contradictory or impossible requirements.
+AUTONOMOUS BIAS FOR ACTION & DESTRUCTIVE SAFETY:
+- For constructive requests (create, build, design, generate, add, fix, update), prioritize action: set "confidence": 0.95 and "requiresClarification": false.
+- For DESTRUCTIVE requests (delete, remove, rm, purge, drop files or folders):
+  - If the target file/folder is explicitly named or clearly specified, proceed with "requiresClarification": false.
+  - If the destructive request is VAGUE or AMBIGUOUS (e.g. "delete the old stuff", "clean everything up", "remove unused files" without specifying what to delete), you MUST set "requiresClarification": true, explain that the target is ambiguous in "reasoning", and provide a specific clarifying "question" and "options".
+- For in-file removal requests (e.g. "remove extra padding", "remove unused import"), classify as BUG_FIX or REFACTOR (MODIFY), NOT DELETE_FILE.
+- Only set "requiresClarification": true if the request contains contradictory/impossible requirements or ambiguous destructive targets.
 
 Respond ONLY with valid JSON matching this schema:
 {

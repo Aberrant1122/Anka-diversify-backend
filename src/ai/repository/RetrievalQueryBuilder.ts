@@ -5,6 +5,7 @@ export interface GroundedSemanticQueryInput {
   discoveredServices?: string[];
   discoveredModels?: string[];
   discoveredRoutes?: string[];
+  baselineDiagnostics?: Array<{ filePath?: string; errorCode?: string; message?: string; symbolName?: string }>;
 }
 
 /**
@@ -27,7 +28,21 @@ export function buildGroundedSemanticQueries(input: GroundedSemanticQueryInput):
 
   const rawQueries: string[] = [message];
 
-  // 1. Target path grounded query
+  // 1. Diagnostic grounded query (when compiler diagnostics exist, prioritize them)
+  if (Array.isArray(input.baselineDiagnostics) && input.baselineDiagnostics.length > 0) {
+    const diagParts: string[] = [];
+    for (const d of input.baselineDiagnostics) {
+      if (d.filePath) diagParts.push(d.filePath.trim());
+      if (d.symbolName) diagParts.push(d.symbolName.trim());
+      if (d.errorCode) diagParts.push(d.errorCode.trim());
+    }
+    const uniqueDiagTerms = Array.from(new Set(diagParts.filter(Boolean))).slice(0, 3);
+    if (uniqueDiagTerms.length > 0) {
+      rawQueries.push(`${message} ${uniqueDiagTerms.join(" ")}`);
+    }
+  }
+
+  // 2. Target path grounded query
   if (typeof input.targetPath === "string") {
     const trimmedPath = input.targetPath.trim().replace(/\s+/g, " ");
     if (trimmedPath) {

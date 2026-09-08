@@ -11,6 +11,7 @@ export type ValidationCheckType =
   | "unused_api"
   | "dead_route"
   | "missing_navigation"
+  | "missing_stylesheet_import"
   | "invalid_prisma"
   | "circular_dependency"
   | "missing_provider";
@@ -34,6 +35,7 @@ export interface StaticValidationResult {
     totalRoutesAnalyzed: number;
     analysisTimeMs: number;
   };
+  dependencyGraph?: Map<string, string[]>;
 }
 
 export interface SnapshotFile {
@@ -76,7 +78,7 @@ export class StaticValidationEngine {
    */
   static validate(
     snapshotFiles: SnapshotFile[],
-    modifiedFiles?: Array<{ path: string; content: string }>,
+    modifiedFiles?: Array<{ path: string; content?: string; action?: string; isDeleted?: boolean }>,
   ): StaticValidationResult {
     const startTime = performance.now();
     const issues: StaticValidationIssue[] = [];
@@ -84,13 +86,31 @@ export class StaticValidationEngine {
     // Merge snapshot and modified files
     const fileMap = new Map<string, string>();
     for (const f of snapshotFiles) {
-      if (f.path && f.content !== undefined) {
+      if (f.path && typeof f.content === "string") {
         fileMap.set(f.path.replace(/\\/g, "/"), f.content);
       }
     }
     if (modifiedFiles) {
       for (const mf of modifiedFiles) {
-        fileMap.set(mf.path.replace(/\\/g, "/"), mf.content);
+        if (!mf || !mf.path) continue;
+        const normPath = mf.path.replace(/\\/g, "/");
+        const isDelete = mf.action === "delete" || mf.isDeleted === true;
+        if (isDelete) {
+          fileMap.delete(normPath);
+        } else {
+          if (typeof mf.content === "string") {
+            fileMap.set(normPath, mf.content);
+          } else {
+            issues.push({
+              checkId: "broken_import",
+              severity: "FAIL",
+              file: normPath,
+              line: 1,
+              reason: `File change for '${normPath}' has action '${mf.action || "modify"}' but missing required string content`,
+              suggestedFix: `Provide valid string content for file '${normPath}' or mark action as 'delete'`,
+            });
+          }
+        }
       }
     }
 
@@ -122,6 +142,15 @@ export class StaticValidationEngine {
     // 7. Check: Invalid Prisma Usage
     StaticValidationEngine.checkPrismaUsage(asts, fileMap, issues);
 
+    // 8. Check: Created/Modified Stylesheet Integration (Task-Delta Aware)
+    StaticValidationEngine.checkStylesheetIntegration(modifiedFiles, asts, fileMap, issues);
+
+    const dependencyGraph = new Map<string, string[]>();
+    for (const ast of asts) {
+      const deps = ast.imports.map((i) => i.resolvedPath).filter(Boolean) as string[];
+      dependencyGraph.set(ast.path, deps);
+    }
+
     const endTime = performance.now();
     const hasFailures = issues.some((i) => i.severity === "FAIL");
     const hasWarnings = issues.some((i) => i.severity === "WARNING");
@@ -142,11 +171,62 @@ export class StaticValidationEngine {
         totalRoutesAnalyzed: asts.filter((a) => a.path.includes("app/") || a.path.includes("pages/")).length,
         analysisTimeMs: endTime - startTime,
       },
+      dependencyGraph,
     };
   }
 
+  /**
+   * Deterministically computes all files reachable from a set of root entry points
+   * using the parsed repository dependency graph.
+   * Cycle-safe, transitive, and slash/case normalized.
+   */
+  public static computeReachableFiles(
+    roots: string[],
+    dependencyGraph: Map<string, string[]>,
+  ): Set<string> {
+    const reachable = new Set<string>();
+    const visited = new Set<string>();
+    const queue: string[] = [];
+
+    // Map for case-insensitive lookup in dependencyGraph
+    const lowerGraph = new Map<string, string[]>();
+    for (const [k, v] of dependencyGraph.entries()) {
+      lowerGraph.set(k.replace(/\\/g, "/").toLowerCase(), v.map((p) => p.replace(/\\/g, "/")));
+    }
+
+    for (const root of roots) {
+      const norm = root.replace(/\\/g, "/");
+      const lower = norm.toLowerCase();
+      if (!visited.has(lower)) {
+        visited.add(lower);
+        reachable.add(norm);
+        reachable.add(lower);
+        queue.push(norm);
+      }
+    }
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const currentLower = current.replace(/\\/g, "/").toLowerCase();
+      const neighbors = lowerGraph.get(currentLower) || [];
+
+      for (const neighbor of neighbors) {
+        const normNeighbor = neighbor.replace(/\\/g, "/");
+        const lowerNeighbor = normNeighbor.toLowerCase();
+        if (!visited.has(lowerNeighbor)) {
+          visited.add(lowerNeighbor);
+          reachable.add(normNeighbor);
+          reachable.add(lowerNeighbor);
+          queue.push(normNeighbor);
+        }
+      }
+    }
+
+    return reachable;
+  }
+
   // ── File AST Parser ─────────────────────────────────────────────────────────
-  private static parseFile(p: string, content: string, fileMap: Map<string, string>): FileAST {
+  public static parseFile(p: string, content: string, fileMap: Map<string, string>): FileAST {
     const lines = content.split("\n");
     const imports: FileAST["imports"] = [];
     const exports: FileAST["exports"] = [];
@@ -172,11 +252,17 @@ export class StaticValidationEngine {
       }
 
       for (const exp of tsSymbols.exports) {
+        const mappedType: FileAST["exports"][0]["type"] =
+          exp.type === "variable"
+            ? "const"
+            : exp.type === "unknown"
+            ? "const"
+            : (exp.type as FileAST["exports"][0]["type"]) || "const";
         exports.push({
           line: exp.line,
           name: exp.name,
           kind: exp.isDefault ? "default" : "named",
-          type: exp.type as FileAST["exports"][0]["type"],
+          type: mappedType,
         });
       }
     } else {
@@ -206,11 +292,15 @@ export class StaticValidationEngine {
         });
       }
 
-      const exportRegex = /export\s+(default\s+)?(interface|class|function|type|const)\s+([A-Za-z0-9_]+)/g;
+      const exportRegex = /export\s+(default\s+)?(interface|class|function|type|const|let|var)\s+([A-Za-z0-9_]+)/g;
       while ((match = exportRegex.exec(content)) !== null) {
         const line = content.slice(0, match.index).split("\n").length;
         const isDefault = Boolean(match[1]);
-        const type = match[2] as FileAST["exports"][0]["type"];
+        const rawType = match[2];
+        const type: FileAST["exports"][0]["type"] =
+          rawType === "let" || rawType === "var"
+            ? "const"
+            : (rawType as FileAST["exports"][0]["type"]);
         const name = match[3];
 
         exports.push({
@@ -219,6 +309,44 @@ export class StaticValidationEngine {
           kind: isDefault ? "default" : "named",
           type,
         });
+      }
+
+      const defaultExportRegex = /export\s+default\s+([A-Za-z0-9_]+);?/g;
+      while ((match = defaultExportRegex.exec(content)) !== null) {
+        if (!["interface", "class", "function", "type", "const", "let", "var"].includes(match[1])) {
+          const line = content.slice(0, match.index).split("\n").length;
+          exports.push({
+            line,
+            name: "default",
+            kind: "default",
+            type: "const",
+          });
+        }
+      }
+
+      const clauseExportRegex = /export\s*\{([^}]+)\}/g;
+      while ((match = clauseExportRegex.exec(content)) !== null) {
+        const line = content.slice(0, match.index).split("\n").length;
+        const clause = match[1];
+        for (const item of clause.split(",")) {
+          const trimmed = item.trim();
+          if (!trimmed) continue;
+          if (trimmed.includes(" as ")) {
+            const parts = trimmed.split(/\s+as\s+/);
+            const alias = parts[1]?.trim();
+            if (alias === "default") {
+              exports.push({ line, name: "default", kind: "default", type: "const" });
+            } else if (alias) {
+              exports.push({ line, name: alias, kind: "named", type: "const" });
+            }
+          } else {
+            if (trimmed === "default") {
+              exports.push({ line, name: "default", kind: "default", type: "const" });
+            } else {
+              exports.push({ line, name: trimmed, kind: "named", type: "const" });
+            }
+          }
+        }
       }
     }
 
@@ -245,6 +373,28 @@ export class StaticValidationEngine {
       }
     }
 
+    // Extract barrel re-exports: export { ... } from "..." or export * from "..."
+    const exportFromRegex = /export\s+(?:(?:\*|\{[^}]+\}))\s+from\s+["']([^"']+)["']/g;
+    let expFromMatch: RegExpExecArray | null;
+    while ((expFromMatch = exportFromRegex.exec(content)) !== null) {
+      const line = content.slice(0, expFromMatch.index).split("\n").length;
+      const rawPath = expFromMatch[1];
+      const isLocal = rawPath.startsWith(".") || rawPath.startsWith("@/") || rawPath.startsWith("~/");
+      let resolvedPath: string | null = null;
+      if (isLocal) {
+        resolvedPath = StaticValidationEngine.resolveImportPath(p, rawPath, fileMap);
+      }
+      if (!imports.some((i) => i.rawPath === rawPath)) {
+        imports.push({
+          line,
+          rawPath,
+          resolvedPath,
+          isLocal,
+          namedImports: [],
+        });
+      }
+    }
+
     return {
       path: p,
       normalizedPath: p.replace(/\\/g, "/"),
@@ -262,18 +412,51 @@ export class StaticValidationEngine {
     rawImport: string,
     fileMap: Map<string, string>,
   ): string | null {
-    let target = "";
+    const extensions = [
+      "",
+      ".ts",
+      ".tsx",
+      ".js",
+      ".jsx",
+      "/index.ts",
+      "/index.tsx",
+      "/index.js",
+      ".css",
+      ".scss",
+      ".sass",
+      ".less",
+      ".module.css",
+      ".module.scss",
+    ];
+
+    const candidates: string[] = [];
     if (rawImport.startsWith("@/")) {
-      target = rawImport.replace("@/", "src/");
+      candidates.push(rawImport.replace("@/", "src/"));
+      candidates.push(rawImport.replace("@/", "app/"));
+      candidates.push(rawImport.replace("@/", ""));
+    } else if (rawImport.startsWith("~/")) {
+      candidates.push(rawImport.replace("~/", "src/"));
+      candidates.push(rawImport.replace("~/", ""));
     } else {
       const dir = path.dirname(currentFile);
-      target = path.normalize(path.join(dir, rawImport)).replace(/\\/g, "/");
+      candidates.push(path.normalize(path.join(dir, rawImport)).replace(/\\/g, "/"));
     }
 
-    const extensions = ["", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"];
-    for (const ext of extensions) {
-      const candidate = target + ext;
-      if (fileMap.has(candidate)) return candidate;
+    for (const target of candidates) {
+      for (const ext of extensions) {
+        const candidate = target + ext;
+        if (fileMap.has(candidate)) return candidate;
+      }
+    }
+
+    // Case-insensitive fallback for cross-platform robustness
+    for (const target of candidates) {
+      for (const ext of extensions) {
+        const candidateLower = (target + ext).toLowerCase();
+        for (const key of fileMap.keys()) {
+          if (key.toLowerCase() === candidateLower) return key;
+        }
+      }
     }
 
     return null;
@@ -537,6 +720,82 @@ export class StaticValidationEngine {
             suggestedFix: `Add "model ${modelProp.charAt(0).toUpperCase() + modelProp.slice(1)} { ... }" to schema.prisma or fix call`,
           });
         }
+      }
+    }
+  }
+
+  // ── Check 8: Created/Modified Stylesheet Integration (Task-Delta Aware) ────
+  private static checkStylesheetIntegration(
+    modifiedFiles: Array<{ path: string; content?: string; action?: string; isDeleted?: boolean }> | undefined,
+    asts: FileAST[],
+    fileMap: Map<string, string>,
+    issues: StaticValidationIssue[],
+  ): void {
+    if (!modifiedFiles || !modifiedFiles.length) return;
+
+    // Filter strictly to created/modified stylesheets in the current task delta
+    const createdStylesheets = modifiedFiles.filter((mf) => {
+      if (!mf || !mf.path) return false;
+      const isDelete = mf.action === "delete" || mf.isDeleted === true;
+      if (isDelete) return false;
+      const norm = mf.path.replace(/\\/g, "/").toLowerCase();
+      return (
+        norm.endsWith(".css") ||
+        norm.endsWith(".scss") ||
+        norm.endsWith(".sass") ||
+        norm.endsWith(".less")
+      );
+    });
+
+    if (!createdStylesheets.length) return;
+
+    // Collect all resolved import paths and raw import strings across all ASTs
+    const allImportedPaths = new Set<string>();
+    const allRawImports = new Set<string>();
+
+    for (const ast of asts) {
+      for (const imp of ast.imports) {
+        if (imp.resolvedPath) {
+          allImportedPaths.add(imp.resolvedPath.replace(/\\/g, "/").toLowerCase());
+        }
+        if (imp.rawPath) {
+          allRawImports.add(imp.rawPath.replace(/\\/g, "/").toLowerCase());
+        }
+      }
+
+      // Regex scan for side-effect imports or CSS imports in TS/TSX/JS/CSS
+      const content = ast.content;
+      const cssImports = content.matchAll(/(?:import\s+(?:[^"';]+\s+from\s+)?["']([^"']+\.(?:css|scss|sass|less))["']|@import\s+["']([^"']+)["'])/gi);
+      for (const ci of cssImports) {
+        const raw = (ci[1] || ci[2] || "").replace(/\\/g, "/").toLowerCase();
+        if (raw) allRawImports.add(raw);
+      }
+    }
+
+    for (const sf of createdStylesheets) {
+      const normPath = sf.path.replace(/\\/g, "/").toLowerCase();
+      const filename = path.basename(normPath);
+
+      const isDirectlyResolved = allImportedPaths.has(normPath);
+      const isRawMatched = Array.from(allRawImports).some((raw) => {
+        return (
+          normPath.endsWith(raw.replace(/^\.\//, "")) ||
+          raw.endsWith(normPath) ||
+          raw.endsWith(filename) ||
+          raw === filename ||
+          raw === normPath
+        );
+      });
+
+      if (!isDirectlyResolved && !isRawMatched) {
+        issues.push({
+          checkId: "missing_stylesheet_import",
+          severity: "FAIL",
+          file: sf.path,
+          line: 1,
+          reason: `Created stylesheet '${sf.path}' is not imported by any component, layout, or page in the active render tree`,
+          suggestedFix: `Import '${sf.path}' in the component that uses it (e.g. import './${filename}') or in 'app/layout.tsx'`,
+        });
       }
     }
   }

@@ -5,6 +5,7 @@ import { FileManifest } from "../../types";
 import {
   GeneratedChangeProposal,
   resolveGenerationProposals,
+  validateGenerationProposals,
   ResolutionResult,
 } from "./GenerationProposalResolver";
 import { PatchCorrectionEngine, PatchCorrectionTelemetry } from "./PatchCorrectionEngine";
@@ -19,7 +20,12 @@ import { STANDALONE_HTML_CSS_JS_PROMPT } from "../prompts/standalone";
 import { buildContractGuardrailSection } from "../prompts/validation";
 import { SecurityPolicy } from "../security/SecurityPolicy";
 import { ImportValidator } from "../validation/ImportValidator";
-import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
+import { normalizeRepoPath } from "../repository/SemanticContextResolver";
+import { ComponentContractGrounder } from "../contracts/ComponentContractGrounder";
+import {
+  detectRepositoryArchitecture,
+  buildRepositoryUISystemPromptSection,
+} from "../planning/RepositoryArchitectureDetector";
 
 /**
  * Builds a deterministic, concise prompt section instructing the LLM to stay strictly within the approved FileManifest.
@@ -179,9 +185,32 @@ Respond ONLY with valid JSON:
     const isStandaloneWeb = contract?.pipeline === "STANDALONE" || contract?.environment === "HTML_CSS_JS";
     const isDeleteTask = contract?.taskType === "DELETE_FILE" || contract?.taskType === "DELETE_FOLDER";
 
+    const manifestFileMap = new Map<
+      string,
+      { path: string; action: "create" | "modify" | "delete"; description?: string }
+    >();
+    if (approvedManifest && Array.isArray(approvedManifest.files)) {
+      for (const f of approvedManifest.files) {
+        if (f && f.path) {
+          manifestFileMap.set(normalizeRepoPath(f.path), {
+            path: f.path,
+            action: f.action || "modify",
+            description: f.description,
+          });
+        }
+      }
+    }
+
+    const manifestDeleteFiles = approvedManifest && Array.isArray(approvedManifest.files)
+      ? approvedManifest.files.filter((f) => f.action === "delete").map((f) => f.path)
+      : [];
+    const manifestHasCreateOrModify = approvedManifest && Array.isArray(approvedManifest.files)
+      ? approvedManifest.files.some((f) => f.action === "create" || f.action === "modify")
+      : false;
+
     let roadmap: RoadmapStep[] = RoadmapGenerator.createDefaultRoadmap(contract, message);
 
-    if (!isDeleteTask && !isStandaloneWeb) {
+    if ((!isDeleteTask || manifestHasCreateOrModify) && !isStandaloneWeb) {
       try {
         const openai = getOpenAI();
         const roadmapCompletion = await openai.chat.completions.create({
@@ -215,22 +244,6 @@ Respond ONLY with valid JSON:
       ([p, c]) => `=== SKELETON DEPENDENCY: ${p} ===\n${c}`
     );
 
-    const contextContent = [...modifySourceBlocks, ...supportingBlocks, ...skeletonBlocks].join("\n\n");
-
-    let multiFileInstruction = "";
-    if (isDeleteTask) {
-      multiFileInstruction = `\n\nDELETION MANDATE: This request asks to delete target path(s): ${contract?.targetPaths?.join(", ") || "(target files)"}. Output a 'changes' array containing an entry for each path to delete with "action": "delete", "isDeleted": true, "content": "", and "description": "Delete path".`;
-    } else if (isStandaloneWeb) {
-      multiFileInstruction = "\n\nSTANDALONE MULTI-FILE MANDATE: You MUST output all 3 files in your 'changes' array: 'index.html', 'style.css', and 'script.js'. Output ALL 3 files so the application works standalone.";
-    } else {
-      const narrowScopeTypes = new Set(["DELETE_FOLDER", "DELETE_FILE", "CONFIG_CHANGE", "DOCS"]);
-      const isNarrowScope = contract && narrowScopeTypes.has(contract.taskType);
-      const isAppOrDashboardRequest = !isNarrowScope && /dashboard|game|app|landing|page|feature|component|system/i.test(message);
-      if (isAppOrDashboardRequest) {
-        multiFileInstruction = "\n\nMULTI-FILE ARCHITECTURE MANDATE: Output a complete multi-file blueprint containing ALL necessary files.";
-      }
-    }
-
     const effectiveResolutionSourceMap: Record<string, string> =
       mergedSourceMap ||
       (authoritativeModifySources
@@ -238,6 +251,44 @@ Respond ONLY with valid JSON:
         : null) ||
       optimizedContext?.fileContext ||
       {};
+
+    const resolvedComponentContracts = ComponentContractGrounder.resolveComponentContractsForGeneration({
+      authorizedModifySources: authoritativeModifySources,
+      approvedManifest,
+      contract,
+      effectiveResolutionSourceMap,
+      userMessage: message,
+    });
+
+    const componentContractBlocks = resolvedComponentContracts.map((c) => c.contractText);
+
+    const contextContent = [
+      ...modifySourceBlocks,
+      ...supportingBlocks,
+      ...skeletonBlocks,
+      ...componentContractBlocks,
+    ].join("\n\n");
+
+    let multiFileInstruction = "";
+    if (approvedManifest && Array.isArray(approvedManifest.files) && manifestDeleteFiles.length > 0) {
+      multiFileInstruction = `\n\nDELETION MANDATE: This request asks to delete specific approved file(s): ${manifestDeleteFiles.join(", ")}. Output a 'changes' array containing an entry for each path to delete with "action": "delete", "isDeleted": true, "content": "", and "description": "Delete path".`;
+    } else if (!approvedManifest && isDeleteTask) {
+      multiFileInstruction = `\n\nDELETION MANDATE: This request asks to delete target path(s): ${contract?.targetPaths?.join(", ") || "(target files)"}. Output a 'changes' array containing an entry for each path to delete with "action": "delete", "isDeleted": true, "content": "", and "description": "Delete path".`;
+    } else if (isStandaloneWeb) {
+      multiFileInstruction = "\n\nSTANDALONE MULTI-FILE MANDATE: You MUST output all 3 files in your 'changes' array: 'index.html', 'style.css', and 'script.js'. Output ALL 3 files so the application works standalone.";
+    } else {
+      const narrowScopeTypes = new Set(["DELETE_FOLDER", "DELETE_FILE", "CONFIG_CHANGE", "DOCS"]);
+      const isNarrowScope = contract && narrowScopeTypes.has(contract.taskType);
+      const isMultiFileRequest = (!isNarrowScope || manifestHasCreateOrModify) && (
+        (approvedManifest && approvedManifest.files.length >= 2) ||
+        contract?.estimatedComplexity === "LARGE" ||
+        contract?.estimatedComplexity === "COMPLEX" ||
+        (contract?.maxFiles !== undefined && contract.maxFiles >= 2)
+      );
+      if (isMultiFileRequest) {
+        multiFileInstruction = "\n\nMULTI-FILE ARCHITECTURE MANDATE: Output a complete multi-file blueprint containing ALL necessary files.";
+      }
+    }
 
     const isAppRouter =
       Object.keys(effectiveResolutionSourceMap).some((p) => p.startsWith("app/") || p.includes("/app/")) ||
@@ -249,11 +300,17 @@ Respond ONLY with valid JSON:
       effectiveResolutionSourceMap["package.json"] ||
       Object.entries(effectiveResolutionSourceMap).find(([p]) => p.endsWith("package.json"))?.[1];
 
-    if (pkgJsonRaw) {
-      const arch = detectRepositoryArchitecture(Object.keys(effectiveResolutionSourceMap), pkgJsonRaw);
-      installedPackages = arch.installedPackages;
-      hasTailwind = arch.hasTailwind;
-    }
+    const arch = detectRepositoryArchitecture(Object.keys(effectiveResolutionSourceMap), pkgJsonRaw);
+    installedPackages = arch.installedPackages;
+    hasTailwind = arch.hasTailwind;
+
+    const isUI = arch.existingUIComponents.length > 0 || (approvedManifest?.files && approvedManifest.files.some((f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f.path)));
+    const uiSystemSection = isUI
+      ? `\n\n${buildRepositoryUISystemPromptSection(arch, {
+          isComprehensiveUI: (approvedManifest?.files?.length || 0) >= 3,
+          isSmallComponent: (approvedManifest?.files?.length || 0) <= 1,
+        })}`
+      : "";
 
     const stylingSection = !hasTailwind && !isStandaloneWeb
       ? `\n\n══════════════════════════════════════════════════════════
@@ -261,8 +318,8 @@ CSS & STYLING ARCHITECTURE RULES
 ══════════════════════════════════════════════════════════
 1. Tailwind CSS is NOT installed in this repository.
 2. Do NOT write Tailwind utility classes as raw CSS selectors (e.g. NEVER write '.dark:bg-gray-900', '.text-sm', or '.flex' inside .css files).
-3. In stylesheets (.css / .module.css / global.css), use standard, valid CSS class names (e.g. .calculator-container, .display-screen, .action-btn).
-4. For dark mode, use valid CSS selectors like '.dark .calculator-container' or '@media (prefers-color-scheme: dark)'.
+3. In stylesheets (.css / .module.css / global.css), use standard, valid CSS class names matching existing repository conventions.
+4. For dark mode, use valid CSS selectors like '@media (prefers-color-scheme: dark)' or theme class selectors.
 ══════════════════════════════════════════════════════════`
       : "";
 
@@ -294,9 +351,15 @@ at line 1 before any imports.
 
     const manifestSection = buildApprovedFilePlanSection(approvedManifest);
     const contractGuardrail = contract ? buildContractGuardrailSection(contract) : "";
+    const componentContractInstruction = `\n\n══════════════════════════════════════════════════════════
+EXISTING LOCAL COMPONENT PROP CONTRACT RULES
+══════════════════════════════════════════════════════════
+When using an existing local component, conform to its authoritative exported prop/interface contract. Do not invent props that are not present in that contract.
+══════════════════════════════════════════════════════════`;
+
     const effectiveCodingPrompt = isStandaloneWeb
       ? `${STANDALONE_HTML_CSS_JS_PROMPT}${contractGuardrail}${manifestSection}`
-      : `${systemPrompt}\n\n${CODING_AGENT_PROMPT}\n\n${LAYER_CONSTRAINT_PROMPT}${packagesSection}${stylingSection}${appRouterSection}${contractGuardrail}${manifestSection}`;
+      : `${systemPrompt}\n\n${CODING_AGENT_PROMPT}\n\n${LAYER_CONSTRAINT_PROMPT}${packagesSection}${stylingSection}${appRouterSection}${uiSystemSection}${contractGuardrail}${manifestSection}${componentContractInstruction}`;
 
     const hasManifest = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
     const jsonFormatReminder = hasManifest
@@ -320,17 +383,20 @@ at line 1 before any imports.
     const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
     const rawChanges: any[] = Array.isArray(parsed.changes) ? parsed.changes : [];
     const explanation = parsed.explanation || "Agent generated code diffs.";
-    const commitMessage = parsed.commitMessage || `feat(${intentResult.intent.toLowerCase()}): implementation updates`;
+    const commitMessage =
+      parsed.commitMessage ||
+      `feat(${(intentResult?.intent || "build").toLowerCase()}): implementation updates`;
 
     // ── Resolve raw LLM proposals into AgentFileChange[] ──
     const hasManifestContext = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
+    const shouldUseStructuredResolution = hasManifestContext && !isStandaloneWeb && (manifestHasCreateOrModify || !isDeleteTask);
 
     let changes: AgentFileChange[];
     let expectedSourceHashes: Record<string, string> | undefined;
 
-    if (hasManifestContext && !isDeleteTask && !isStandaloneWeb) {
+    if (shouldUseStructuredResolution) {
       // Structured patch path: parse as GeneratedChangeProposal[]
-      const proposals: GeneratedChangeProposal[] = rawChanges.map((raw: any) => {
+      const initialProposals: GeneratedChangeProposal[] = rawChanges.map((raw: any) => {
         const action = (raw.action || "modify").toLowerCase();
         if (action === "create") {
           return {
@@ -358,7 +424,78 @@ at line 1 before any imports.
         }
       });
 
-      let resolution: ResolutionResult = resolveGenerationProposals(
+      // ─── Deterministic No-Op Patch Edit Normalization ───────────────────
+      const primaryTargetPaths = new Set(
+        (contract?.expectedFiles && contract.expectedFiles.length > 0
+          ? contract.expectedFiles
+          : contract?.targetPaths || []
+        )
+          .filter((p) => p && !p.includes("project-wide") && !p.includes("*"))
+          .map((p) => p.replace(/\\/g, "/").replace(/^\.\//, ""))
+      );
+
+      const primaryAuthoritativeFile = intentResult?.targetPath
+        ? intentResult.targetPath.replace(/\\/g, "/").replace(/^\.\//, "")
+        : Array.from(primaryTargetPaths)[0];
+
+      const normalizedProposals: GeneratedChangeProposal[] = [];
+
+      for (const proposal of initialProposals) {
+        if (proposal.action !== "modify") {
+          normalizedProposals.push(proposal);
+          continue;
+        }
+
+        const rawEdits = Array.isArray(proposal.edits) ? proposal.edits : [];
+        const effectiveEdits = rawEdits.filter((edit: any) => {
+          if (!edit || typeof edit !== "object") return false;
+          const isIdentical =
+            typeof edit.oldText === "string" &&
+            typeof edit.newText === "string" &&
+            edit.oldText === edit.newText;
+          return !isIdentical;
+        });
+
+        const normProposalPath = proposal.path.replace(/\\/g, "/").replace(/^\.\//, "");
+        const isAuthoritativeTarget =
+          normProposalPath === primaryAuthoritativeFile ||
+          (primaryTargetPaths.size === 1 && primaryTargetPaths.has(normProposalPath));
+
+        if (rawEdits.length > 0 && effectiveEdits.length === 0) {
+          if (!isAuthoritativeTarget && initialProposals.length > 1) {
+            console.log(
+              `[CodeGenerator] Supporting target "${proposal.path}" contained only no-op edit(s) and required no modification. Pruned from effective changes.`
+            );
+            continue;
+          } else {
+            console.warn(
+              `[CodeGenerator] Authoritative target "${proposal.path}" generated only no-op edit(s). Retaining proposal for bounded patch correction.`
+            );
+            normalizedProposals.push(proposal);
+          }
+        } else {
+          if (rawEdits.length > effectiveEdits.length) {
+            console.log(
+              `[CodeGenerator] Pruned ${rawEdits.length - effectiveEdits.length} no-op edit(s) from "${proposal.path}". Retained ${effectiveEdits.length} effective edit(s).`
+            );
+          }
+          normalizedProposals.push({
+            ...proposal,
+            edits: effectiveEdits,
+          });
+        }
+      }
+
+      if (normalizedProposals.length === 0) {
+        throw new Error(
+          `[PATCH_RESOLUTION_FAILED] NO_EFFECTIVE_CHANGE: All generated file modifications were no-op edits. A modify task must produce at least one effective change.`
+        );
+      }
+
+      const proposals = [...normalizedProposals];
+
+      // PART A: Structurally validate ALL proposals before application
+      const malformedProposals = validateGenerationProposals(
         proposals,
         effectiveResolutionSourceMap,
       );
@@ -369,90 +506,94 @@ at line 1 before any imports.
         patchCorrectionAttempts: 0,
       };
 
-      if (!resolution.success) {
-        const err = resolution.error;
-        const isEligibleForCorrection =
-          (err.code === "PATCH_TARGET_NOT_FOUND" || err.code === "AMBIGUOUS_PATCH_TARGET") &&
-          typeof err.proposalIndex === "number" &&
-          proposals[err.proposalIndex]?.action === "modify";
+      if (malformedProposals.length > 0) {
+        // PART B: Bounded Multi-Proposal Correction (Cap check)
+        const MAX_CORRECTABLE_PROPOSALS_PER_GENERATION = 3;
+        if (malformedProposals.length > MAX_CORRECTABLE_PROPOSALS_PER_GENERATION) {
+          throw new Error(
+            `[PATCH_RESOLUTION_FAILED] Bounded correction cap exceeded: ${malformedProposals.length} malformed proposals detected (maximum allowed: ${MAX_CORRECTABLE_PROPOSALS_PER_GENERATION}). Failing closed.`
+          );
+        }
 
-        if (isEligibleForCorrection) {
-          const failedProposal = proposals[err.proposalIndex] as {
-            path: string;
-            action: "modify";
-            edits: any[];
-            description: string;
-          };
+        patchTelemetry.patchCorrectionAttempted = true;
+        let anyFailed = false;
 
-          const normalizedPath = failedProposal.path.replace(/\\/g, "/");
-          let originalContent: string | undefined = effectiveResolutionSourceMap[normalizedPath];
+        // PART C: Correct ONLY malformed proposals (each gets at most 1 attempt)
+        for (const malformed of malformedProposals) {
+          const proposalIdx = malformed.proposalIndex;
+          const targetProposal = proposals[proposalIdx];
+          if (!targetProposal || targetProposal.action !== "modify") {
+            anyFailed = true;
+            continue;
+          }
 
+          const normPath = targetProposal.path.replace(/\\/g, "/");
+          let originalContent = effectiveResolutionSourceMap[normPath];
           if (originalContent === undefined) {
-            for (const [cp, cc] of Object.entries(effectiveResolutionSourceMap)) {
-              if (cp.replace(/\\/g, "/") === normalizedPath) {
-                originalContent = typeof cc === "string" ? cc : String(cc || "");
+            for (const [k, v] of Object.entries(effectiveResolutionSourceMap)) {
+              if (k.replace(/\\/g, "/").toLowerCase() === normPath.toLowerCase()) {
+                originalContent = v;
                 break;
               }
             }
           }
 
-          if (originalContent !== undefined) {
-            patchTelemetry.patchCorrectionAttempted = true;
-            patchTelemetry.patchCorrectionAttempts = 1;
-            patchTelemetry.failedFilePath = failedProposal.path;
-            patchTelemetry.errorCode = err.code;
+          if (originalContent === undefined) {
+            anyFailed = true;
+            continue;
+          }
 
+          patchTelemetry.patchCorrectionAttempts++;
+          patchTelemetry.failedFilePath = targetProposal.path;
+          patchTelemetry.errorCode = malformed.code;
+
+          console.log(
+            `[CodeGenerator] Proposal ${proposalIdx} ("${targetProposal.path}") failed structural validation with [${malformed.code}]. Triggering bounded exact patch correction (Attempt 1/1)...`
+          );
+
+          const correction = await PatchCorrectionEngine.correctPatch({
+            filePath: targetProposal.path,
+            currentContent: originalContent,
+            userMessage: message,
+            manifestAction: "modify",
+            failedEdits: malformed.failedEdits || (targetProposal as any).edits || [],
+            errorCode: malformed.code as any,
+            errorMessage: malformed.message,
+          });
+
+          if (correction.succeeded && correction.correctedEdits && correction.correctedEdits.length > 0) {
             console.log(
-              `[CodeGenerator] Patch resolution failed with [${err.code}] on "${failedProposal.path}". Triggering bounded exact patch correction (Attempt 1/1)...`
+              `[CodeGenerator] Bounded exact patch correction succeeded for "${targetProposal.path}" with ${correction.correctedEdits.length} edit(s).`
             );
-
-            const correction = await PatchCorrectionEngine.correctPatch({
-              filePath: failedProposal.path,
-              currentContent: originalContent,
-              userMessage: message,
-              manifestAction: "modify",
-              failedEdits: failedProposal.edits,
-              errorCode: err.code as "PATCH_TARGET_NOT_FOUND" | "AMBIGUOUS_PATCH_TARGET",
-              errorMessage: err.message,
-            });
-
-            if (correction.succeeded && correction.correctedEdits && correction.correctedEdits.length > 0) {
-              patchTelemetry.patchCorrectionSucceeded = true;
-              console.log(
-                `[CodeGenerator] Bounded exact patch correction succeeded for "${failedProposal.path}" with ${correction.correctedEdits.length} edit(s). Re-verifying exact resolution...`
-              );
-
-              const correctedProposals = proposals.map((p, idx) => {
-                if (idx === err.proposalIndex) {
-                  return {
-                    ...p,
-                    edits: correction.correctedEdits!,
-                  };
-                }
-                return p;
-              });
-
-              resolution = resolveGenerationProposals(
-                correctedProposals,
-                effectiveResolutionSourceMap,
-              );
-            } else {
-              console.warn(
-                `[CodeGenerator] Bounded exact patch correction failed for "${failedProposal.path}": ${correction.error || "Unknown error"}`
-              );
-            }
+            proposals[proposalIdx] = {
+              ...targetProposal,
+              edits: correction.correctedEdits,
+            };
+          } else {
+            console.warn(
+              `[CodeGenerator] Bounded exact patch correction failed for "${targetProposal.path}": ${correction.error || "Unknown error"}`
+            );
+            anyFailed = true;
           }
         }
 
-        if (!resolution.success) {
-          throw new Error(
-            `[PATCH_RESOLUTION_FAILED] ${resolution.error.code}: ${resolution.error.message}${
-              patchTelemetry.patchCorrectionAttempted
-                ? ` (Bounded correction attempt 1/1 failed)`
-                : ""
-            }`,
-          );
-        }
+        patchTelemetry.patchCorrectionSucceeded = !anyFailed;
+      }
+
+      // Re-run deterministic proposal resolution across the complete set
+      let resolution: ResolutionResult = resolveGenerationProposals(
+        proposals,
+        effectiveResolutionSourceMap,
+      );
+
+      if (!resolution.success) {
+        throw new Error(
+          `[PATCH_RESOLUTION_FAILED] ${resolution.error.code}: ${resolution.error.message}${
+            patchTelemetry.patchCorrectionAttempted
+              ? ` (Bounded correction attempt failed)`
+              : ""
+          }`
+        );
       }
 
       changes = resolution.changes;
@@ -462,7 +603,31 @@ at line 1 before any imports.
       changes = rawChanges as AgentFileChange[];
     }
 
-    if (isDeleteTask && contract?.targetPaths) {
+    if (approvedManifest && Array.isArray(approvedManifest.files)) {
+      const existingPathsInChanges = new Set(changes.map((c) => normalizeRepoPath(c.path)));
+      for (const mf of approvedManifest.files) {
+        const norm = normalizeRepoPath(mf.path);
+        if (mf.action === "delete" && !existingPathsInChanges.has(norm)) {
+          changes.push({
+            path: mf.path,
+            content: "",
+            description: mf.description || `Delete ${mf.path}`,
+            action: "delete",
+            isDeleted: true,
+          });
+        }
+      }
+      for (const change of changes) {
+        const decl = manifestFileMap.get(normalizeRepoPath(change.path));
+        if (decl && decl.action === "delete" && change.action === "delete") {
+          change.isDeleted = true;
+          change.content = "";
+          if (!change.description || change.description.includes("edits")) {
+            change.description = `Delete ${change.path}`;
+          }
+        }
+      }
+    } else if (isDeleteTask && contract?.targetPaths) {
       const existingPathsInChanges = new Set(changes.map((c) => c.path.replace(/\\/g, "/").replace(/\/$/, "")));
       for (const targetPath of contract.targetPaths) {
         if (!existingPathsInChanges.has(targetPath)) {

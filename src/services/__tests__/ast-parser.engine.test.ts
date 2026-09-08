@@ -53,6 +53,29 @@ export function renderUser(user: User) {
   if (!patched.includes("return 42;")) throw new Error("Reverse byte patching failed");
   console.log("  ✓ Reverse Byte Patching passed.");
 
+  // Test 4: TypeScript Re-Exports Extraction
+  const reExportTs = `
+export { default as Calculator } from './Calculator';
+export { Foo as Bar } from './foo';
+export { SimpleHelper } from './helper';
+export { default } from './other';
+`;
+
+  const reExportSymbols = WasmASTParserEngine.extractSymbols("index.ts", reExportTs);
+  console.log(`[Test] Re-export symbols extracted: ${reExportSymbols.exports.length} exports.`);
+  const hasCalculator = reExportSymbols.exports.some((e) => e.name === "Calculator" && !e.isDefault);
+  const hasBar = reExportSymbols.exports.some((e) => e.name === "Bar" && !e.isDefault);
+  const hasFoo = reExportSymbols.exports.some((e) => e.name === "Foo");
+  const hasSimpleHelper = reExportSymbols.exports.some((e) => e.name === "SimpleHelper" && !e.isDefault);
+  const hasDefault = reExportSymbols.exports.some((e) => e.name === "default" && e.isDefault);
+
+  if (!hasCalculator) throw new Error("Expected named export 'Calculator' from 'export { default as Calculator }'");
+  if (!hasBar) throw new Error("Expected named export 'Bar' from 'export { Foo as Bar }'");
+  if (hasFoo) throw new Error("Did NOT expect unexported original name 'Foo' in exports");
+  if (!hasSimpleHelper) throw new Error("Expected named export 'SimpleHelper'");
+  if (!hasDefault) throw new Error("Expected default export from 'export { default }'");
+  console.log("  ✓ TS Re-Exports Extraction passed.");
+
   console.log("\n[WasmAST Engine Test Suite] ALL TESTS PASSED CLEANLY!");
 }
 

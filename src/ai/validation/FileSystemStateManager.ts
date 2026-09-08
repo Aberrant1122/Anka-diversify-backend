@@ -157,4 +157,14 @@ export class FileSystemStateManager {
   getSnapshotSize(): number {
     return this.originalState.size;
   }
+
+  getOriginalContent(relativePath: string): string | null | undefined {
+    const normalized = relativePath.replace(/\\/g, "/");
+    return this.originalState.get(normalized);
+  }
+
+  hasOriginalFile(relativePath: string): boolean {
+    const normalized = relativePath.replace(/\\/g, "/");
+    return this.originalState.has(normalized);
+  }
 }
