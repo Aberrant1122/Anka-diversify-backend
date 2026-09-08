@@ -157,6 +157,99 @@ function findCreatedChangesIntegratedBy(
   });
 }
 
+function findDeletedTargetsReferencedBy(
+  modifyChange: PlannedChange,
+  allChanges: PlannedChange[],
+  evidenceStore: RepositoryEvidenceStore
+): PlannedChange[] {
+  const normModPath = normalizeRepoPath(modifyChange.path);
+  const deleteChanges = allChanges.filter((c) => c.action === "delete");
+  const referencedDeletes: PlannedChange[] = [];
+
+  for (const del of deleteChanges) {
+    const normDel = normalizeRepoPath(del.path);
+    if (normDel === normModPath) continue;
+
+    // 1. modifyChange explicitly lists del.path in dependencies
+    if (Array.isArray(modifyChange.dependencies) && modifyChange.dependencies.some((d) => isDependencyMatch(d, normDel))) {
+      referencedDeletes.push(del);
+      continue;
+    }
+
+    // 2. Evidence cites IMPORT, REFERENCE, or SYMBOL connecting modifyChange to del.path
+    const modVal = evidenceStore.validateEvidenceIds(modifyChange.evidenceIds || []);
+    if (modVal.valid) {
+      const connects = modVal.evidence.some(
+        (e) =>
+          (e.kind === "IMPORT" || e.kind === "REFERENCE" || e.kind === "SYMBOL" || e.kind === "ROUTE") &&
+          ((normalizeRepoPath(e.filePath) === normModPath && e.sourceFile && normalizeRepoPath(e.sourceFile) === normDel) ||
+            (normalizeRepoPath(e.filePath) === normDel && e.sourceFile && normalizeRepoPath(e.sourceFile) === normModPath) ||
+            (normalizeRepoPath(e.filePath) === normModPath && e.metadata?.target && normalizeRepoPath(e.metadata.target) === normDel) ||
+            (normalizeRepoPath(e.filePath) === normDel && e.metadata?.importer && normalizeRepoPath(e.metadata.importer) === normModPath))
+      );
+      if (connects) {
+        referencedDeletes.push(del);
+        continue;
+      }
+    }
+  }
+
+  return referencedDeletes;
+}
+
+function findRequiredImporterCleanups(
+  deleteChange: PlannedChange,
+  allChanges: PlannedChange[],
+  evidenceStore: RepositoryEvidenceStore
+): PlannedChange[] {
+  const normDel = normalizeRepoPath(deleteChange.path);
+  const modifyChanges = allChanges.filter((c) => c.action === "modify");
+  const importers: PlannedChange[] = [];
+
+  for (const mod of modifyChanges) {
+    const normMod = normalizeRepoPath(mod.path);
+    if (normMod === normDel) continue;
+
+    if (Array.isArray(mod.dependencies) && mod.dependencies.some((d) => isDependencyMatch(d, normDel))) {
+      importers.push(mod);
+      continue;
+    }
+
+    const modVal = evidenceStore.validateEvidenceIds(mod.evidenceIds || []);
+    if (modVal.valid) {
+      const connects = modVal.evidence.some(
+        (e) =>
+          (e.kind === "IMPORT" || e.kind === "REFERENCE" || e.kind === "SYMBOL" || e.kind === "ROUTE") &&
+          ((normalizeRepoPath(e.filePath) === normMod && e.sourceFile && normalizeRepoPath(e.sourceFile) === normDel) ||
+            (normalizeRepoPath(e.filePath) === normDel && e.sourceFile && normalizeRepoPath(e.sourceFile) === normMod) ||
+            (normalizeRepoPath(e.filePath) === normMod && e.metadata?.target && normalizeRepoPath(e.metadata.target) === normDel) ||
+            (normalizeRepoPath(e.filePath) === normDel && e.metadata?.importer && normalizeRepoPath(e.metadata.importer) === normMod))
+      );
+      if (connects) {
+        importers.push(mod);
+        continue;
+      }
+    }
+
+    const delVal = evidenceStore.validateEvidenceIds(deleteChange.evidenceIds || []);
+    if (delVal.valid) {
+      const connects = delVal.evidence.some(
+        (e) =>
+          (e.kind === "IMPORT" || e.kind === "REFERENCE") &&
+          ((normalizeRepoPath(e.filePath) === normMod && e.sourceFile && normalizeRepoPath(e.sourceFile) === normDel) ||
+            (normalizeRepoPath(e.filePath) === normDel && e.sourceFile && normalizeRepoPath(e.sourceFile) === normMod) ||
+            (normalizeRepoPath(e.filePath) === normDel && e.metadata?.importer && normalizeRepoPath(e.metadata.importer) === normMod))
+      );
+      if (connects) {
+        importers.push(mod);
+        continue;
+      }
+    }
+  }
+
+  return importers;
+}
+
 function hasDirectRelationEvidence(
   change: PlannedChange,
   evidenceStore: RepositoryEvidenceStore,
@@ -329,11 +422,14 @@ export class EvidenceBoundWriteSetResolver {
           continue;
         }
         const existenceEvidence = evidenceValidation.evidence.filter(
-          (e) => normalizeRepoPath(e.filePath) === normPath && (e.kind === "FILE" || e.provenance === "REPO_READ")
+          (e) =>
+            normalizeRepoPath(e.filePath) === normPath &&
+            (e.kind === "FILE" || e.provenance === "REPO_READ") &&
+            e.provenance !== "SEMANTIC_SEARCH"
         );
         if (existenceEvidence.length === 0) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NO_FILE_EXISTENCE_EVIDENCE`);
-          rejectionReasons.set(normPath, "NO_FILE_EXISTENCE_EVIDENCE: No verified file existence evidence cited for target path");
+          rejectionReasons.set(normPath, "NO_FILE_EXISTENCE_EVIDENCE: No verified file existence evidence cited for target path; semantic search alone is not delete authority");
           continue;
         }
         intrinsicallyEligible.set(normPath, change);
@@ -361,17 +457,19 @@ export class EvidenceBoundWriteSetResolver {
 
         const hasDirectRelation = hasDirectRelationEvidence(change, evidenceStore, intentSpec);
         const createdChangesIntegrated = findCreatedChangesIntegratedBy(change, proposedChanges);
+        const referencedDeletes = findDeletedTargetsReferencedBy(change, proposedChanges, evidenceStore);
         const hasIntegrationCandidate =
           intentSpec.taskType !== "BUG_FIX" &&
           createdChangesIntegrated.length > 0 &&
           Array.isArray(change.dependencies) &&
           change.dependencies.length > 0;
+        const hasDeleteCleanupRelation = referencedDeletes.length > 0;
 
-        if (!hasDirectRelation && !hasIntegrationCandidate) {
+        if (!hasDirectRelation && !hasIntegrationCandidate && !hasDeleteCleanupRelation) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NO_TASK_OR_STRUCTURAL_RELATION`);
           rejectionReasons.set(
             normPath,
-            "NO_TASK_OR_STRUCTURAL_RELATION: Cited evidence establishes existence only; no structural relation, reference, symbol, route, or explicit user path evidence proves relevance to task"
+            "NO_TASK_OR_STRUCTURAL_RELATION: Cited evidence establishes existence only; no structural relation, reference, symbol, route, delete cleanup, or explicit user path evidence proves relevance to task"
           );
           continue;
         }
@@ -468,15 +566,56 @@ export class EvidenceBoundWriteSetResolver {
           const hasDirectRelation = hasDirectRelationEvidence(change, evidenceStore, intentSpec);
           if (!hasDirectRelation) {
             const integratedCreates = findCreatedChangesIntegratedBy(change, proposedChanges);
-            const approvedCreates = integratedCreates.filter((c) => intrinsicallyEligible.has(normalizeRepoPath(c.path)));
-            if (approvedCreates.length === 0) {
-              const reason = "NO_TASK_OR_STRUCTURAL_RELATION: Integrating created change was rejected or none approved";
-              console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
-              intrinsicallyEligible.delete(normPath);
-              rejectionReasons.set(normPath, reason);
-              fixedPointChanged = true;
-              continue;
+            const referencedDeletes = findDeletedTargetsReferencedBy(change, proposedChanges, evidenceStore);
+
+            // Case A: Integrator of CREATE
+            if (integratedCreates.length > 0) {
+              const approvedCreates = integratedCreates.filter((c) => intrinsicallyEligible.has(normalizeRepoPath(c.path)));
+              if (approvedCreates.length === 0) {
+                const reason = "NO_TASK_OR_STRUCTURAL_RELATION: Integrating created change was rejected or none approved";
+                console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
+                intrinsicallyEligible.delete(normPath);
+                rejectionReasons.set(normPath, reason);
+                fixedPointChanged = true;
+                continue;
+              }
             }
+
+            // Case B: Cleanup importer of DELETE
+            if (referencedDeletes.length > 0) {
+              const approvedDeletes = referencedDeletes.filter((d) => intrinsicallyEligible.has(normalizeRepoPath(d.path)));
+              if (approvedDeletes.length === 0) {
+                const reason = "NO_TASK_OR_STRUCTURAL_RELATION: Target delete file was rejected or none approved";
+                console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
+                intrinsicallyEligible.delete(normPath);
+                rejectionReasons.set(normPath, reason);
+                fixedPointChanged = true;
+                continue;
+              }
+            }
+          }
+        }
+
+        // Condition 4: Destructive dependency closure — DELETE target requires all incoming importer cleanups to remain approved
+        if (change.action === "delete") {
+          const requiredImporters = findRequiredImporterCleanups(change, proposedChanges, evidenceStore);
+          let rejectedImporter: PlannedChange | null = null;
+          for (const imp of requiredImporters) {
+            const normImp = normalizeRepoPath(imp.path);
+            if (!intrinsicallyEligible.has(normImp)) {
+              rejectedImporter = imp;
+              break;
+            }
+          }
+
+          if (rejectedImporter) {
+            const impReason = rejectionReasons.get(normalizeRepoPath(rejectedImporter.path)) || "unapproved";
+            const reason = `REJECT_DEPENDENCY: Required importer cleanup '${rejectedImporter.path}' was rejected (${impReason})`;
+            console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
+            intrinsicallyEligible.delete(normPath);
+            rejectionReasons.set(normPath, reason);
+            fixedPointChanged = true;
+            continue;
           }
         }
       }

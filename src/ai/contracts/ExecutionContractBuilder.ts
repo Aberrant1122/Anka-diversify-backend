@@ -40,7 +40,7 @@ const CONTRACT_RULES: Record<TaskType, ContractRules> = {
     diffCriticEnabled: true,
   },
   REFACTOR: {
-    allowedActions: ["rename_symbol", "move_file", "update_imports", "split_module", "extract_utility"],
+    allowedActions: ["modify_file", "rename_symbol", "move_file", "update_imports", "split_module", "extract_utility"],
     forbiddenActions: ["add_new_business_logic", "change_api_contract", "delete_unrelated", "add_new_routes"],
     maxFiles: 20,
     diffCriticEnabled: true,
@@ -98,7 +98,7 @@ export function detectCompoundIntent(
   message: string,
   classification?: TaskClassificationResult
 ): CompoundIntentAnalysis {
-  let hasDeletion = /\b(?:remove|delete|drop|prune|clean\s+up|purge)\b/i.test(message);
+  let hasDeletion = /\b(?:remove|delete|drop|prune|clean\s+up|purge|replace)\b/i.test(message);
   let hasEnhancementOrCreation = /\b(?:enhance|improve|add|create|build|update|modify|redesign|style|implement)\b/i.test(message);
 
   if (classification) {
@@ -227,6 +227,7 @@ export function buildExecutionContract(
   // Supporting reverse-reference expansion for grounded DELETE targets
   const hasCleanupIntent = detectReferenceCleanupIntent(message, classification) || compound.hasReferenceCleanup;
 
+  let authorizedDeleteTargets: string[] = [];
   if ((taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" || compound.hasDeletion) && targetPaths.length > 0) {
     const additionalGrounded = new Set<string>(targetPaths);
     for (const tp of targetPaths) {
@@ -237,14 +238,14 @@ export function buildExecutionContract(
           if (normFile.toLowerCase().includes(baseName.toLowerCase()) || normFile === "app/page.tsx" || normFile === "pages/index.tsx" || normFile === "src/app/page.tsx") {
             additionalGrounded.add(normFile);
             if (!targetProvenance[normFile]) {
-              targetProvenance[normFile] = "DETERMINISTIC_REVERSE_REFERENCE";
+              targetProvenance[normFile] = "DETERMINISTIC_REFERENCE_CLEANUP";
             }
           }
         }
       }
     }
 
-    const authorizedDeleteTargets = targetPaths.filter(
+    authorizedDeleteTargets = targetPaths.filter(
       (tp) =>
         (targetProvenance[tp] === "EXPLICIT_USER_PATH" ||
           targetProvenance[tp] === "UNIQUE_NAMED_ENTITY" ||
@@ -267,7 +268,7 @@ export function buildExecutionContract(
         for (const imp of importers) {
           if (!additionalGrounded.has(imp)) {
             additionalGrounded.add(imp);
-            targetProvenance[imp] = "DETERMINISTIC_REVERSE_REFERENCE";
+            targetProvenance[imp] = "DETERMINISTIC_REFERENCE_CLEANUP";
           }
         }
       }
@@ -286,6 +287,12 @@ export function buildExecutionContract(
   // Define allowed/forbidden actions
   let allowedActions = [...rules.allowedActions];
   let forbiddenActions = [...rules.forbiddenActions];
+
+  if (hasCleanupIntent && authorizedDeleteTargets.length > 0) {
+    if (!allowedActions.includes("modify_file")) {
+      allowedActions.push("modify_file");
+    }
+  }
 
   if (compound.isCompound && compound.hasDeletion && compound.hasEnhancementOrCreation) {
     const compoundAllowed = [
@@ -314,7 +321,11 @@ export function buildExecutionContract(
   }
 
   if (classification.requiresClarification || taskType === "UNKNOWN") {
-    allowedActions = allowedActions.filter((a) => a !== "delete_file" && a !== "delete_folder");
+    if (taskType === "DELETE_FILE" || taskType === "DELETE_FOLDER" || compound.hasDeletion || hasCleanupIntent) {
+      allowedActions = [];
+    } else {
+      allowedActions = allowedActions.filter((a) => a !== "delete_file" && a !== "delete_folder");
+    }
     if (!forbiddenActions.includes("delete_file")) forbiddenActions.push("delete_file");
     if (!forbiddenActions.includes("delete_folder")) forbiddenActions.push("delete_folder");
   }

@@ -95,6 +95,10 @@ export class TargetPathExtractor {
     "operation",
     "feature",
     "features",
+    "up",
+    "down",
+    "out",
+    "away",
   ]);
 
 

@@ -503,12 +503,6 @@ export class TargetScopeExpander {
     }
 
     const approvedSet = new Set<string>(initialTargets);
-    const approvedExpansions: Array<{
-      path: string;
-      evidence: ScopeEvidenceType;
-      sourceTarget: string;
-      action: "modify";
-    }> = [];
 
     // Rule 1: Find safely grounded primary delete targets (EXPLICIT_USER_PATH or UNIQUE_NAMED_ENTITY)
     const authorizedDeleteTargets = initialTargets.filter((tp) => {
@@ -524,7 +518,7 @@ export class TargetScopeExpander {
       };
     }
 
-    // Determine candidates to evaluate: ONLY candidates intended for MODIFY
+    // Determine candidate pool: all files in repository snapshot + candidatePaths + manifest modify files
     const candidatePool = new Set<string>();
     for (const cp of candidatePaths) {
       if (cp && typeof cp === "string") candidatePool.add(normalizeRepoPath(cp));
@@ -534,44 +528,71 @@ export class TargetScopeExpander {
         candidatePool.add(normalizeRepoPath(mf.path));
       }
     }
+    for (const sf of snapshotFiles) {
+      if (sf && typeof sf.path === "string") {
+        candidatePool.add(normalizeRepoPath(sf.path));
+      }
+    }
 
-    const pendingCandidates = Array.from(candidatePool).filter((cp) => !approvedSet.has(cp));
+    const approvedExpansions: Array<{
+      path: string;
+      evidence: ScopeEvidenceType;
+      sourceTarget: string;
+      action: "modify";
+    }> = [];
     const rejectedCandidates: Array<{ path: string; reason: string }> = [];
 
-    for (const candidate of pendingCandidates) {
-      let foundEvidence: ScopeEvidenceType | null = null;
-      let matchedDeleteTarget = "";
+    // Multi-level reverse reference closure:
+    // When a target (or an index/module re-exporting it) is being deleted or cleaned up,
+    // trace reverse importers iteratively until stable fixed-point.
+    let currentDeleteTargets = new Set<string>(authorizedDeleteTargets);
+    let changed = true;
 
-      for (const delTarget of authorizedDeleteTargets) {
-        const evidence = evaluateDirectReverseReference(delTarget, candidate, {
-          knowledgeGraph,
-          fileContext,
-          snapshotFiles,
-          localPath,
-          monorepo,
-        });
+    while (changed) {
+      changed = false;
+      const pendingCandidates = Array.from(candidatePool).filter((cp) => !approvedSet.has(cp));
 
-        if (evidence) {
-          foundEvidence = evidence;
-          matchedDeleteTarget = delTarget;
-          break;
+      for (const candidate of pendingCandidates) {
+        let foundEvidence: ScopeEvidenceType | null = null;
+        let matchedDeleteTarget = "";
+
+        for (const delTarget of currentDeleteTargets) {
+          const evidence = evaluateDirectReverseReference(delTarget, candidate, {
+            knowledgeGraph,
+            fileContext,
+            snapshotFiles,
+            localPath,
+            monorepo,
+          });
+
+          if (evidence) {
+            foundEvidence = evidence;
+            matchedDeleteTarget = delTarget;
+            break;
+          }
+        }
+
+        if (foundEvidence) {
+          approvedSet.add(candidate);
+          approvedExpansions.push({
+            path: candidate,
+            evidence: foundEvidence,
+            sourceTarget: matchedDeleteTarget,
+            action: "modify",
+          });
+          // Add newly approved importer to targets so that files importing IT are also cleaned up if needed
+          currentDeleteTargets.add(candidate);
+          changed = true;
         }
       }
+    }
 
-      if (foundEvidence) {
-        approvedSet.add(candidate);
-        approvedExpansions.push({
-          path: candidate,
-          evidence: foundEvidence,
-          sourceTarget: matchedDeleteTarget,
-          action: "modify",
-        });
-      } else {
-        rejectedCandidates.push({
-          path: candidate,
-          reason: "Not a verified direct importer or reference of an authorized delete target",
-        });
-      }
+    const unapprovedCandidates = Array.from(candidatePool).filter((cp) => !approvedSet.has(cp));
+    for (const unapp of unapprovedCandidates) {
+      rejectedCandidates.push({
+        path: unapp,
+        reason: "Not a verified reverse reference or importer of an authorized delete target",
+      });
     }
 
     if (approvedExpansions.length > 0) {

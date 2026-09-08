@@ -5,8 +5,73 @@ import { TaskClassificationResult } from "../shared/types";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { FileManifest } from "../../types";
 import { TargetScopeExpander } from "../contracts/TargetScopeExpander";
+import * as sharedUtils from "../shared/utils";
+
+const mockOpenAI = {
+  chat: {
+    completions: {
+      create: jest.fn(),
+    },
+  },
+};
 
 describe("Cluster C: Ambiguous Destructive Request Safety & Delete Authority", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
+
+    mockOpenAI.chat.completions.create.mockImplementation(async (params: any) => {
+      const userMsg = params.messages.find((m: any) => m.role === "user")?.content || "";
+      const match = userMsg.match(/USER REQUEST: (.*?)(?:\nPROJECT:|$)/s);
+      const text = (match ? match[1] : userMsg).trim();
+
+      let taskType = "NEW_FEATURE";
+      let targetPath: string | undefined = undefined;
+
+      if (/remove\s+the\s+unused\s+import/i.test(text)) {
+        taskType = "BUG_FIX";
+        targetPath = "app/page.tsx";
+      } else if (/remove\s+extra\s+padding/i.test(text)) {
+        taskType = "BUG_FIX";
+        targetPath = "src/components/Card.tsx";
+      } else if (/replace\s+the\s+deprecated\s+activity\s+widget/i.test(text)) {
+        taskType = "REFACTOR";
+      } else if (/delete\s+the\s+old\s+stuff|delete\s+deprecated\s+things/i.test(text)) {
+        taskType = "DELETE_FOLDER";
+      } else if (/delete|remove/i.test(text)) {
+        taskType = "DELETE_FILE";
+        const explicitMatch = text.match(/(?:delete|remove)\s+([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)/i);
+        if (explicitMatch) {
+          targetPath = explicitMatch[1];
+        }
+      }
+
+      const result = {
+        taskType,
+        risk: "LOW",
+        estimatedComplexity: "SMALL",
+        intent: taskType,
+        confidence: 0.95,
+        requiresClarification: false,
+        reasoning: `Mock classified as ${taskType}`,
+        targetPath,
+      };
+
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(result),
+            },
+          },
+        ],
+      };
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
   const sampleRepoFiles = [
     "src/components/activity/LegacyActivityWidget.tsx",
     "src/components/activity/legacy-activity-widget.css",
