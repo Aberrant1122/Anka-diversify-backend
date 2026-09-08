@@ -1,3 +1,5 @@
+import { TaskExecutionPlan } from "../ai/shared/TaskExecutionPlan";
+
 export interface User {
   id: string;
   email: string;
@@ -375,6 +377,14 @@ export interface TaskClassificationResult {
   targetPath?: string;
   question?: string;
   options?: string[];
+  stages?: Array<{
+    id: string;
+    name?: string;
+    taskType: TaskType;
+    goal: string;
+    targetPath?: string;
+    dependsOn?: string[];
+  }>;
 }
 
 export type PipelineMode =
@@ -478,6 +488,11 @@ export interface AgentResponse {
   patchCorrectionAttempts?: number;
   worktreePath?: string;
   branchName?: string;
+  taskExecutionPlan?: TaskExecutionPlan;
+  compoundTaskStatus?: "PENDING" | "RUNNING" | "VERIFIED" | "FAILED" | "COMPLETED";
+  failedStage?: string;
+  dependentStagesSkipped?: string[];
+  checkpointId?: string;
   baseCommitSha?: string;
   validationCommands?: string[];
   dependencyPreparationAttempted?: boolean;
@@ -801,4 +816,6 @@ export interface VisualVerificationResult {
   startupErrors?: string;
   durationMs: number;
 }
+
+export * from "../ai/shared/TaskExecutionPlan";
 

@@ -18,6 +18,9 @@ import { RepositoryKnowledgeGraph, loadPersistedKnowledgeGraph, savePersistedKno
 import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder";
 import { RepositorySearch } from "../repository/RepositorySearch";
 import { createTaskIntentSpec, TaskIntentSpec } from "../shared/TaskIntentSpec";
+import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
+import { TaskExecutionPlan } from "../shared/TaskExecutionPlan";
+import { StageExecutionTransaction, StageVerificationGate } from "./StageExecutionTransaction";
 import { PolicyContract } from "../contracts/PolicyContract";
 import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import { EvidenceBoundWriteSetResolver, PlannedChange } from "../contracts/EvidenceBoundWriteSetResolver";
@@ -132,8 +135,70 @@ export class AgentPipeline {
 
     // Stage 1: Intent Analysis with Destructive Safety Grounding
     const s1Start = performance.now();
-    const intentResult = await IntentClassifier.classifyIntentAndAmbiguity(request.message, projectContext, canonicalExistingFiles);
+
+    const clarificationData = TaskExecutionPlanManager.parseClarificationInput(request.message);
+    const effectiveMessageForIntent = clarificationData?.initialRequest || request.message;
+
+    const intentResult = await IntentClassifier.classifyIntentAndAmbiguity(effectiveMessageForIntent, projectContext, canonicalExistingFiles);
     const s1Time = performance.now() - s1Start;
+
+    const explicitUserPaths = intentResult.targetPath ? [intentResult.targetPath] : [];
+
+    let taskExecutionPlan: TaskExecutionPlan =
+      request.context?.taskExecutionPlan ||
+      TaskExecutionPlanManager.createTaskExecutionPlan(
+        effectiveMessageForIntent,
+        intentResult,
+        explicitUserPaths
+      );
+
+    if (clarificationData && clarificationData.clarificationQas.length > 0) {
+      const latestQa = clarificationData.clarificationQas[clarificationData.clarificationQas.length - 1];
+      taskExecutionPlan = await TaskExecutionPlanManager.reorderPlanWithClarification(
+        taskExecutionPlan,
+        latestQa.answer,
+        latestQa.question
+      );
+    }
+
+    const activeStage =
+      taskExecutionPlan.stages[taskExecutionPlan.currentStageIndex] || taskExecutionPlan.stages[0];
+
+    // Enforce Stage Dependency Eligibility (Pass 3A)
+    const isStageEligible = TaskExecutionPlanManager.isStageEligible(taskExecutionPlan, activeStage.id);
+    if (!isStageEligible && activeStage.status !== "RUNNING") {
+      const failedOrPendingDeps = (activeStage.dependsOn || []).filter((depId) => {
+        const dep = taskExecutionPlan.stages.find((s) => s.id === depId);
+        return !dep || dep.status !== "VERIFIED";
+      });
+
+      const skipped = TaskExecutionPlanManager.getDependentStages(taskExecutionPlan, activeStage.id);
+      const failureExplanation = `[Stage Dependency Violation] Stage "${activeStage.id}" cannot execute because its dependencies are not VERIFIED: ${failedOrPendingDeps.join(", ")}`;
+      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+      return {
+        explanation: failureExplanation,
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        intent: intentResult.intent,
+        taskType: intentResult.taskType,
+        risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity,
+        targetPath: intentResult.targetPath,
+        confidence: intentResult.confidence,
+        buildVerified: false,
+        taskExecutionPlan,
+        compoundTaskStatus: "FAILED",
+        failedStage: activeStage.id,
+        dependentStagesSkipped: skipped,
+      };
+    }
+
+    activeStage.status = "RUNNING";
+
+    const taskIntentSpec = activeStage.intent;
+    const effectiveGoal = activeStage.intent.goal;
 
     const baselineDiagnosticsList = options?.targetedBaselineDiagnostics || options?.baselineDiagnostics || [];
     const diagnosticTargetPaths = Array.from(
@@ -149,8 +214,6 @@ export class AgentPipeline {
       ? effectiveSnapshot
       : effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || [];
 
-    const explicitUserPaths = intentResult.targetPath ? [intentResult.targetPath] : [];
-    const taskIntentSpec = createTaskIntentSpec(request.message, intentResult, explicitUserPaths);
     const policyContract = buildPolicyContract(taskIntentSpec, canonicalExistingFiles, {
       snapshotFiles: pipelineSnapshotFiles,
       localPath: effectiveLocalPath,
@@ -210,7 +273,7 @@ export class AgentPipeline {
       durationMs: s1Time,
     });
 
-    if (intentResult.requiresClarification) {
+    if (intentResult.requiresClarification && (!clarificationData || clarificationData.clarificationQas.length === 0)) {
       await MemoryPersistence.saveMessage(session.id, "assistant", `[Agent] ❓ ${intentResult.question || "Please clarify your request."}`);
       return {
         explanation: intentResult.reasoning,
@@ -226,6 +289,7 @@ export class AgentPipeline {
         estimatedComplexity: intentResult.estimatedComplexity,
         targetPath: intentResult.targetPath,
         confidence: intentResult.confidence,
+        taskExecutionPlan,
       };
     }
 
@@ -266,7 +330,7 @@ export class AgentPipeline {
     const s3Start = performance.now();
     const { optimizedContext, executionMemory, finalConfidence, searchSummary } =
       await RepositorySearch.runIterativeRepositorySearch(
-        request.message,
+        effectiveGoal,
         effectiveSnapshot,
         projectContext,
         intentResult,
@@ -604,7 +668,7 @@ export class AgentPipeline {
       let rawManifest: FileManifest | null = null;
       try {
         const generator = new ManifestGenerator(getOpenAI());
-        rawManifest = await generator.generateManifest(request.message, planningContext, executionContract);
+        rawManifest = await generator.generateManifest(effectiveGoal, planningContext, executionContract);
       } catch (e: any) {
         manifestGenerationError = e?.message || String(e);
         console.error("[AgentPipeline] Manifest generation error:", manifestGenerationError);
@@ -784,20 +848,29 @@ export class AgentPipeline {
           };
         }
 
+        // Requirement 10 & 11: Construct coherent authorized manifest from dependency closure
+        const approvedSet = new Set(writeAuthResult.approvedPaths.map((p) => normalizeRepoPath(p)));
+        const coherentFiles = (rawManifest.files || []).filter((f) => approvedSet.has(normalizeRepoPath(f.path)));
+        const coherentAuthorizedManifest: FileManifest = {
+          files: coherentFiles,
+          totalFiles: coherentFiles.length,
+          manifestVersion: rawManifest.manifestVersion || "1.0.0",
+        };
+
         const validator = new ManifestValidator(executionContract, {
           existingFiles: canonicalExistingFiles,
           installedPackages: architectureSummary.installedPackages,
           packageVersions: architectureSummary.packageVersions,
           monorepo,
         });
-        let valRes = validator.validate(rawManifest);
+        let valRes = validator.validate(coherentAuthorizedManifest);
 
         try {
           await prisma.agentManifest.create({
             data: {
               projectId,
               sessionId: session.id,
-              manifestJson: rawManifest as any,
+              manifestJson: coherentAuthorizedManifest as any,
               validationStatus: valRes.valid ? "approved" : "rejected",
               validationErrors: valRes.errors as any,
             },
@@ -807,12 +880,12 @@ export class AgentPipeline {
         }
 
         if (valRes.valid) {
-          approvedManifest = rawManifest;
+          approvedManifest = coherentAuthorizedManifest;
         } else {
           console.warn("[AgentPipeline] Initial manifest validation failed. Attempting 1 bounded correction...");
           try {
             const correctedManifest = await ManifestCorrectionEngine.attemptCorrection(
-              rawManifest,
+              coherentAuthorizedManifest,
               valRes.errors,
               request.message,
               planningContext,
@@ -1090,7 +1163,11 @@ export class AgentPipeline {
       }
     );
 
-    const fsManager = new FileSystemStateManager();
+    const stageTransaction = await StageExecutionTransaction.startTransaction(
+      activeStage.id,
+      effectiveLocalPath
+    );
+    const fsManager = stageTransaction.fsManager;
     let transactionCommitted = false;
     let transactionRolledBack = false;
     let rollbackErrorLog: string | null = null;
@@ -1103,7 +1180,7 @@ export class AgentPipeline {
       if (transactionCommitted || transactionRolledBack || !effectiveLocalPath) return;
       transactionRolledBack = true;
       try {
-        await fsManager.rollback(effectiveLocalPath);
+        await stageTransaction.rollback();
       } catch (err: any) {
         rollbackErrorLog = `[CRITICAL] Filesystem rollback failed: ${err?.message || err}`;
         console.error(rollbackErrorLog, err);
@@ -1188,16 +1265,26 @@ export class AgentPipeline {
       );
       s9Time = performance.now() - s9Start;
 
-      overallGatePassed = Boolean(repairResult.success && auditResult.securityPass && featureValidation.overallPassed);
+      const gateEval = StageVerificationGate.evaluate({
+        repairSuccess: Boolean(repairResult.success),
+        securityPass: Boolean(auditResult.securityPass),
+        featureValidationPassed: Boolean(featureValidation.overallPassed),
+        hasBuildErrors: Boolean(!repairResult.success && repairResult.errorLog),
+      });
+
+      overallGatePassed = gateEval.passed;
 
       if (overallGatePassed) {
         transactionCommitted = true;
-        fsManager.commit();
+        await stageTransaction.commit();
+        taskExecutionPlan = TaskExecutionPlanManager.markStageStatus(taskExecutionPlan, activeStage.id, "VERIFIED");
       } else {
         await safeRollback();
+        taskExecutionPlan = TaskExecutionPlanManager.failStage(taskExecutionPlan, activeStage.id);
       }
     } catch (unhandledError: any) {
       await safeRollback();
+      taskExecutionPlan = TaskExecutionPlanManager.failStage(taskExecutionPlan, activeStage.id);
       throw unhandledError;
     }
 
@@ -1314,6 +1401,17 @@ export class AgentPipeline {
       targetPath: intentResult.targetPath,
       confidence: finalConfidence,
       roadmap: roadmapAndDiff.roadmap,
+      taskExecutionPlan: gateSuccess
+        ? TaskExecutionPlanManager.advancePlanStage(taskExecutionPlan).plan
+        : TaskExecutionPlanManager.failStage(taskExecutionPlan, activeStage.id),
+      compoundTaskStatus: gateSuccess
+        ? (taskExecutionPlan.stages.every((s) => s.status === "VERIFIED") ? "COMPLETED" : "RUNNING")
+        : "FAILED",
+      failedStage: gateSuccess ? undefined : activeStage.id,
+      dependentStagesSkipped: gateSuccess
+        ? undefined
+        : TaskExecutionPlanManager.getDependentStages(taskExecutionPlan, activeStage.id),
+      checkpointId: stageTransaction.checkpointId,
       securityPass: auditResult.securityPass,
       critiqueScore: auditResult.critiqueScore,
       buildVerified: isBuildVerified,

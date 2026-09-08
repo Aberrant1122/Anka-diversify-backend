@@ -206,4 +206,30 @@ export class RepositoryEvidenceStore {
         : undefined,
     }));
   }
+
+  /**
+   * Marks diagnostic evidence as stale so that it cannot authorize future stages.
+   */
+  public markDiagnosticStale(checkpointId?: string): number {
+    let count = 0;
+    for (let i = 0; i < this.evidenceList.length; i++) {
+      const e = this.evidenceList[i];
+      if (e.kind === "DIAGNOSTIC") {
+        if (checkpointId && e.metadata?.checkpointId && e.metadata.checkpointId !== checkpointId) {
+          continue;
+        }
+        const updated: RepositoryEvidence = Object.freeze({
+          ...e,
+          metadata: Object.freeze({
+            ...(e.metadata || {}),
+            stale: true,
+          }),
+        });
+        this.evidenceList[i] = updated;
+        this.idMap.set(e.id, updated);
+        count++;
+      }
+    }
+    return count;
+  }
 }

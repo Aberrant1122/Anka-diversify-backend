@@ -60,7 +60,13 @@ AUTONOMOUS BIAS FOR ACTION & DESTRUCTIVE SAFETY:
   - If the target file/folder is explicitly named or clearly specified, proceed with "requiresClarification": false.
   - If the destructive request is VAGUE or AMBIGUOUS (e.g. "delete the old stuff", "clean everything up", "remove unused files" without specifying what to delete), you MUST set "requiresClarification": true, explain that the target is ambiguous in "reasoning", and provide a specific clarifying "question" and "options".
 - For in-file removal requests (e.g. "remove extra padding", "remove unused import"), classify as BUG_FIX or REFACTOR (MODIFY), NOT DELETE_FILE.
-- Only set "requiresClarification": true if the request contains contradictory/impossible requirements or ambiguous destructive targets.
+- Only set "requiresClarification": true if the request contains contradictory/impossible requirements, ambiguous destructive targets, or ambiguous compound prioritization between fixing errors and building new features.
+
+COMPOUND TASK DECOMPOSITION:
+- For requests containing multiple distinct operations or sequential phases (e.g. fixing errors and building a new feature, or refactoring and adding exports):
+  - Emit an ordered array of 'stages' in the output, each with its own id ("stage-1", "stage-2", etc.), taskType, specific goal, and dependsOn.
+  - If the user did not specify whether to prioritize fixing errors or creating features, set "requiresClarification": true, provide a clarifying question asking which to prioritize, and list the corresponding options.
+- For single-focus tasks, emit 1 stage matching the overall taskType.
 
 Respond ONLY with valid JSON matching this schema:
 {
@@ -73,5 +79,14 @@ Respond ONLY with valid JSON matching this schema:
   "reasoning": "brief explanation",
   "targetPath"?: "extracted file or folder target if applicable",
   "question"?: "specific question to clarify",
-  "options"?: ["Option A", "Option B"]
+  "options"?: ["Option A", "Option B"],
+  "stages"?: [
+    {
+      "id": "stage-1",
+      "taskType": "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE" | "BUG_FIX" | "REFACTOR" | "FILE_CREATION" | "CONFIG_CHANGE" | "DOCS" | "OPTIMIZATION",
+      "goal": "Description of this specific stage's goal",
+      "targetPath"?: "target path for this stage if applicable",
+      "dependsOn": []
+    }
+  ]
 }`;
