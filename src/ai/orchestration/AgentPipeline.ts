@@ -4,13 +4,23 @@ import { PrismaClient } from "@prisma/client";
 import { formatMs, getOpenAI } from "../shared/utils";
 import { ChatRequest, AgentResponse, AgentProgressEvent, ExecutionContract } from "../shared/types";
 import { IntentClassifier } from "../classification/IntentClassifier";
-import { buildExecutionContract, detectReferenceCleanupIntent, detectCompoundIntent } from "../contracts/ExecutionContractBuilder";
+import {
+  buildExecutionContract,
+  buildPolicyContract,
+  buildFinalExecutionContract,
+  detectReferenceCleanupIntent,
+  detectCompoundIntent,
+} from "../contracts/ExecutionContractBuilder";
 import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
 import { ContractGuardrails } from "../contracts/ContractGuardrails";
 import { RepositoryScanner } from "../repository/RepositoryScanner";
 import { RepositoryKnowledgeGraph, loadPersistedKnowledgeGraph, savePersistedKnowledgeGraph } from "../repository/RepositoryKnowledgeGraph";
 import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder";
 import { RepositorySearch } from "../repository/RepositorySearch";
+import { createTaskIntentSpec, TaskIntentSpec } from "../shared/TaskIntentSpec";
+import { PolicyContract } from "../contracts/PolicyContract";
+import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
+import { EvidenceBoundWriteSetResolver, PlannedChange } from "../contracts/EvidenceBoundWriteSetResolver";
 import { CodeGenerator } from "../generation/CodeGenerator";
 import { ManifestGenerator } from "../generation/ManifestGenerator";
 import { TaskDecomposer } from "../generation/TaskDecomposer";
@@ -139,31 +149,43 @@ export class AgentPipeline {
       ? effectiveSnapshot
       : effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || [];
 
-    const executionContract: ExecutionContract = buildExecutionContract(
-      intentResult,
-      request.message,
-      canonicalExistingFiles,
-      {
-        snapshotFiles: pipelineSnapshotFiles,
-        localPath: effectiveLocalPath,
-        monorepo,
-      }
-    );
+    const explicitUserPaths = intentResult.targetPath ? [intentResult.targetPath] : [];
+    const taskIntentSpec = createTaskIntentSpec(request.message, intentResult, explicitUserPaths);
+    const policyContract = buildPolicyContract(taskIntentSpec, canonicalExistingFiles, {
+      snapshotFiles: pipelineSnapshotFiles,
+      localPath: effectiveLocalPath,
+      monorepo,
+    });
+
+    const evidenceStore = new RepositoryEvidenceStore(projectId, effectiveLocalPath || undefined);
+
+    let executionContract: ExecutionContract = {
+      goal: policyContract.goal,
+      taskType: policyContract.taskType,
+      risk: policyContract.risk,
+      estimatedComplexity: policyContract.estimatedComplexity,
+      pipeline: policyContract.pipeline,
+      environment: policyContract.environment,
+      repositoryRequired: policyContract.repositoryRequired,
+      expectedFiles: policyContract.expectedFiles,
+      validationType: policyContract.validationType,
+      targetPaths: explicitUserPaths, // ONLY explicit literal paths from user, NO guessed nouns
+      contextScope: explicitUserPaths,
+      searchScope: [],
+      allowedActions: policyContract.allowedActions,
+      forbiddenActions: policyContract.forbiddenActions,
+      maxFiles: policyContract.maxFiles,
+      diffCriticEnabled: policyContract.diffCriticEnabled,
+      targetProvenance: {},
+    };
 
     if (diagnosticTargetPaths.length > 0) {
-      if (!executionContract.targetProvenance) {
-        executionContract.targetProvenance = {};
-      }
       for (const dt of diagnosticTargetPaths) {
-        if (!executionContract.targetProvenance[dt]) {
-          executionContract.targetProvenance[dt] = "BASELINE_DIAGNOSTIC";
-        }
-      }
-      const mergedTargets = Array.from(new Set([...diagnosticTargetPaths, ...executionContract.targetPaths])).filter(
-        (tp) => tp !== "(project-wide)"
-      );
-      if (mergedTargets.length > 0) {
-        executionContract.targetPaths = mergedTargets;
+        evidenceStore.addEvidence({
+          kind: "DIAGNOSTIC",
+          filePath: dt,
+          provenance: "BUILD_DIAGNOSTIC",
+        });
       }
       executionContract.searchScope = Array.from(new Set([...diagnosticTargetPaths, ...executionContract.searchScope]));
       if (executionContract.taskType === "NEW_FEATURE" || executionContract.taskType === "REFACTOR") {
@@ -179,7 +201,7 @@ export class AgentPipeline {
       color: intentResult.risk === "HIGH" || intentResult.risk === "CRITICAL" ? "text-rose-400 border-rose-500/30 bg-rose-500/10" : "text-amber-400 border-amber-500/30 bg-amber-500/10",
       badge: `STAGE 1/7 · ${intentResult.taskType} · ${formatMs(s1Time)}`,
       progress: 15,
-      log: `[Stage 1/7] Intent Analysis completed in ${formatMs(s1Time)}:\n  ✓ Task: ${intentResult.taskType}\n  ✓ Risk: ${intentResult.risk}\n  ✓ Allowed: ${executionContract.allowedActions.join(", ")}\n  ✗ Forbidden: ${executionContract.forbiddenActions.slice(0, 3).join(", ")}`,
+      log: `[Stage 1/7] Intent Analysis completed in ${formatMs(s1Time)}:\n  ✓ Task: ${intentResult.taskType}\n  ✓ Risk: ${intentResult.risk}\n  ✓ Allowed: ${policyContract.allowedActions.join(", ")}\n  ✗ Forbidden: ${policyContract.forbiddenActions.slice(0, 3).join(", ")}`,
       taskType: intentResult.taskType,
       risk: intentResult.risk,
       estimatedComplexity: intentResult.estimatedComplexity,
@@ -243,7 +265,16 @@ export class AgentPipeline {
     // Stage 3: Iterative Repository Search Loop
     const s3Start = performance.now();
     const { optimizedContext, executionMemory, finalConfidence, searchSummary } =
-      await RepositorySearch.runIterativeRepositorySearch(request.message, effectiveSnapshot, projectContext, intentResult, effectiveLocalPath, executionContract);
+      await RepositorySearch.runIterativeRepositorySearch(
+        request.message,
+        effectiveSnapshot,
+        projectContext,
+        intentResult,
+        effectiveLocalPath,
+        policyContract,
+        taskIntentSpec,
+        evidenceStore
+      );
     const s3Time = performance.now() - s3Start;
 
     const inspectedFilesArr = Array.from(executionMemory.inspectedFiles || []);
@@ -555,6 +586,7 @@ export class AgentPipeline {
         relevantFiles: relevantPlanningFiles.slice(0, 8),
         baselineDiagnostics: baselineDiagnosticsList,
         monorepo,
+        evidenceStore,
       };
 
       onProgress?.({
@@ -698,37 +730,58 @@ export class AgentPipeline {
           }
         }
 
-        // Bounded deterministic UI feature integration scope reconciliation (Fix 1, 2, 6, 9, 10, 11)
-        if (isUI && isNonDestructive && Array.isArray(rawManifest.files)) {
-          const uiIntegrationResult = TargetScopeExpander.expandUiFeatureIntegrationTargets({
-            contract: executionContract,
-            manifestFiles: rawManifest.files,
-            message: request.message,
-            taskType: executionContract.taskType,
-            architectureSummary,
-            knowledgeGraph,
-            fileContext: optimizedContext?.fileContext,
-            snapshotFiles: rawSnapshotFiles,
-            localPath: effectiveLocalPath,
-            monorepo,
-            semanticEvidence: planningContext?.relevantFiles || [],
-          });
+        // Step 8 & 9: Run EvidenceBoundWriteSetResolver to authorize exact write paths and build final ExecutionContract
+        const proposedPlannedChanges: PlannedChange[] = (rawManifest.files || []).map((f) => {
+          return {
+            path: f.path,
+            action: f.action,
+            reason: f.description || `Proposed ${f.action} for ${f.path}`,
+            evidenceIds: Array.isArray(f.evidenceIds) ? f.evidenceIds : [],
+            dependencies: f.dependencies || [],
+          };
+        });
 
-          if (uiIntegrationResult.approvedExpansions.length > 0) {
-            const newApprovedPaths = uiIntegrationResult.approvedExpansions.map((e) => e.path);
-            executionContract.targetPaths = Array.from(
-              new Set([...executionContract.targetPaths, ...newApprovedPaths])
-            );
-            if (!executionContract.targetProvenance) {
-              executionContract.targetProvenance = {};
-            }
-            for (const exp of uiIntegrationResult.approvedExpansions) {
-              executionContract.targetProvenance[exp.path] = exp.reason || "DETERMINISTIC_UI_INTEGRATION";
-            }
-            executionContract.searchScope = Array.from(
-              new Set([...executionContract.searchScope, ...executionContract.targetPaths])
-            );
-          }
+        const writeAuthResult = EvidenceBoundWriteSetResolver.resolve({
+          policy: policyContract,
+          intentSpec: taskIntentSpec,
+          proposedChanges: proposedPlannedChanges,
+          evidenceStore,
+          existingFiles: canonicalExistingFiles,
+          monorepo,
+          targetRepositoryId: projectId,
+        });
+
+        // Always construct the final ExecutionContract bound to resolved approved paths (even if empty)
+        executionContract = buildFinalExecutionContract(
+          policyContract,
+          writeAuthResult.approvedPaths,
+          canonicalExistingFiles
+        );
+
+        // Blocker 5 fail-closed: If proposed changes exist but none were approved by evidence authority,
+        // targetPaths MUST be [] and pipeline returns a controlled planning failure immediately.
+        if (proposedPlannedChanges.length > 0 && writeAuthResult.approvedPaths.length === 0) {
+          const rejectedReasons = writeAuthResult.rejectedPaths
+            .map((r) => `• ${r.path}: ${r.reason}`)
+            .join("\n");
+          const failureExplanation = `[Manifest Validation Failed] All planned file changes were rejected by evidence-bound write authority:\n${rejectedReasons}`;
+          await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+          return {
+            explanation: failureExplanation,
+            changes: [],
+            commitMessage: "",
+            sessionId: session.id,
+            intent: intentResult.intent,
+            taskType: intentResult.taskType,
+            risk: intentResult.risk,
+            estimatedComplexity: intentResult.estimatedComplexity,
+            targetPath: intentResult.targetPath,
+            confidence: finalConfidence,
+            buildVerified: false,
+            buildErrors: failureExplanation,
+            lifecycleStage: "ManifestValidationFailed",
+          };
         }
 
         const validator = new ManifestValidator(executionContract, {

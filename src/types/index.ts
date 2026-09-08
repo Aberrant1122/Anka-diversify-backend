@@ -601,6 +601,8 @@ export interface FileDeclaration {
   description: string;
   /** Optional size estimate */
   estimatedLines?: number;
+  /** Cited verified repository evidence IDs (Phase 2B) */
+  evidenceIds?: string[];
 }
 
 export interface FileManifest {

@@ -5,6 +5,10 @@ import { IterativeReasoningEngine } from "../../services/iterative-reasoning.eng
 import { RepositoryScanner } from "./RepositoryScanner";
 import { RepositoryKnowledgeGraph } from "./RepositoryKnowledgeGraph";
 import { ProjectGitHubService } from "../../services/github.service";
+import { RepositoryEvidenceStore } from "./RepositoryEvidenceStore";
+import { RepositoryInvestigationAgent } from "./RepositoryInvestigationAgent";
+import { PolicyContract } from "../contracts/PolicyContract";
+import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 
 export class RepositorySearch {
   static async planTask(
@@ -116,28 +120,37 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
     projectContext: any,
     intentResult: any,
     localPath?: string | null,
-    contract?: ExecutionContract,
+    contract?: ExecutionContract | PolicyContract,
+    intentSpec?: TaskIntentSpec,
+    evidenceStore?: RepositoryEvidenceStore,
   ): Promise<{
     optimizedContext: { fileContext: Record<string, string>; skeletonContext: Record<string, string>; tokenEstimate: number };
     executionMemory: RepositoryExecutionMemory;
     finalConfidence: number;
     searchSummary: string;
+    evidenceStore: RepositoryEvidenceStore;
   }> {
     const taskId = `task-${Date.now()}`;
     const effectiveSnap = RepositoryScanner.getEffectiveSnapshot(snapshot, localPath);
+    const store = evidenceStore || new RepositoryEvidenceStore(projectContext?.project?.id || "default-repo", localPath || undefined);
 
-    if (contract && contract.repositoryRequired === false) {
+    if (contract && (contract as any).repositoryRequired === false) {
       const existingFiles: Record<string, string> = {};
       const snapList = Array.isArray(effectiveSnap) ? effectiveSnap : effectiveSnap?.keyFiles || (effectiveSnap as any)?.repoSnapshot || [];
       for (const f of snapList) {
         if (f && f.path && typeof f.content === "string" && f.content.trim().length > 0) {
           existingFiles[f.path] = f.content;
+          store.addEvidence({
+            kind: "FILE",
+            filePath: f.path,
+            provenance: "REPO_READ",
+          });
         }
       }
 
       const executionMemory: RepositoryExecutionMemory = {
         taskId,
-        projectId: projectContext.project.id,
+        projectId: projectContext?.project?.id || "default-proj",
         discoveredSymbols: new Map(),
         discoveredRoutes: [],
         discoveredServices: [],
@@ -150,39 +163,65 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
         optimizedContext: { fileContext: existingFiles, skeletonContext: {}, tokenEstimate: JSON.stringify(existingFiles).length },
         executionMemory,
         finalConfidence: 1.0,
-        searchSummary: `Standalone Pipeline active (pipeline: ${contract.pipeline}, environment: ${contract.environment}) — Repository search bypassed. ${Object.keys(existingFiles).length} existing standalone file(s) included in context.`,
+        searchSummary: `Standalone Pipeline active — Repository search bypassed. ${Object.keys(existingFiles).length} existing standalone file(s) included in context.`,
+        evidenceStore: store,
       };
     }
 
     const toolEngine = new RepositoryToolEngine(effectiveSnap, localPath);
-    const reasoningEngine = new IterativeReasoningEngine({
-      snapshot: effectiveSnap,
-      maxRounds: 5,
-      confidenceThreshold: 0.80,
-      contract,
-      projectId: projectContext.project.id,
+
+    // Build TaskIntentSpec if not provided
+    const effectiveIntentSpec: TaskIntentSpec = intentSpec || {
+      goal: message,
+      operations: [{ kind: "MODIFY", subject: message }],
+      constraints: [],
+      acceptanceCriteria: [],
+      destructive: intentResult?.taskType === "DELETE_FOLDER" || intentResult?.taskType === "DELETE_FILE" || intentResult?.intent === "DELETE_FOLDER" || intentResult?.intent === "DELETE_FILE",
+      requiresClarification: Boolean(intentResult?.requiresClarification),
+      taskType: intentResult?.taskType || "NEW_FEATURE",
+      risk: intentResult?.risk || "MEDIUM",
+      estimatedComplexity: intentResult?.estimatedComplexity || "MEDIUM",
+      explicitUserPaths: intentResult?.targetPath ? [intentResult.targetPath] : [],
+    };
+
+    // Run the dynamic Tool-Calling Repository Investigation Agent
+    const investigationAgent = new RepositoryInvestigationAgent({
       toolEngine,
+      evidenceStore: store,
+      intentSpec: effectiveIntentSpec,
+      localPath,
     });
 
-    const reasoningTrace = await reasoningEngine.executeReasoningLoop(message, intentResult.intent, contract);
+    const investigationResult = await investigationAgent.investigate();
 
     const executionMemory: RepositoryExecutionMemory = {
       taskId,
-      projectId: projectContext.project.id,
+      projectId: projectContext?.project?.id || "default-proj",
       discoveredSymbols: new Map(),
       discoveredRoutes: [],
       discoveredServices: [],
       discoveredModels: [],
-      inspectedFiles: reasoningTrace.allExploredFiles,
-      searchPlanHistory: [],
-      currentConfidence: reasoningTrace.finalConfidence,
+      inspectedFiles: new Set(investigationResult.allExploredFiles),
+      searchPlanHistory: (investigationResult.investigationHistory || []).map((h) => ({
+        stepId: h.stepId,
+        tool: h.tool,
+        resultCount: h.evidenceIdsAdded.length,
+        argsSummary: h.argsSummary,
+        resultSummary: h.resultSummary,
+        evidenceIdsAdded: h.evidenceIdsAdded,
+        decision: h.decision,
+        readyToPlan: h.readyToPlan,
+      })),
+      currentConfidence: investigationResult.readyToPlan ? 0.95 : 0.60,
     };
 
-    for (const [name, sym] of reasoningTrace.allDiscoveredSymbols.entries()) {
-      executionMemory.discoveredSymbols.set(name, { filePath: sym.filePath, line: sym.line || 1 });
-      if (sym.kind === "route") executionMemory.discoveredRoutes.push(sym.name);
-      if (sym.kind === "service") executionMemory.discoveredServices.push(sym.filePath);
-      if (sym.kind === "model") executionMemory.discoveredModels.push(sym.name);
+    // Populate executionMemory from verified evidence
+    for (const ev of store.getAllEvidence()) {
+      if (ev.symbol) {
+        executionMemory.discoveredSymbols.set(ev.symbol, { filePath: ev.filePath, line: 1 });
+      }
+      if (ev.kind === "ROUTE" && ev.symbol) executionMemory.discoveredRoutes.push(ev.symbol);
+      if (ev.kind === "SYMBOL" && ev.filePath.includes("service")) executionMemory.discoveredServices.push(ev.filePath);
     }
 
     const collectedFileContext: Record<string, string> = {};
@@ -190,7 +229,7 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
     let tokenBudget = 0;
     const MAX_TOKENS = 15000;
 
-    for (const fp of reasoningTrace.allExploredFiles) {
+    for (const fp of investigationResult.allExploredFiles) {
       if (!fp || collectedFileContext[fp]) continue;
       const fileResult = toolEngine.readFile({ filePath: fp });
       if (!fileResult.found) continue;
@@ -209,30 +248,18 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
       }
     }
 
-    const filteredFileContext = reasoningEngine.filterFilesByContractScope(collectedFileContext);
-
-    if (Object.keys(filteredFileContext).length === 0 && snapshot?.keyFiles?.length) {
+    if (Object.keys(collectedFileContext).length === 0 && snapshot?.keyFiles?.length) {
       for (const kf of (snapshot.keyFiles as Array<{ path: string; content?: string }>).slice(0, 10)) {
-        if (kf.content) filteredFileContext[kf.path] = kf.content;
+        if (kf.content) collectedFileContext[kf.path] = kf.content;
       }
     }
 
-    const toolSummaryLines = executionMemory.searchPlanHistory.map(
-      (h) => `  Step ${h.stepId}: ${h.tool} → found ${h.resultCount} result(s)`,
-    );
-    const searchSummary = [
-      `Search Plan executed: ${toolSummaryLines.length} steps`,
-      `Routes discovered: ${executionMemory.discoveredRoutes.join(", ") || "none"}`,
-      `Services discovered: ${executionMemory.discoveredServices.join(", ") || "none"}`,
-      `Models discovered: ${executionMemory.discoveredModels.join(", ") || "none"}`,
-      `Final confidence: ${(executionMemory.currentConfidence * 100).toFixed(0)}%`,
-    ].join("\n");
-
     return {
-      optimizedContext: { fileContext: filteredFileContext, skeletonContext: collectedSkeletonContext, tokenEstimate: tokenBudget },
+      optimizedContext: { fileContext: collectedFileContext, skeletonContext: collectedSkeletonContext, tokenEstimate: tokenBudget },
       executionMemory,
       finalConfidence: executionMemory.currentConfidence,
-      searchSummary,
+      searchSummary: investigationResult.summary,
+      evidenceStore: store,
     };
   }
 }

@@ -4,6 +4,8 @@ import { routeTask } from "../../services/task-router.engine";
 import { TargetPathExtractor } from "./TargetPathExtractor";
 import { TargetScopeExpander } from "./TargetScopeExpander";
 import { MonorepoDescriptor } from "../workspace/MonorepoDetector";
+import { PolicyContract, POLICY_RULES } from "./PolicyContract";
+import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 
 interface ContractRules {
   allowedActions: string[];
@@ -357,6 +359,113 @@ export function buildExecutionContract(
     forbiddenActions,
     maxFiles: maxFilesCap,
     diffCriticEnabled: rules.diffCriticEnabled,
+    targetProvenance,
+  };
+}
+
+/**
+ * Builds a PolicyContract containing ONLY task boundaries, risk, allowed/forbidden actions,
+ * and user explicit constraints. Contains ZERO inferred targetPaths.
+ */
+export function buildPolicyContract(
+  intentSpec: TaskIntentSpec,
+  repoFileNames: string[] = [],
+  options?: ExecutionContractOptions
+): PolicyContract {
+  const rules = POLICY_RULES[intentSpec.taskType] || POLICY_RULES.NEW_FEATURE;
+  const taskIntent =
+    intentSpec.taskType === "FILE_CREATION"
+      ? "NEW_FEATURE"
+      : intentSpec.taskType === "CONFIG_CHANGE"
+      ? "NEW_FEATURE"
+      : (intentSpec.taskType as any);
+
+  const dummyClassification: TaskClassificationResult = {
+    taskType: intentSpec.taskType,
+    risk: intentSpec.risk,
+    estimatedComplexity: intentSpec.estimatedComplexity,
+    intent: taskIntent,
+    confidence: 0.9,
+    requiresClarification: intentSpec.requiresClarification,
+    reasoning: intentSpec.reasoning || "Policy contract classification",
+    targetPath: intentSpec.explicitUserPaths[0],
+  };
+
+  const route = routeTask(intentSpec.goal, dummyClassification, repoFileNames);
+
+  let allowedActions = [...rules.allowedActions];
+  let forbiddenActions = [...rules.forbiddenActions];
+
+  if (intentSpec.requiresClarification || intentSpec.taskType === "UNKNOWN") {
+    allowedActions = allowedActions.filter((a) => a !== "delete_file" && a !== "delete_folder");
+    if (!forbiddenActions.includes("delete_file")) forbiddenActions.push("delete_file");
+    if (!forbiddenActions.includes("delete_folder")) forbiddenActions.push("delete_folder");
+  }
+
+  return {
+    goal: intentSpec.goal,
+    taskType: intentSpec.taskType,
+    risk: intentSpec.risk,
+    estimatedComplexity: intentSpec.estimatedComplexity,
+    destructive: intentSpec.destructive,
+    allowedActions,
+    forbiddenActions,
+    maxFiles: rules.maxFiles,
+    diffCriticEnabled: rules.diffCriticEnabled,
+    pipeline: route.pipeline,
+    environment: route.environment,
+    repositoryRequired: route.repositoryRequired,
+    expectedFiles: route.expectedFiles,
+    validationType: route.validationType,
+    explicitUserPaths: intentSpec.explicitUserPaths,
+    userConstraints: intentSpec.constraints,
+    requiresClarification: intentSpec.requiresClarification,
+    workspaceRoot: options?.localPath || undefined,
+  };
+}
+
+/**
+ * Builds the final ExecutionContract strictly bound to the authorized write paths
+ * resolved by EvidenceBoundWriteSetResolver.
+ */
+export function buildFinalExecutionContract(
+  policy: PolicyContract,
+  authorizedTargetPaths: string[],
+  repoFileNames: string[] = []
+): ExecutionContract {
+  const searchScope = authorizedTargetPaths
+    .map((tp) => {
+      if (/\.[\w]+$/.test(tp)) {
+        const dir = path.dirname(tp);
+        return dir === "." ? "" : dir;
+      }
+      return tp;
+    })
+    .filter(Boolean);
+
+  const contextScope = resolveContextScope(policy.taskType, authorizedTargetPaths, repoFileNames);
+  const targetProvenance: Record<string, string> = {};
+  for (const tp of authorizedTargetPaths) {
+    targetProvenance[tp] = "EVIDENCE_BOUND_AUTHORITY";
+  }
+
+  return {
+    goal: policy.goal,
+    taskType: policy.taskType,
+    risk: policy.risk,
+    estimatedComplexity: policy.estimatedComplexity,
+    pipeline: policy.pipeline,
+    environment: policy.environment,
+    repositoryRequired: policy.repositoryRequired,
+    expectedFiles: policy.expectedFiles,
+    validationType: policy.validationType,
+    targetPaths: authorizedTargetPaths,
+    contextScope,
+    searchScope,
+    allowedActions: policy.allowedActions,
+    forbiddenActions: policy.forbiddenActions,
+    maxFiles: policy.maxFiles,
+    diffCriticEnabled: policy.diffCriticEnabled,
     targetProvenance,
   };
 }
