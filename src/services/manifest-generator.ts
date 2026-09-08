@@ -71,9 +71,21 @@ export class ManifestGenerator {
     contextText += `- Pipeline: ${contract.pipeline}\n`;
     contextText += `- Environment: ${contract.environment}\n`;
     contextText += `- Max Files Allowed: ${contract.maxFiles}\n`;
-    contextText += `- Target Paths: ${contract.targetPaths.join(", ") || "(project-wide)"}\n`;
+    const explicitTargets = contract.targetPaths?.filter((tp) => tp && !tp.includes("project-wide")) || [];
+    contextText += `- Target Constraints: ${explicitTargets.length > 0 ? explicitTargets.join(", ") : "(determined by repository evidence)"}\n`;
     contextText += `- Allowed Actions: ${contract.allowedActions.join(", ")}\n`;
     contextText += `- Forbidden Actions: ${contract.forbiddenActions.join(", ")}\n\n`;
+
+    if (repositoryContext.evidenceStore) {
+      const summary = repositoryContext.evidenceStore.getAllEvidence().slice(-30);
+      if (summary.length > 0) {
+        contextText += `VERIFIED REPOSITORY EVIDENCE (YOU MUST CITE VALID EVIDENCE IDS IN evidenceIds[]):\n`;
+        for (const e of summary) {
+          contextText += `- ID: "${e.id}" | Kind: ${e.kind} | Path: "${e.filePath}"${e.symbol ? ` | Symbol: "${e.symbol}"` : ""}${e.sourceFile ? ` | Source: "${e.sourceFile}"` : ""}\n`;
+        }
+        contextText += `- EVIDENCE CITATION MANDATE: Every file in your manifest MUST cite 1 or more evidence IDs from the list above in "evidenceIds": ["..."] proving why it exists and relates to the task. CREATE operations must cite integration evidence (e.g. the component integrating it). Never invent evidence IDs.\n\n`;
+      }
+    }
 
     contextText += `VERIFIED REPOSITORY ARCHITECTURE:\n`;
     contextText += `- Framework: ${arch.framework}\n`;
@@ -195,10 +207,15 @@ export class ManifestGenerator {
         ? f.dependencies.map((d: any) => String(d).trim().replace(/\\/g, "/")).filter(Boolean)
         : [];
 
+      const evidenceIds = Array.isArray(f.evidenceIds)
+        ? f.evidenceIds.map((id: any) => String(id).trim()).filter(Boolean)
+        : [];
+
       normalizedFiles.push({
         path: cleanPath,
         action,
         dependencies,
+        evidenceIds,
         description: typeof f.description === "string" ? f.description : undefined,
       });
 
