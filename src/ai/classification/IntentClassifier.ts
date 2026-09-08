@@ -79,12 +79,12 @@ export class IntentClassifier {
         };
       }
 
-      const taskType: TaskType = parsed.taskType;
+      let taskType: TaskType = parsed.taskType;
       const risk: TaskRisk = VALID_RISKS.has(parsed.risk) ? parsed.risk : "MEDIUM";
       const estimatedComplexity: TaskComplexity = VALID_COMPLEXITIES.has(parsed.estimatedComplexity)
         ? parsed.estimatedComplexity
         : "MEDIUM";
-      const intent = parsed.intent || (taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" ? taskType : "NEW_FEATURE");
+      let intent = parsed.intent || (taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" ? taskType : "NEW_FEATURE");
 
       // Extract target path from explicit user input or structured LLM response
       let parsedTargetPath: string | undefined;
@@ -103,26 +103,40 @@ export class IntentClassifier {
       let reasoning = parsed.reasoning || `Classified as ${taskType} (${risk} risk, ${estimatedComplexity} complexity)`;
 
       // Deterministic safety checks run AFTER intent is established
-      if (taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" || intent === "DELETE_FOLDER" || intent === "DELETE_FILE") {
-        const destructiveSafety = DestructiveSafetyEvaluator.evaluate(targetPath || message, effectiveRepoFiles, {
-          isDestructive: true,
-          taskType,
-          targetPath,
-        });
+      // Only an explicit user path from the prompt can be treated as targetPath for safety;
+      // never let an LLM-guessed path bypass repository ambiguity evaluation.
+      const destructiveSafety = DestructiveSafetyEvaluator.evaluate(message, effectiveRepoFiles, {
+        taskType,
+        targetPath: explicitUserPaths[0],
+      });
 
-        if (destructiveSafety.groundedTargets.length > 0 && !targetPath) {
-          targetPath = destructiveSafety.groundedTargets[0];
-        }
-
-        if (destructiveSafety.requiresClarification) {
-          requiresClarification = true;
-          confidence = 0.80;
-          clarificationQuestion = destructiveSafety.clarificationQuestion || clarificationQuestion;
-          clarificationOptions = destructiveSafety.clarificationOptions || clarificationOptions;
-          reasoning = destructiveSafety.clarificationQuestion || "Destructive target is ambiguous or ungrounded.";
-        } else {
+      if (
+        taskType === "DELETE_FOLDER" ||
+        taskType === "DELETE_FILE" ||
+        intent === "DELETE_FOLDER" ||
+        intent === "DELETE_FILE" ||
+        destructiveSafety.isDestructive
+      ) {
+        if (destructiveSafety.isInFileModification) {
+          taskType = "BUG_FIX";
+          intent = "BUG_FIX";
           requiresClarification = false;
           confidence = 0.95;
+        } else {
+          if (destructiveSafety.groundedTargets.length > 0 && !targetPath) {
+            targetPath = destructiveSafety.groundedTargets[0];
+          }
+
+          if (destructiveSafety.requiresClarification) {
+            requiresClarification = true;
+            confidence = 0.80;
+            clarificationQuestion = destructiveSafety.clarificationQuestion || clarificationQuestion;
+            clarificationOptions = destructiveSafety.clarificationOptions || clarificationOptions;
+            reasoning = destructiveSafety.clarificationQuestion || "Destructive target is ambiguous or ungrounded.";
+          } else {
+            requiresClarification = false;
+            confidence = 0.95;
+          }
         }
       }
 

@@ -921,7 +921,7 @@ export class AgentPipeline {
           intentResult.intent === "DELETE_FILE" ||
           compound.hasDeletion;
 
-        if (detectReferenceCleanupIntent(request.message) && isDestructiveOrDeletion && Array.isArray(rawManifest.files)) {
+        if (isDestructiveOrDeletion && Array.isArray(rawManifest.files)) {
           const cleanupResult = TargetScopeExpander.expandReverseReferenceCleanupTargets({
             contract: executionContract,
             manifestFiles: rawManifest.files,
@@ -942,6 +942,54 @@ export class AgentPipeline {
             }
             for (const exp of cleanupResult.approvedExpansions) {
               executionContract.targetProvenance[exp.path] = "DETERMINISTIC_REFERENCE_CLEANUP";
+
+              // Pre-seed backend evidence for importer cleanup
+              const importerFileEv = evidenceStore.addEvidence({
+                kind: "FILE",
+                filePath: exp.path,
+                provenance: "REPO_READ",
+                repositoryId: projectId,
+                metadata: { exists: true },
+              });
+              const importerRelEv = evidenceStore.addEvidence({
+                kind: exp.evidence === "SYMBOL_REFERENCE" ? "REFERENCE" : "IMPORT",
+                filePath: exp.path,
+                sourceFile: exp.sourceTarget,
+                provenance: "REFERENCE_SEARCH",
+                repositoryId: projectId,
+                metadata: { target: exp.sourceTarget, relation: exp.evidence },
+              });
+
+              // If importer is not yet in rawManifest.files, add it as a required modify action
+              const existingManifestEntry = rawManifest.files.find(
+                (f) => normalizeRepoPath(f.path) === normalizeRepoPath(exp.path)
+              );
+              if (!existingManifestEntry) {
+                rawManifest.files.push({
+                  path: exp.path,
+                  action: "modify",
+                  description: `Clean up broken import/reference to deleted target '${exp.sourceTarget}'`,
+                  evidenceIds: [importerFileEv.id, importerRelEv.id],
+                  dependencies: [exp.sourceTarget],
+                });
+                rawManifest.totalFiles = rawManifest.files.length;
+              } else {
+                if (!Array.isArray(existingManifestEntry.evidenceIds)) {
+                  existingManifestEntry.evidenceIds = [];
+                }
+                if (!existingManifestEntry.evidenceIds.includes(importerFileEv.id)) {
+                  existingManifestEntry.evidenceIds.push(importerFileEv.id);
+                }
+                if (!existingManifestEntry.evidenceIds.includes(importerRelEv.id)) {
+                  existingManifestEntry.evidenceIds.push(importerRelEv.id);
+                }
+                if (!Array.isArray(existingManifestEntry.dependencies)) {
+                  existingManifestEntry.dependencies = [];
+                }
+                if (!existingManifestEntry.dependencies.includes(exp.sourceTarget)) {
+                  existingManifestEntry.dependencies.push(exp.sourceTarget);
+                }
+              }
             }
             executionContract.searchScope = Array.from(
               new Set([...executionContract.searchScope, ...executionContract.targetPaths])

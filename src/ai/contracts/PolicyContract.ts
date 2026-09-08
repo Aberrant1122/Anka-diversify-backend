@@ -31,13 +31,13 @@ export interface PolicyContract {
 
 export const POLICY_RULES: Record<TaskType, PolicyContractRules> = {
   DELETE_FOLDER: {
-    allowedActions: ["delete_folder", "remove_imports", "update_references", "clean_barrel_exports"],
+    allowedActions: ["delete_folder", "remove_imports", "update_references", "clean_barrel_exports", "modify_file"],
     forbiddenActions: ["refactor", "rename", "move_files", "merge_types", "create_utilities", "create_components", "add_routes"],
     maxFiles: 12,
     diffCriticEnabled: true,
   },
   DELETE_FILE: {
-    allowedActions: ["delete_file", "remove_imports", "update_references"],
+    allowedActions: ["delete_file", "remove_imports", "update_references", "modify_file"],
     forbiddenActions: ["refactor", "rename", "merge_types", "create_new_files", "add_routes"],
     maxFiles: 8,
     diffCriticEnabled: true,
