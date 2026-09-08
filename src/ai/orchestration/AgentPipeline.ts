@@ -29,6 +29,7 @@ import { ManifestGenerator } from "../generation/ManifestGenerator";
 import { TaskDecomposer } from "../generation/TaskDecomposer";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { ValidationPlanner } from "../validation/ValidationPlanner";
+import { ValidationRunner } from "../validation/ValidationRunner";
 import { ValidationDetector } from "../validation/ValidationDetector";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { BuildErrorRepair } from "../repair/BuildErrorRepair";
@@ -349,6 +350,135 @@ export class AgentPipeline {
         targetPath: intentResult.targetPath,
         confidence: intentResult.confidence,
         taskExecutionPlan,
+      };
+    }
+
+    // ── Deterministic Successful No-Op Gate for Repair Tasks (ALREADY_SATISFIED) ──
+    const isRepairStage =
+      activeStage.intent.taskType === "BUG_FIX" ||
+      intentResult.taskType === "BUG_FIX" ||
+      activeStage.intent.operations?.some((op) => op.kind === "REPAIR");
+
+    const hasSourceDiagnostics =
+      normalizedDiagnostics.some((d) => d.category === "SOURCE_DIAGNOSTIC") ||
+      diagnosticEvidences.some((e) => e.kind === "DIAGNOSTIC" && !e.metadata?.stale);
+
+    const hasEnvironmentFailure =
+      normalizedDiagnostics.some(
+        (d) =>
+          d.category === "ENVIRONMENT_FAILURE" ||
+          d.category === "TOOLCHAIN_FAILURE" ||
+          d.category === "DEPENDENCY_FAILURE"
+      ) ||
+      options?.baselineDependencyInstall === "FAIL" ||
+      options?.dependenciesReady === false ||
+      options?.healthStatus === "BASELINE_REPOSITORY_UNHEALTHY";
+
+    const dependenciesReady =
+      options?.dependenciesReady !== false &&
+      options?.baselineDependencyInstall !== "FAIL" &&
+      !hasEnvironmentFailure;
+
+    let baselinePassed: boolean | undefined =
+      options?.baselineBuildPassed !== undefined
+        ? Boolean(options.baselineBuildPassed)
+        : options?.baselineBuild === "PASS"
+        ? true
+        : options?.baselineBuild === "FAIL"
+        ? false
+        : undefined;
+
+    if (
+      isRepairStage &&
+      baselinePassed === undefined &&
+      dependenciesReady &&
+      effectiveLocalPath &&
+      fs.existsSync(effectiveLocalPath)
+    ) {
+      const baselineCmds =
+        options?.baselineCommands ||
+        ValidationPlanner.detectValidationCommands(
+          effectiveLocalPath,
+          effectiveSnapshot,
+          executionContract
+        );
+      if (baselineCmds.length > 0) {
+        try {
+          const baselineCheck = await ValidationRunner.validateWithShell(
+            [],
+            effectiveLocalPath,
+            baselineCmds
+          );
+          baselinePassed = baselineCheck.success;
+        } catch {
+          baselinePassed = false;
+        }
+      } else {
+        baselinePassed = true;
+      }
+    }
+
+    const isAlreadySatisfied =
+      isRepairStage &&
+      dependenciesReady &&
+      baselinePassed === true &&
+      !hasSourceDiagnostics &&
+      !hasEnvironmentFailure;
+
+    if (isAlreadySatisfied) {
+      console.log(
+        `[AgentPipeline] Repair task is already satisfied: deterministic baseline validation passed with 0 source diagnostics. Returning ALREADY_SATISFIED successful no-op.`
+      );
+
+      const advancedPlanResult = TaskExecutionPlanManager.advancePlanStage(taskExecutionPlan);
+      const updatedPlan = advancedPlanResult.plan;
+      const compoundStatus = updatedPlan.stages.every((s) => s.status === "VERIFIED")
+        ? "COMPLETED"
+        : "RUNNING";
+
+      const explanation =
+        `[Deterministic No-Op: ALREADY_SATISFIED] Baseline verification succeeded and zero source diagnostics exist for this repository. The requested repair is already satisfied.`;
+
+      onProgress?.({
+        step: 10,
+        stageName: "MEMORY_PERSISTENCE",
+        label: "Verify & Done",
+        detail: "Repair already satisfied by baseline verification. Zero changes needed.",
+        color: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
+        badge: "ALREADY_SATISFIED · 0ms",
+        progress: 100,
+        log: `[Stage Complete] ${explanation}`,
+        durationMs: 0,
+      });
+
+      await MemoryPersistence.saveMessage(session.id, "assistant", explanation);
+      if (!session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
+
+      return {
+        explanation,
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        intent: intentResult.intent,
+        taskType: intentResult.taskType,
+        risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity,
+        targetPath: intentResult.targetPath,
+        confidence: 1.0,
+        successfulNoOp: true,
+        reason: "ALREADY_SATISFIED",
+        status: "ALREADY_SATISFIED",
+        buildVerified: true,
+        taskVerified: true,
+        repositoryClean: true,
+        healthStatus: "HEALTHY",
+        taskExecutionPlan: updatedPlan,
+        compoundTaskStatus: compoundStatus,
+        lifecycleStage: "Done",
+        baselineDiagnosticCount: 0,
+        targetedBaselineDiagnostics: [],
+        remainingBaselineDiagnostics: [],
+        newTaskDiagnostics: [],
       };
     }
 

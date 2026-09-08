@@ -480,6 +480,8 @@ export interface AgentResponse {
   repairTrigger?: "SHELL_VALIDATION_FAILURE" | "LLM_REVIEW_REJECTION" | "NONE";
   buildErrors?: string;
   successfulNoOp?: boolean;
+  reason?: string;
+  status?: string;
   verificationChecklist?: ChecklistItem[];
   lifecycleStage?: "Done" | "BuildFailed" | "ManifestValidationFailed" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
   pipelineMeasurementText?: string;
