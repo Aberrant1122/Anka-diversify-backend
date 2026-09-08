@@ -648,6 +648,11 @@ export class GitWorktreeService {
             targetedBaselineDiagnostics,
             isBaselineDeltaTask,
             baseCommitSha: prepared.baseCommitSha,
+            baselineBuildPassed,
+            baselineReady: baselineBuildPassed,
+            dependenciesReady: depPrep.success,
+            baselineCommands,
+            baselineBuildErrors,
           }
         );
       } catch (err: any) {
