@@ -107,6 +107,14 @@ httpServer.on("upgrade", (_req, socket) => {
 import { WasmASTParserEngine } from "./services/ast-parser.engine";
 import { GitWorktreeService } from "./services/git-worktree.service";
 import { RepositoryCacheManager } from "./services/repository-cache.manager";
+import { TerminalSessionManager } from "./services/terminal-session-manager";
+
+process.on("SIGTERM", () => {
+  TerminalSessionManager.getInstance().shutdownAll();
+});
+process.on("SIGINT", () => {
+  TerminalSessionManager.getInstance().shutdownAll();
+});
 
 // Initialize WebAssembly Tree-Sitter AST Engine on server boot
 WasmASTParserEngine.initialize()
@@ -126,5 +134,4 @@ httpServer.listen(PORT, () => {
 
 httpServer.timeout = 300000; // 5 minutes for long-running AI agent tasks
 httpServer.keepAliveTimeout = 120000; // 2 minutes keep-alive
-
 export default app;

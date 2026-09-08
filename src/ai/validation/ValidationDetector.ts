@@ -4,7 +4,8 @@ import { StaticValidationEngine } from "../../services/static-validator.engine";
 import { FEATURE_VALIDATOR_PROMPT } from "../prompts/validation";
 import {
   detectPrimaryActiveEntryPoint,
-  isExistingPrimaryUIRefinement,
+  detectAllActiveEntryRoots,
+  detectRepositoryArchitecture,
 } from "../planning/RepositoryArchitectureDetector";
 
 export class ValidationDetector {
@@ -79,24 +80,89 @@ export class ValidationDetector {
 
       const changedFilePaths = new Set(changes.map((c) => c.path));
       const relevantIssues = rawStaticResult.issues.filter((i) => changedFilePaths.has(i.file));
-      const staticResult = { ...rawStaticResult, issues: relevantIssues };
+      const relevantPassed = !relevantIssues.some((i) => i.severity === "FAIL");
+      const staticResult = {
+        ...rawStaticResult,
+        issues: relevantIssues,
+        passed: relevantPassed,
+        status: relevantIssues.some((i) => i.severity === "FAIL")
+          ? ("FAIL" as const)
+          : relevantIssues.some((i) => i.severity === "WARNING")
+          ? ("WARNING" as const)
+          : ("PASS" as const),
+      };
 
       const existingFilePaths = projectFilesOnly.map((f) => f.path);
-      const isRefinement = isExistingPrimaryUIRefinement(originalMessage);
-      const activeEntry = detectPrimaryActiveEntryPoint(existingFilePaths);
+      const pkgFile = projectFilesOnly.find((f) => f.path && f.path.endsWith("package.json"));
+      const arch = detectRepositoryArchitecture(existingFilePaths, pkgFile?.content);
+      const isBackendOnly = arch.framework === "EXPRESS" || arch.framework === "NODE_JS";
+      const isDelete = (c: AgentFileChange) => c.action === "delete" || c.isDeleted === true;
+      const frontendChanges = changes.filter((c) => {
+        if (isDelete(c)) return false;
+        const norm = c.path.replace(/\\/g, "/").toLowerCase();
+        return (
+          norm.endsWith(".tsx") ||
+          norm.endsWith(".jsx") ||
+          norm.endsWith(".css") ||
+          norm.endsWith(".scss") ||
+          norm.endsWith(".html") ||
+          (norm.endsWith(".ts") && !norm.endsWith(".d.ts") && !norm.includes(".test.") && !norm.includes(".spec.")) ||
+          (norm.endsWith(".js") && !norm.includes(".test.") && !norm.includes(".spec."))
+        );
+      });
+
+      const hasFrontendChanges = frontendChanges.length > 0;
+      const isUiTaskFromContract = contract
+        ? contract.environment === "REACT_TS" || contract.taskType === "NEW_FEATURE"
+        : hasFrontendChanges;
+
       let activeTargetSatisfied = true;
       let activeTargetDetails = "Intent targets verified";
 
-      if (isRefinement && activeEntry) {
-        const normTarget = activeEntry.replace(/\\/g, "/").toLowerCase();
-        const touchesActive = changes.some((c) => {
-          const norm = c.path.replace(/\\/g, "/").toLowerCase();
-          return norm === normTarget || norm.endsWith(normTarget);
-        });
+      if (!isBackendOnly && (hasFrontendChanges || isUiTaskFromContract)) {
+        const activeRoots = detectAllActiveEntryRoots(existingFilePaths, arch);
 
-        if (!touchesActive) {
-          activeTargetSatisfied = false;
-          activeTargetDetails = `User requested to improve dashboard UI, but active entry point "${activeEntry}" was not modified.`;
+        if (activeRoots.length > 0) {
+
+          if (frontendChanges.length === 0) {
+            activeTargetSatisfied = false;
+            activeTargetDetails = "Modified UI target is not reachable from any active frontend entry point.";
+          } else {
+            const reachableFiles = StaticValidationEngine.computeReachableFiles(
+              activeRoots,
+              rawStaticResult.dependencyGraph || new Map(),
+            );
+
+            const isChangeActive = (c: AgentFileChange): boolean => {
+              const normPath = c.path.replace(/\\/g, "/");
+              const lowerPath = normPath.toLowerCase();
+
+              // 1. active entry file itself was modified
+              const touchesActiveEntry = activeRoots.some((r) => {
+                const normRoot = r.replace(/\\/g, "/").toLowerCase();
+                return lowerPath === normRoot || lowerPath.endsWith("/" + normRoot);
+              });
+              if (touchesActiveEntry) return true;
+
+              // 2. modified existing file is deterministically reachable from active entry
+              // 3. newly-created file is integrated by a reachable modified/existing file
+              if (reachableFiles.has(lowerPath) || reachableFiles.has(normPath)) {
+                return true;
+              }
+
+              return false;
+            };
+
+            const hasActiveModification = frontendChanges.some(isChangeActive);
+
+            if (!hasActiveModification) {
+              activeTargetSatisfied = false;
+              activeTargetDetails = "Modified UI target is not reachable from any active frontend entry point.";
+            } else {
+              activeTargetSatisfied = true;
+              activeTargetDetails = "Active target reachability verified";
+            }
+          }
         }
       }
 

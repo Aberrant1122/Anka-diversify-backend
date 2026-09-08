@@ -184,7 +184,9 @@ async function runTests() {
   console.log("\n✨ ALL STATIC VALIDATION ENGINE UNIT TESTS PASSED!\n");
 }
 
-runTests().catch((err) => {
-  console.error("Unit test execution error:", err);
-  process.exit(1);
+describe("StaticValidationEngine Unit Tests", () => {
+  test("runs all static validator unit tests", async () => {
+    await runTests();
+    expect(process.exitCode ?? 0).toBe(0);
+  });
 });

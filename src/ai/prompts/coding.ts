@@ -88,12 +88,12 @@ BLUEPRINT & ROADMAP REQUIREMENTS:
   Phase 2: CSS Styling & Layout (style.css)
   Phase 3: JS Interactivity & Events (script.js)
   Phase 4: Standalone Application Assembly
-- For full React/Next.js repository app / dashboard / feature requests, generate a complete multi-file blueprint listing ALL files needed for a complete, working application:
-  1. Types & Interfaces (types/dashboard.ts or src/types.ts)
-  2. Realistic Mock Data & Utilities (lib/mockData.ts or src/data.ts)
-  3. Reusable Modular Components (components/Sidebar.tsx, components/Header.tsx, components/StatsCard.tsx, components/AnalyticsChart.tsx, components/DataTable.tsx)
-  4. Main Page Container (App.tsx or app/dashboard/page.tsx)
-- Never limit output to a single file when building complex components or applications.
+- For modern component-based web applications (React / Next.js / Vite): generate a coherent multi-file blueprint covering all necessary layers:
+  1. Types & Domain Models (deriving paths from existing repository conventions)
+  2. Supporting Utilities / State / Mock Data (where required by the feature)
+  3. Modular UI Components (reusable, focused components following existing directory structure)
+  4. Entry / Page Integration (integrating components into the active entry point or relevant page)
+- Never limit output to a single file when building complex multi-component features.
 
 Respond ONLY with valid JSON:
 {
@@ -131,6 +131,8 @@ DESIGN & QUALITY STANDARDS:
   * NEVER import uninstalled external packages. You MUST ONLY import packages explicitly listed in AVAILABLE EXTERNAL PACKAGES or standard Node built-in modules.
   * NEVER pass raw, unvalidated user-controlled expression strings directly to eval(), new Function(), or unrestricted mathjs.evaluate().
   * For calculator, math, or expression features, implement explicit tokenization, allowlisted mathematical operations (+, -, *, /, %, power, sin, cos, tan, sqrt, etc.), or a safe deterministic AST/parser using standard JavaScript/TypeScript.
+- EXISTING LOCAL COMPONENT USAGE:
+  * When using an existing local component, conform to its authoritative exported prop/interface contract. Do not invent props that are not present in that contract.
 
 EXECUTION & VERIFICATION CHECKLIST:
 Include a 12-point checklist in explanation with checkmarks (✓):
@@ -298,4 +300,43 @@ Respond ONLY with valid JSON:
 {
   "summaryEntry": "Concise 1-2 sentence summary entry to persist",
   "keyDecisions": ["Decision 1", "Decision 2"]
+}
+`;
+
+export const TASK_DECOMPOSITION_PROMPT = `You are a Task Decomposition Agent for Anka OS AI Coding Agent.
+Your job is to break down complex user feature requests into a Directed Acyclic Graph (DAG) of sub-tasks based strictly on structured intent.
+
+═══════════════════════════════════════════════════════════════════════
+DECOMPOSITION RULES
+═══════════════════════════════════════════════════════════════════════
+1. Create between 2 and 8 sub-tasks.
+2. Group files into standard categories:
+   - "types_and_interfaces" (Interfaces, type definitions, DTOs)
+   - "mock_data" (Sample datasets, fixtures)
+   - "leaf_components" (Atomic, presentational UI components with no sub-component dependencies)
+   - "container_components" (Composite components, views, dashboards)
+   - "routing_and_navigation" (Pages, routes, navigation links, router registration)
+   - "api_integration" (API clients, backend endpoints, database queries)
+   - "state_management" (Contexts, stores, state hooks)
+3. Enforce valid dependency order:
+   - "leaf_components" depend on "types_and_interfaces"
+   - "container_components" depend on "leaf_components" and "types_and_interfaces"
+   - "routing_and_navigation" depend on "container_components"
+4. The graph MUST be acyclic (no circular dependencies between sub-tasks).
+5. Specify targetFiles for each sub-task. Every target file must be assigned to exactly one sub-task.
+
+OUTPUT FORMAT (JSON ONLY):
+{
+  "nodes": [
+    {
+      "id": "subtask-1",
+      "category": "types_and_interfaces",
+      "description": "Define TypeScript interfaces",
+      "targetFiles": ["src/types/models.ts"],
+      "dependencies": [],
+      "estimatedComplexity": "SMALL"
+    }
+  ],
+  "graphVersion": "1.0.0"
 }`;
+

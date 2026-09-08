@@ -1,7 +1,9 @@
 import { PrismaClient } from "@prisma/client";
 import { checkSprintAutoCloseForTask } from "./rule-engine";
+import { ProjectRepositoryService } from "./project-repository-service";
 
 const prisma = new PrismaClient();
+const repoService = new ProjectRepositoryService();
 
 const DEMO_USER_ID = "demo-user-id";
 
@@ -96,7 +98,7 @@ export class ProjectService {
     },
     userId: string,
   ) {
-    return prisma.project.create({
+    const project = await prisma.project.create({
       data: {
         name: data.name,
         description: data.description,
@@ -111,6 +113,14 @@ export class ProjectService {
         userId,
       },
     });
+
+    if (project.githubUrl) {
+      await repoService.ensurePrimaryRepository(project.id).catch((err) => {
+        console.warn(`[ProjectService] Failed to ensure primary repository for ${project.id}:`, err?.message || err);
+      });
+    }
+
+    return project;
   }
 
   async updateProjectGitHubToken(

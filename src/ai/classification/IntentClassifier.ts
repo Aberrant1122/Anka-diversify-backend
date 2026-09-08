@@ -1,20 +1,53 @@
 import { getOpenAI } from "../shared/utils";
 import { INTENT_CLASSIFIER_PROMPT } from "../prompts/classification";
 import { TaskType, TaskRisk, TaskComplexity, TaskClassificationResult } from "./TaskTypes";
-import { TaskClassifier } from "./TaskClassifier";
+import { DestructiveSafetyEvaluator } from "./DestructiveSafetyEvaluator";
+import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
+
+const VALID_TASK_TYPES = new Set<TaskType>([
+  "DELETE_FOLDER",
+  "DELETE_FILE",
+  "NEW_FEATURE",
+  "BUG_FIX",
+  "REFACTOR",
+  "FILE_CREATION",
+  "CONFIG_CHANGE",
+  "DOCS",
+  "OPTIMIZATION",
+]);
+
+const VALID_RISKS = new Set<TaskRisk>(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+const VALID_COMPLEXITIES = new Set<TaskComplexity>(["SMALL", "MEDIUM", "LARGE", "COMPLEX"]);
 
 export class IntentClassifier {
+  /**
+   * Classifies user intent and evaluates ambiguity.
+   *
+   * Invariants (Phase 1B):
+   * 1. LLM structured classification is the ONLY semantic authority.
+   * 2. No prompt keywords or regex overrides decide taskType, risk, complexity, intent, or target path.
+   * 3. Explicit literal file paths supplied by user are parsed deterministically.
+   * 4. If LLM result is unavailable or malformed, fails closed with UNKNOWN / CLASSIFICATION_FAILED.
+   * 5. Destructive safety checks execute deterministically only after structured intent is established.
+   */
   static async classifyIntentAndAmbiguity(
     message: string,
     projectContext: any,
+    repoFiles?: string[],
+    openaiClient?: any,
   ): Promise<TaskClassificationResult> {
-    const isDeleteFolder = /remove|delete|rm\s+-rf|clean/i.test(message) && /folder|dir|directory|cache|lib|dist|build/i.test(message);
-    const isDeleteFile = /remove|delete|unlink/i.test(message) && /file|\.ts|\.tsx|\.js|\.json|\.css/i.test(message);
-    const isNewFeature = /build|create|add|implement|design|generate|setup/i.test(message) && /auth|authentication|login|feature|dashboard|payment|page|component|service/i.test(message);
+    const effectiveRepoFiles: string[] =
+      repoFiles ||
+      projectContext?.repoFiles ||
+      (Array.isArray(projectContext?.fileTree) ? projectContext.fileTree : []) ||
+      (Array.isArray(projectContext?.keyFiles) ? projectContext.keyFiles.map((f: any) => typeof f === "string" ? f : f?.path || "") : []);
 
-    const openai = getOpenAI();
+    const explicitUserPaths = TargetPathExtractor.extractWithProvenance(message, { repoFiles: effectiveRepoFiles })
+      .filter((p) => p.provenance === "EXPLICIT_USER_PATH")
+      .map((p) => p.path);
 
     try {
+      const openai = openaiClient || getOpenAI();
       const completion = await openai.chat.completions.create({
         model: "gpt-4o",
         messages: [
@@ -29,17 +62,31 @@ export class IntentClassifier {
       });
 
       const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
-      const isActionRequest = /create|build|make|design|generate|add|remove|delete|rm|fix|update/i.test(message);
 
-      const defaults = TaskClassifier.evaluateDefaults(message);
+      // Strict schema validation of LLM output
+      if (!parsed.taskType || !VALID_TASK_TYPES.has(parsed.taskType)) {
+        return {
+          taskType: "UNKNOWN",
+          risk: "HIGH",
+          estimatedComplexity: "COMPLEX",
+          intent: "CLASSIFICATION_FAILED",
+          confidence: 0,
+          requiresClarification: true,
+          reasoning: "Classification failed: structured taskType is missing or invalid.",
+          targetPath: explicitUserPaths[0],
+          question: "Could you please clarify your request?",
+          options: [],
+        };
+      }
 
-      const taskType: TaskType = parsed.taskType || defaults.taskType;
-      const risk: TaskRisk = parsed.risk || defaults.risk;
-      const estimatedComplexity: TaskComplexity = parsed.estimatedComplexity || defaults.estimatedComplexity;
-      const intent = parsed.intent || (taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" ? "REFACTOR" : "NEW_FEATURE");
-      const confidence = isActionRequest ? 0.95 : (typeof parsed.confidence === "number" ? parsed.confidence : 0.85);
-      const requiresClarification = isActionRequest ? false : Boolean(parsed.requiresClarification && confidence < 0.70);
+      const taskType: TaskType = parsed.taskType;
+      const risk: TaskRisk = VALID_RISKS.has(parsed.risk) ? parsed.risk : "MEDIUM";
+      const estimatedComplexity: TaskComplexity = VALID_COMPLEXITIES.has(parsed.estimatedComplexity)
+        ? parsed.estimatedComplexity
+        : "MEDIUM";
+      const intent = parsed.intent || (taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" ? taskType : "NEW_FEATURE");
 
+      // Extract target path from explicit user input or structured LLM response
       let parsedTargetPath: string | undefined;
       if (typeof parsed.targetPath === "string" && parsed.targetPath.trim()) {
         parsedTargetPath = parsed.targetPath.trim();
@@ -47,18 +94,37 @@ export class IntentClassifier {
         parsedTargetPath = String(parsed.targetPath[0]).trim() || undefined;
       }
 
-      let regexTargetPath: string | undefined;
-      if (!parsedTargetPath && (isDeleteFolder || isDeleteFile)) {
-        const extracted = message.replace(
-          /.*(?:remove|delete|rm)\s+(?:folder\s+|dir(?:ectory)?\s+|file\s+)?["']?([\w\-./\\]+)["']?.*/i,
-          "$1",
-        );
-        if (extracted !== message && extracted.length < message.length && /[\w\-./\\]/.test(extracted)) {
-          regexTargetPath = extracted.trim();
+      let targetPath = explicitUserPaths[0] || parsedTargetPath;
+
+      let confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0.85;
+      let requiresClarification = Boolean(parsed.requiresClarification);
+      let clarificationQuestion = parsed.question;
+      let clarificationOptions = parsed.options;
+      let reasoning = parsed.reasoning || `Classified as ${taskType} (${risk} risk, ${estimatedComplexity} complexity)`;
+
+      // Deterministic safety checks run AFTER intent is established
+      if (taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" || intent === "DELETE_FOLDER" || intent === "DELETE_FILE") {
+        const destructiveSafety = DestructiveSafetyEvaluator.evaluate(targetPath || message, effectiveRepoFiles, {
+          isDestructive: true,
+          taskType,
+          targetPath,
+        });
+
+        if (destructiveSafety.groundedTargets.length > 0 && !targetPath) {
+          targetPath = destructiveSafety.groundedTargets[0];
+        }
+
+        if (destructiveSafety.requiresClarification) {
+          requiresClarification = true;
+          confidence = 0.80;
+          clarificationQuestion = destructiveSafety.clarificationQuestion || clarificationQuestion;
+          clarificationOptions = destructiveSafety.clarificationOptions || clarificationOptions;
+          reasoning = destructiveSafety.clarificationQuestion || "Destructive target is ambiguous or ungrounded.";
+        } else {
+          requiresClarification = false;
+          confidence = 0.95;
         }
       }
-
-      const targetPath = parsedTargetPath || regexTargetPath;
 
       return {
         taskType,
@@ -67,21 +133,24 @@ export class IntentClassifier {
         intent,
         confidence,
         requiresClarification,
-        reasoning: parsed.reasoning || `Classified as ${taskType} (${risk} risk, ${estimatedComplexity} complexity)`,
+        reasoning,
         targetPath,
-        question: parsed.question,
-        options: parsed.options,
+        question: clarificationQuestion,
+        options: clarificationOptions,
       };
     } catch {
-      const defaults = TaskClassifier.evaluateDefaults(message);
+      // Fail closed: Do NOT guess taskType, risk, complexity, intent, or target path from prompt keywords
       return {
-        taskType: defaults.taskType,
-        risk: defaults.risk,
-        estimatedComplexity: defaults.estimatedComplexity,
-        intent: defaults.taskType === "DELETE_FOLDER" || defaults.taskType === "DELETE_FILE" ? "REFACTOR" : "NEW_FEATURE",
-        confidence: 0.95,
-        requiresClarification: false,
-        reasoning: `Fallback intent classifier determined ${defaults.taskType} (${defaults.risk} risk)`,
+        taskType: "UNKNOWN",
+        risk: "HIGH",
+        estimatedComplexity: "COMPLEX",
+        intent: "CLASSIFICATION_FAILED",
+        confidence: 0,
+        requiresClarification: true,
+        reasoning: "Classification failed: LLM structured response unavailable or malformed.",
+        targetPath: explicitUserPaths[0],
+        question: "Could you please clarify your request?",
+        options: [],
       };
     }
   }

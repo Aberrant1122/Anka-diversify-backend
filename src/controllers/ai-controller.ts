@@ -6,6 +6,7 @@ import { PrismaClient } from "@prisma/client";
 import { decrypt } from "../utils/encryption";
 import { listActiveReservations } from "../services/file-reservation-service";
 import { RepositoryMaterializationService } from "../services/repository-materialization.service";
+import { MultiRepoCoordinator } from "../ai/coordination/MultiRepoCoordinator";
 
 const prisma = new PrismaClient();
 
@@ -414,6 +415,67 @@ export class AiController {
       res.write(`event: error\ndata: ${JSON.stringify({ error: "Agent run failed", message: error instanceof Error ? error.message : "Unknown error" })}\n\n`);
       (res as any).flush?.();
       res.end();
+    }
+  }
+
+  async runMultiRepoAgent(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId as string | undefined;
+      const { projectId } = req.params;
+      if (!userId) return res.status(401).json({ error: "Authentication required" });
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+
+      const { message, repositoryIds } = req.body as {
+        message: string;
+        repositoryIds?: string[];
+      };
+
+      if (!message || typeof message !== "string") {
+        return res.status(400).json({ error: "message is required" });
+      }
+
+      const coordinator = new MultiRepoCoordinator();
+
+      if (req.headers.accept?.includes("text/event-stream") || req.query.stream === "true") {
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        (res as any).flushHeaders?.();
+
+        const sendEvent = (event: string, data: any) => {
+          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          (res as any).flush?.();
+        };
+
+        const result = await coordinator.coordinateTask({
+          userId,
+          projectId,
+          userPrompt: message,
+          repositoryIds,
+          onProgress: (progressEvent) => {
+            sendEvent("progress", progressEvent);
+          },
+        });
+
+        sendEvent("complete", result);
+        return res.end();
+      }
+
+      const result = await coordinator.coordinateTask({
+        userId,
+        projectId,
+        userPrompt: message,
+        repositoryIds,
+      });
+
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error("Multi-repo agent error:", error);
+      res.status(500).json({
+        error: "Multi-repo coordination failed",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   }
 

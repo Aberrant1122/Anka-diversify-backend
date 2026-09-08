@@ -5,6 +5,7 @@ import { FileManifest } from "../../types";
 import {
   GeneratedChangeProposal,
   resolveGenerationProposals,
+  validateGenerationProposals,
   ResolutionResult,
 } from "./GenerationProposalResolver";
 import { PatchCorrectionEngine, PatchCorrectionTelemetry } from "./PatchCorrectionEngine";
@@ -20,10 +21,9 @@ import { buildContractGuardrailSection } from "../prompts/validation";
 import { SecurityPolicy } from "../security/SecurityPolicy";
 import { ImportValidator } from "../validation/ImportValidator";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
+import { ComponentContractGrounder } from "../contracts/ComponentContractGrounder";
 import {
   detectRepositoryArchitecture,
-  isUITask,
-  isFullPageDashboardRequest,
   buildRepositoryUISystemPromptSection,
 } from "../planning/RepositoryArchitectureDetector";
 
@@ -244,7 +244,30 @@ Respond ONLY with valid JSON:
       ([p, c]) => `=== SKELETON DEPENDENCY: ${p} ===\n${c}`
     );
 
-    const contextContent = [...modifySourceBlocks, ...supportingBlocks, ...skeletonBlocks].join("\n\n");
+    const effectiveResolutionSourceMap: Record<string, string> =
+      mergedSourceMap ||
+      (authoritativeModifySources
+        ? Object.fromEntries(Object.entries(authoritativeModifySources).map(([p, s]) => [p, s.content]))
+        : null) ||
+      optimizedContext?.fileContext ||
+      {};
+
+    const resolvedComponentContracts = ComponentContractGrounder.resolveComponentContractsForGeneration({
+      authorizedModifySources: authoritativeModifySources,
+      approvedManifest,
+      contract,
+      effectiveResolutionSourceMap,
+      userMessage: message,
+    });
+
+    const componentContractBlocks = resolvedComponentContracts.map((c) => c.contractText);
+
+    const contextContent = [
+      ...modifySourceBlocks,
+      ...supportingBlocks,
+      ...skeletonBlocks,
+      ...componentContractBlocks,
+    ].join("\n\n");
 
     let multiFileInstruction = "";
     if (approvedManifest && Array.isArray(approvedManifest.files) && manifestDeleteFiles.length > 0) {
@@ -256,19 +279,16 @@ Respond ONLY with valid JSON:
     } else {
       const narrowScopeTypes = new Set(["DELETE_FOLDER", "DELETE_FILE", "CONFIG_CHANGE", "DOCS"]);
       const isNarrowScope = contract && narrowScopeTypes.has(contract.taskType);
-      const isAppOrDashboardRequest = (!isNarrowScope || manifestHasCreateOrModify) && /dashboard|game|app|landing|page|feature|component|system/i.test(message);
-      if (isAppOrDashboardRequest) {
+      const isMultiFileRequest = (!isNarrowScope || manifestHasCreateOrModify) && (
+        (approvedManifest && approvedManifest.files.length >= 2) ||
+        contract?.estimatedComplexity === "LARGE" ||
+        contract?.estimatedComplexity === "COMPLEX" ||
+        (contract?.maxFiles !== undefined && contract.maxFiles >= 2)
+      );
+      if (isMultiFileRequest) {
         multiFileInstruction = "\n\nMULTI-FILE ARCHITECTURE MANDATE: Output a complete multi-file blueprint containing ALL necessary files.";
       }
     }
-
-    const effectiveResolutionSourceMap: Record<string, string> =
-      mergedSourceMap ||
-      (authoritativeModifySources
-        ? Object.fromEntries(Object.entries(authoritativeModifySources).map(([p, s]) => [p, s.content]))
-        : null) ||
-      optimizedContext?.fileContext ||
-      {};
 
     const isAppRouter =
       Object.keys(effectiveResolutionSourceMap).some((p) => p.startsWith("app/") || p.includes("/app/")) ||
@@ -284,14 +304,11 @@ Respond ONLY with valid JSON:
     installedPackages = arch.installedPackages;
     hasTailwind = arch.hasTailwind;
 
-    const isUI = isUITask(message);
-    const isFullDashboard = isFullPageDashboardRequest(message);
-    const isSmallComp = !isFullDashboard && /(small|badge|button|tag|pill|icon|fix|minor|single)/i.test(message);
-
+    const isUI = arch.existingUIComponents.length > 0 || (approvedManifest?.files && approvedManifest.files.some((f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f.path)));
     const uiSystemSection = isUI
       ? `\n\n${buildRepositoryUISystemPromptSection(arch, {
-          isDashboard: isFullDashboard,
-          isSmallComponent: isSmallComp,
+          isComprehensiveUI: (approvedManifest?.files?.length || 0) >= 3,
+          isSmallComponent: (approvedManifest?.files?.length || 0) <= 1,
         })}`
       : "";
 
@@ -301,8 +318,8 @@ CSS & STYLING ARCHITECTURE RULES
 ══════════════════════════════════════════════════════════
 1. Tailwind CSS is NOT installed in this repository.
 2. Do NOT write Tailwind utility classes as raw CSS selectors (e.g. NEVER write '.dark:bg-gray-900', '.text-sm', or '.flex' inside .css files).
-3. In stylesheets (.css / .module.css / global.css), use standard, valid CSS class names (e.g. .calculator-container, .display-screen, .action-btn).
-4. For dark mode, use valid CSS selectors like '.dark .calculator-container' or '@media (prefers-color-scheme: dark)'.
+3. In stylesheets (.css / .module.css / global.css), use standard, valid CSS class names matching existing repository conventions.
+4. For dark mode, use valid CSS selectors like '@media (prefers-color-scheme: dark)' or theme class selectors.
 ══════════════════════════════════════════════════════════`
       : "";
 
@@ -334,9 +351,15 @@ at line 1 before any imports.
 
     const manifestSection = buildApprovedFilePlanSection(approvedManifest);
     const contractGuardrail = contract ? buildContractGuardrailSection(contract) : "";
+    const componentContractInstruction = `\n\n══════════════════════════════════════════════════════════
+EXISTING LOCAL COMPONENT PROP CONTRACT RULES
+══════════════════════════════════════════════════════════
+When using an existing local component, conform to its authoritative exported prop/interface contract. Do not invent props that are not present in that contract.
+══════════════════════════════════════════════════════════`;
+
     const effectiveCodingPrompt = isStandaloneWeb
       ? `${STANDALONE_HTML_CSS_JS_PROMPT}${contractGuardrail}${manifestSection}`
-      : `${systemPrompt}\n\n${CODING_AGENT_PROMPT}\n\n${LAYER_CONSTRAINT_PROMPT}${packagesSection}${stylingSection}${appRouterSection}${uiSystemSection}${contractGuardrail}${manifestSection}`;
+      : `${systemPrompt}\n\n${CODING_AGENT_PROMPT}\n\n${LAYER_CONSTRAINT_PROMPT}${packagesSection}${stylingSection}${appRouterSection}${uiSystemSection}${contractGuardrail}${manifestSection}${componentContractInstruction}`;
 
     const hasManifest = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
     const jsonFormatReminder = hasManifest
@@ -469,9 +492,10 @@ at line 1 before any imports.
         );
       }
 
-      const proposals = normalizedProposals;
+      const proposals = [...normalizedProposals];
 
-      let resolution: ResolutionResult = resolveGenerationProposals(
+      // PART A: Structurally validate ALL proposals before application
+      const malformedProposals = validateGenerationProposals(
         proposals,
         effectiveResolutionSourceMap,
       );
@@ -482,83 +506,94 @@ at line 1 before any imports.
         patchCorrectionAttempts: 0,
       };
 
-      if (!resolution.success) {
-        const err = resolution.error;
-        const isEligibleForCorrection =
-          (err.code === "PATCH_TARGET_NOT_FOUND" ||
-            err.code === "AMBIGUOUS_PATCH_TARGET" ||
-            err.code === "NO_OP_PATCH_EDIT" ||
-            err.code === "MODIFY_PATCH_REQUIRED") &&
-          typeof err.proposalIndex === "number" &&
-          proposals[err.proposalIndex]?.action === "modify";
+      if (malformedProposals.length > 0) {
+        // PART B: Bounded Multi-Proposal Correction (Cap check)
+        const MAX_CORRECTABLE_PROPOSALS_PER_GENERATION = 3;
+        if (malformedProposals.length > MAX_CORRECTABLE_PROPOSALS_PER_GENERATION) {
+          throw new Error(
+            `[PATCH_RESOLUTION_FAILED] Bounded correction cap exceeded: ${malformedProposals.length} malformed proposals detected (maximum allowed: ${MAX_CORRECTABLE_PROPOSALS_PER_GENERATION}). Failing closed.`
+          );
+        }
 
-        if (isEligibleForCorrection) {
-          const failedProposal = proposals[err.proposalIndex] as {
-            path: string;
-            action: "modify";
-            edits: any[];
-            description: string;
-          };
+        patchTelemetry.patchCorrectionAttempted = true;
+        let anyFailed = false;
 
-          const originalContent = effectiveResolutionSourceMap[failedProposal.path.replace(/\\/g, "/")];
+        // PART C: Correct ONLY malformed proposals (each gets at most 1 attempt)
+        for (const malformed of malformedProposals) {
+          const proposalIdx = malformed.proposalIndex;
+          const targetProposal = proposals[proposalIdx];
+          if (!targetProposal || targetProposal.action !== "modify") {
+            anyFailed = true;
+            continue;
+          }
 
-          if (originalContent !== undefined) {
-            patchTelemetry.patchCorrectionAttempted = true;
-            patchTelemetry.patchCorrectionAttempts = 1;
-            patchTelemetry.failedFilePath = failedProposal.path;
-            patchTelemetry.errorCode = err.code;
-
-            console.log(
-              `[CodeGenerator] Patch resolution failed with [${err.code}] on "${failedProposal.path}". Triggering bounded exact patch correction (Attempt 1/1)...`
-            );
-
-            const correction = await PatchCorrectionEngine.correctPatch({
-              filePath: failedProposal.path,
-              currentContent: originalContent,
-              userMessage: message,
-              manifestAction: "modify",
-              failedEdits: failedProposal.edits,
-              errorCode: err.code as "PATCH_TARGET_NOT_FOUND" | "AMBIGUOUS_PATCH_TARGET" | "NO_OP_PATCH_EDIT" | "MODIFY_PATCH_REQUIRED",
-              errorMessage: err.message,
-            });
-
-            if (correction.succeeded && correction.correctedEdits && correction.correctedEdits.length > 0) {
-              patchTelemetry.patchCorrectionSucceeded = true;
-              console.log(
-                `[CodeGenerator] Bounded exact patch correction succeeded for "${failedProposal.path}" with ${correction.correctedEdits.length} edit(s). Re-verifying exact resolution...`
-              );
-
-              const correctedProposals = proposals.map((p, idx) => {
-                if (idx === err.proposalIndex) {
-                  return {
-                    ...p,
-                    edits: correction.correctedEdits!,
-                  };
-                }
-                return p;
-              });
-
-              resolution = resolveGenerationProposals(
-                correctedProposals,
-                effectiveResolutionSourceMap,
-              );
-            } else {
-              console.warn(
-                `[CodeGenerator] Bounded exact patch correction failed for "${failedProposal.path}": ${correction.error || "Unknown error"}`
-              );
+          const normPath = targetProposal.path.replace(/\\/g, "/");
+          let originalContent = effectiveResolutionSourceMap[normPath];
+          if (originalContent === undefined) {
+            for (const [k, v] of Object.entries(effectiveResolutionSourceMap)) {
+              if (k.replace(/\\/g, "/").toLowerCase() === normPath.toLowerCase()) {
+                originalContent = v;
+                break;
+              }
             }
+          }
+
+          if (originalContent === undefined) {
+            anyFailed = true;
+            continue;
+          }
+
+          patchTelemetry.patchCorrectionAttempts++;
+          patchTelemetry.failedFilePath = targetProposal.path;
+          patchTelemetry.errorCode = malformed.code;
+
+          console.log(
+            `[CodeGenerator] Proposal ${proposalIdx} ("${targetProposal.path}") failed structural validation with [${malformed.code}]. Triggering bounded exact patch correction (Attempt 1/1)...`
+          );
+
+          const correction = await PatchCorrectionEngine.correctPatch({
+            filePath: targetProposal.path,
+            currentContent: originalContent,
+            userMessage: message,
+            manifestAction: "modify",
+            failedEdits: malformed.failedEdits || (targetProposal as any).edits || [],
+            errorCode: malformed.code as any,
+            errorMessage: malformed.message,
+          });
+
+          if (correction.succeeded && correction.correctedEdits && correction.correctedEdits.length > 0) {
+            console.log(
+              `[CodeGenerator] Bounded exact patch correction succeeded for "${targetProposal.path}" with ${correction.correctedEdits.length} edit(s).`
+            );
+            proposals[proposalIdx] = {
+              ...targetProposal,
+              edits: correction.correctedEdits,
+            };
+          } else {
+            console.warn(
+              `[CodeGenerator] Bounded exact patch correction failed for "${targetProposal.path}": ${correction.error || "Unknown error"}`
+            );
+            anyFailed = true;
           }
         }
 
-        if (!resolution.success) {
-          throw new Error(
-            `[PATCH_RESOLUTION_FAILED] ${resolution.error.code}: ${resolution.error.message}${
-              patchTelemetry.patchCorrectionAttempted
-                ? ` (Bounded correction attempt 1/1 failed)`
-                : ""
-            }`,
-          );
-        }
+        patchTelemetry.patchCorrectionSucceeded = !anyFailed;
+      }
+
+      // Re-run deterministic proposal resolution across the complete set
+      let resolution: ResolutionResult = resolveGenerationProposals(
+        proposals,
+        effectiveResolutionSourceMap,
+      );
+
+      if (!resolution.success) {
+        throw new Error(
+          `[PATCH_RESOLUTION_FAILED] ${resolution.error.code}: ${resolution.error.message}${
+            patchTelemetry.patchCorrectionAttempted
+              ? ` (Bounded correction attempt failed)`
+              : ""
+          }`
+        );
       }
 
       changes = resolution.changes;

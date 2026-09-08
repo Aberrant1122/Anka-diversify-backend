@@ -35,6 +35,7 @@ export interface StaticValidationResult {
     totalRoutesAnalyzed: number;
     analysisTimeMs: number;
   };
+  dependencyGraph?: Map<string, string[]>;
 }
 
 export interface SnapshotFile {
@@ -144,6 +145,12 @@ export class StaticValidationEngine {
     // 8. Check: Created/Modified Stylesheet Integration (Task-Delta Aware)
     StaticValidationEngine.checkStylesheetIntegration(modifiedFiles, asts, fileMap, issues);
 
+    const dependencyGraph = new Map<string, string[]>();
+    for (const ast of asts) {
+      const deps = ast.imports.map((i) => i.resolvedPath).filter(Boolean) as string[];
+      dependencyGraph.set(ast.path, deps);
+    }
+
     const endTime = performance.now();
     const hasFailures = issues.some((i) => i.severity === "FAIL");
     const hasWarnings = issues.some((i) => i.severity === "WARNING");
@@ -164,7 +171,58 @@ export class StaticValidationEngine {
         totalRoutesAnalyzed: asts.filter((a) => a.path.includes("app/") || a.path.includes("pages/")).length,
         analysisTimeMs: endTime - startTime,
       },
+      dependencyGraph,
     };
+  }
+
+  /**
+   * Deterministically computes all files reachable from a set of root entry points
+   * using the parsed repository dependency graph.
+   * Cycle-safe, transitive, and slash/case normalized.
+   */
+  public static computeReachableFiles(
+    roots: string[],
+    dependencyGraph: Map<string, string[]>,
+  ): Set<string> {
+    const reachable = new Set<string>();
+    const visited = new Set<string>();
+    const queue: string[] = [];
+
+    // Map for case-insensitive lookup in dependencyGraph
+    const lowerGraph = new Map<string, string[]>();
+    for (const [k, v] of dependencyGraph.entries()) {
+      lowerGraph.set(k.replace(/\\/g, "/").toLowerCase(), v.map((p) => p.replace(/\\/g, "/")));
+    }
+
+    for (const root of roots) {
+      const norm = root.replace(/\\/g, "/");
+      const lower = norm.toLowerCase();
+      if (!visited.has(lower)) {
+        visited.add(lower);
+        reachable.add(norm);
+        reachable.add(lower);
+        queue.push(norm);
+      }
+    }
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const currentLower = current.replace(/\\/g, "/").toLowerCase();
+      const neighbors = lowerGraph.get(currentLower) || [];
+
+      for (const neighbor of neighbors) {
+        const normNeighbor = neighbor.replace(/\\/g, "/");
+        const lowerNeighbor = normNeighbor.toLowerCase();
+        if (!visited.has(lowerNeighbor)) {
+          visited.add(lowerNeighbor);
+          reachable.add(normNeighbor);
+          reachable.add(lowerNeighbor);
+          queue.push(normNeighbor);
+        }
+      }
+    }
+
+    return reachable;
   }
 
   // ── File AST Parser ─────────────────────────────────────────────────────────
@@ -315,6 +373,28 @@ export class StaticValidationEngine {
       }
     }
 
+    // Extract barrel re-exports: export { ... } from "..." or export * from "..."
+    const exportFromRegex = /export\s+(?:(?:\*|\{[^}]+\}))\s+from\s+["']([^"']+)["']/g;
+    let expFromMatch: RegExpExecArray | null;
+    while ((expFromMatch = exportFromRegex.exec(content)) !== null) {
+      const line = content.slice(0, expFromMatch.index).split("\n").length;
+      const rawPath = expFromMatch[1];
+      const isLocal = rawPath.startsWith(".") || rawPath.startsWith("@/") || rawPath.startsWith("~/");
+      let resolvedPath: string | null = null;
+      if (isLocal) {
+        resolvedPath = StaticValidationEngine.resolveImportPath(p, rawPath, fileMap);
+      }
+      if (!imports.some((i) => i.rawPath === rawPath)) {
+        imports.push({
+          line,
+          rawPath,
+          resolvedPath,
+          isLocal,
+          namedImports: [],
+        });
+      }
+    }
+
     return {
       path: p,
       normalizedPath: p.replace(/\\/g, "/"),
@@ -366,6 +446,16 @@ export class StaticValidationEngine {
       for (const ext of extensions) {
         const candidate = target + ext;
         if (fileMap.has(candidate)) return candidate;
+      }
+    }
+
+    // Case-insensitive fallback for cross-platform robustness
+    for (const target of candidates) {
+      for (const ext of extensions) {
+        const candidateLower = (target + ext).toLowerCase();
+        for (const key of fileMap.keys()) {
+          if (key.toLowerCase() === candidateLower) return key;
+        }
       }
     }
 

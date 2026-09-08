@@ -4,7 +4,8 @@ import { PrismaClient } from "@prisma/client";
 import { formatMs, getOpenAI } from "../shared/utils";
 import { ChatRequest, AgentResponse, AgentProgressEvent, ExecutionContract } from "../shared/types";
 import { IntentClassifier } from "../classification/IntentClassifier";
-import { buildExecutionContract } from "../contracts/ExecutionContractBuilder";
+import { buildExecutionContract, detectReferenceCleanupIntent, detectCompoundIntent } from "../contracts/ExecutionContractBuilder";
+import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
 import { ContractGuardrails } from "../contracts/ContractGuardrails";
 import { RepositoryScanner } from "../repository/RepositoryScanner";
 import { RepositoryKnowledgeGraph, loadPersistedKnowledgeGraph, savePersistedKnowledgeGraph } from "../repository/RepositoryKnowledgeGraph";
@@ -39,6 +40,7 @@ import { ManifestCorrectionEngine } from "../planning/ManifestCorrectionEngine";
 import { AuthoritativeSourceHydrator } from "../manifest/AuthoritativeSourceHydrator";
 import { BaselineDeltaVerifier, createPreTaskSourceGetter } from "../../services/baseline-delta.verifier";
 import { TargetScopeExpander } from "../contracts/TargetScopeExpander";
+import { MonorepoDetector } from "../workspace/MonorepoDetector";
 
 const prisma = new PrismaClient();
 
@@ -54,6 +56,7 @@ export class AgentPipeline {
       targetedBaselineDiagnostics?: BaselineDiagnostic[];
       isBaselineDeltaTask?: boolean;
       baseCommitSha?: string;
+      baselineBuildPassed?: boolean;
     },
   ): Promise<AgentResponse> {
     const session = await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
@@ -89,11 +92,6 @@ export class AgentPipeline {
       log: "[Init] Initializing repository environment and analyzing workspace...",
     });
 
-    // Stage 1: Intent Analysis
-    const s1Start = performance.now();
-    const intentResult = await IntentClassifier.classifyIntentAndAmbiguity(request.message, projectContext);
-    const s1Time = performance.now() - s1Start;
-
     const snapshotFileList = (effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || (Array.isArray(effectiveSnapshot) ? effectiveSnapshot : [])) as Array<any>;
     const repoFileNames = snapshotFileList.map((f: any) => (typeof f === "string" ? f : f?.path || ""));
 
@@ -114,6 +112,19 @@ export class AgentPipeline {
       )
     );
 
+    // Detect monorepo descriptor once at repository snapshot stage
+    const monorepo = MonorepoDetector.detectMonorepo(effectiveLocalPath, snapshotFileList);
+    if (monorepo.isMonorepo) {
+      console.log(
+        `[AgentPipeline] Detected monorepo (type=${monorepo.type}, pm=${monorepo.packageManager}, workspaces=${monorepo.workspaces.length}, turbo=${monorepo.hasTurbo})`
+      );
+    }
+
+    // Stage 1: Intent Analysis with Destructive Safety Grounding
+    const s1Start = performance.now();
+    const intentResult = await IntentClassifier.classifyIntentAndAmbiguity(request.message, projectContext, canonicalExistingFiles);
+    const s1Time = performance.now() - s1Start;
+
     const baselineDiagnosticsList = options?.targetedBaselineDiagnostics || options?.baselineDiagnostics || [];
     const diagnosticTargetPaths = Array.from(
       new Set(
@@ -124,9 +135,30 @@ export class AgentPipeline {
       )
     );
 
-    const executionContract: ExecutionContract = buildExecutionContract(intentResult, request.message, canonicalExistingFiles);
+    const pipelineSnapshotFiles = Array.isArray(effectiveSnapshot)
+      ? effectiveSnapshot
+      : effectiveSnapshot?.keyFiles || (effectiveSnapshot as any)?.repoSnapshot || [];
+
+    const executionContract: ExecutionContract = buildExecutionContract(
+      intentResult,
+      request.message,
+      canonicalExistingFiles,
+      {
+        snapshotFiles: pipelineSnapshotFiles,
+        localPath: effectiveLocalPath,
+        monorepo,
+      }
+    );
 
     if (diagnosticTargetPaths.length > 0) {
+      if (!executionContract.targetProvenance) {
+        executionContract.targetProvenance = {};
+      }
+      for (const dt of diagnosticTargetPaths) {
+        if (!executionContract.targetProvenance[dt]) {
+          executionContract.targetProvenance[dt] = "BASELINE_DIAGNOSTIC";
+        }
+      }
       const mergedTargets = Array.from(new Set([...diagnosticTargetPaths, ...executionContract.targetPaths])).filter(
         (tp) => tp !== "(project-wide)"
       );
@@ -314,6 +346,8 @@ export class AgentPipeline {
         );
       }
 
+      // Semantic retrieval is context-only per Requirement 15 (never authorizes writes or expands targetPaths)
+
       // Enrich optimizedContext.fileContext with full repository file contents (never partial chunks)
       if (optimizedContext && optimizedContext.fileContext) {
         // Ensure proven compiler diagnostic target files are deterministically loaded into fileContext
@@ -449,7 +483,7 @@ export class AgentPipeline {
         packageJsonContent = pkgFile.content;
       }
 
-      const architectureSummary = detectRepositoryArchitecture(canonicalExistingFiles, packageJsonContent);
+      const architectureSummary = detectRepositoryArchitecture(canonicalExistingFiles, packageJsonContent, monorepo);
 
       // Select top bounded relevant files for manifest planning
       const relevantPlanningFiles: Array<{ path: string; content: string }> = [];
@@ -520,6 +554,7 @@ export class AgentPipeline {
         architecture: architectureSummary,
         relevantFiles: relevantPlanningFiles.slice(0, 8),
         baselineDiagnostics: baselineDiagnosticsList,
+        monorepo,
       };
 
       onProgress?.({
@@ -556,6 +591,7 @@ export class AgentPipeline {
             localPath: effectiveLocalPath,
             fileContext: optimizedContext?.fileContext,
             baselineDiagnostics: baselineDiagnosticsList,
+            monorepo,
           });
 
           if (expansionResult.approvedExpansions.length > 0) {
@@ -591,22 +627,131 @@ export class AgentPipeline {
           }
         }
 
+        // Supporting reverse-reference cleanup expansion for grounded DELETE targets (Fix 2)
+        const compound = detectCompoundIntent(request.message);
+        const isDestructiveOrDeletion =
+          intentResult.taskType === "DELETE_FOLDER" ||
+          intentResult.taskType === "DELETE_FILE" ||
+          intentResult.intent === "DELETE_FOLDER" ||
+          intentResult.intent === "DELETE_FILE" ||
+          compound.hasDeletion;
+
+        if (detectReferenceCleanupIntent(request.message) && isDestructiveOrDeletion && Array.isArray(rawManifest.files)) {
+          const cleanupResult = TargetScopeExpander.expandReverseReferenceCleanupTargets({
+            contract: executionContract,
+            manifestFiles: rawManifest.files,
+            knowledgeGraph,
+            snapshotFiles: rawSnapshotFiles,
+            localPath: effectiveLocalPath,
+            fileContext: optimizedContext?.fileContext,
+            monorepo,
+          });
+
+          if (cleanupResult.approvedExpansions.length > 0) {
+            const newApprovedPaths = cleanupResult.approvedExpansions.map((e) => e.path);
+            executionContract.targetPaths = Array.from(
+              new Set([...executionContract.targetPaths, ...newApprovedPaths])
+            );
+            if (!executionContract.targetProvenance) {
+              executionContract.targetProvenance = {};
+            }
+            for (const exp of cleanupResult.approvedExpansions) {
+              executionContract.targetProvenance[exp.path] = "DETERMINISTIC_REFERENCE_CLEANUP";
+            }
+            executionContract.searchScope = Array.from(
+              new Set([...executionContract.searchScope, ...executionContract.targetPaths])
+            );
+          }
+        }
+
+        // Bounded direct UI neighbor expansion for directly imported sibling styles and child components (Fix 7)
+        const isUI = executionContract.environment === "REACT_TS" || (executionContract.environment as string) === "HTML_CSS_JS";
+        const isNonDestructive =
+          executionContract.taskType !== "DELETE_FOLDER" &&
+          executionContract.taskType !== "DELETE_FILE" &&
+          !compound.hasDeletion;
+
+        if (isUI && isNonDestructive && Array.isArray(rawManifest.files)) {
+          const uiNeighborResult = TargetScopeExpander.expandDirectUIReferences({
+            contract: executionContract,
+            manifestFiles: rawManifest.files,
+            fileContext: optimizedContext?.fileContext,
+            snapshotFiles: rawSnapshotFiles,
+            localPath: effectiveLocalPath,
+            monorepo,
+          });
+
+          if (uiNeighborResult.approvedExpansions.length > 0) {
+            const newApprovedPaths = uiNeighborResult.approvedExpansions.map((e) => e.path);
+            executionContract.targetPaths = Array.from(
+              new Set([...executionContract.targetPaths, ...newApprovedPaths])
+            );
+            if (!executionContract.targetProvenance) {
+              executionContract.targetProvenance = {};
+            }
+            for (const exp of uiNeighborResult.approvedExpansions) {
+              executionContract.targetProvenance[exp.path] = "DETERMINISTIC_ARCHITECTURE_DEPENDENCY";
+            }
+            executionContract.searchScope = Array.from(
+              new Set([...executionContract.searchScope, ...executionContract.targetPaths])
+            );
+          }
+        }
+
+        // Bounded deterministic UI feature integration scope reconciliation (Fix 1, 2, 6, 9, 10, 11)
+        if (isUI && isNonDestructive && Array.isArray(rawManifest.files)) {
+          const uiIntegrationResult = TargetScopeExpander.expandUiFeatureIntegrationTargets({
+            contract: executionContract,
+            manifestFiles: rawManifest.files,
+            message: request.message,
+            taskType: executionContract.taskType,
+            architectureSummary,
+            knowledgeGraph,
+            fileContext: optimizedContext?.fileContext,
+            snapshotFiles: rawSnapshotFiles,
+            localPath: effectiveLocalPath,
+            monorepo,
+            semanticEvidence: planningContext?.relevantFiles || [],
+          });
+
+          if (uiIntegrationResult.approvedExpansions.length > 0) {
+            const newApprovedPaths = uiIntegrationResult.approvedExpansions.map((e) => e.path);
+            executionContract.targetPaths = Array.from(
+              new Set([...executionContract.targetPaths, ...newApprovedPaths])
+            );
+            if (!executionContract.targetProvenance) {
+              executionContract.targetProvenance = {};
+            }
+            for (const exp of uiIntegrationResult.approvedExpansions) {
+              executionContract.targetProvenance[exp.path] = exp.reason || "DETERMINISTIC_UI_INTEGRATION";
+            }
+            executionContract.searchScope = Array.from(
+              new Set([...executionContract.searchScope, ...executionContract.targetPaths])
+            );
+          }
+        }
+
         const validator = new ManifestValidator(executionContract, {
           existingFiles: canonicalExistingFiles,
           installedPackages: architectureSummary.installedPackages,
           packageVersions: architectureSummary.packageVersions,
+          monorepo,
         });
         let valRes = validator.validate(rawManifest);
 
-        await prisma.agentManifest.create({
-          data: {
-            projectId,
-            sessionId: session.id,
-            manifestJson: rawManifest as any,
-            validationStatus: valRes.valid ? "approved" : "rejected",
-            validationErrors: valRes.errors as any,
-          },
-        });
+        try {
+          await prisma.agentManifest.create({
+            data: {
+              projectId,
+              sessionId: session.id,
+              manifestJson: rawManifest as any,
+              validationStatus: valRes.valid ? "approved" : "rejected",
+              validationErrors: valRes.errors as any,
+            },
+          });
+        } catch (manifestSaveErr: any) {
+          console.warn("[AgentPipeline] Failed to save initial manifest:", manifestSaveErr?.message || manifestSaveErr);
+        }
 
         if (valRes.valid) {
           approvedManifest = rawManifest;
@@ -660,6 +805,9 @@ export class AgentPipeline {
               estimatedComplexity: intentResult.estimatedComplexity,
               targetPath: intentResult.targetPath,
               confidence: finalConfidence,
+              buildVerified: false,
+              buildErrors: failureExplanation,
+              lifecycleStage: "ManifestValidationFailed",
             };
           }
         }
@@ -883,6 +1031,10 @@ export class AgentPipeline {
       effectiveLocalPath,
       effectiveSnapshot,
       executionContract,
+      {
+        monorepo,
+        changedFiles: criticResult.accepted.map((c) => c.path),
+      }
     );
 
     const fsManager = new FileSystemStateManager();
@@ -929,6 +1081,7 @@ export class AgentPipeline {
         options?.baselineDiagnostics,
         options?.targetedBaselineDiagnostics,
         options?.baseCommitSha,
+        options?.baselineBuildPassed,
       );
 
       if (!repairResult.success && !repairResult.infrastructureError && effectiveLocalPath && effectiveValidationCommands.length > 0) {

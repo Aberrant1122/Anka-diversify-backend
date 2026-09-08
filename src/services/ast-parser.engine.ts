@@ -264,9 +264,9 @@ export class WasmASTParserEngine {
               continue;
             }
 
-            // 2. Declaration export (e.g. export const X, export function Y, export default class Z)
+            // 2. Declaration export (e.g. export const X, export function Y, export default class Z, export async function W)
             const isDefault = text.includes("export default");
-            const nameMatch = text.match(/export\s+(?:default\s+)?(?:function|class|interface|type|const|let|var|enum)\s+([A-Za-z0-9_]+)/);
+            const nameMatch = text.match(/export\s+(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|var|enum)\s+([A-Za-z0-9_]+)/);
             if (nameMatch) {
               const type = text.includes("class")
                 ? "class"

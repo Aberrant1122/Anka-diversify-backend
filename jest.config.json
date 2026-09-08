@@ -2,6 +2,7 @@
   "preset": "ts-jest",
   "testEnvironment": "node",
   "roots": ["<rootDir>/src"],
+  "maxWorkers": 3,
   "testMatch": ["**/__tests__/**/*.test.ts"],
   "transform": {
     "^.+\\.ts$": ["ts-jest", {

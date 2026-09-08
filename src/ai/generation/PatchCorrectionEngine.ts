@@ -8,7 +8,14 @@ export interface PatchCorrectionInput {
   userMessage: string;
   manifestAction?: string;
   failedEdits: readonly FilePatchEdit[];
-  errorCode: "PATCH_TARGET_NOT_FOUND" | "AMBIGUOUS_PATCH_TARGET" | "NO_OP_PATCH_EDIT" | "MODIFY_PATCH_REQUIRED";
+  errorCode:
+    | "PATCH_TARGET_NOT_FOUND"
+    | "AMBIGUOUS_PATCH_TARGET"
+    | "NO_OP_PATCH_EDIT"
+    | "MODIFY_PATCH_REQUIRED"
+    | "EMPTY_PATCH_TARGET"
+    | "OVERLAPPING_PATCH_EDITS"
+    | "NO_PATCH_EDITS";
   errorMessage: string;
 }
 
@@ -35,8 +42,16 @@ export class PatchCorrectionEngine {
   static async correctPatch(input: PatchCorrectionInput): Promise<PatchCorrectionResult> {
     const { filePath, currentContent, userMessage, manifestAction, failedEdits, errorCode, errorMessage } = input;
 
-    // Strict guard: only attempt for target-not-found, ambiguous-target, no-op edit, or empty patch
-    const eligibleCodes = ["PATCH_TARGET_NOT_FOUND", "AMBIGUOUS_PATCH_TARGET", "NO_OP_PATCH_EDIT", "MODIFY_PATCH_REQUIRED"];
+    // Strict guard: only attempt for target-not-found, ambiguous-target, no-op edit, or malformed patch
+    const eligibleCodes = [
+      "PATCH_TARGET_NOT_FOUND",
+      "AMBIGUOUS_PATCH_TARGET",
+      "NO_OP_PATCH_EDIT",
+      "MODIFY_PATCH_REQUIRED",
+      "EMPTY_PATCH_TARGET",
+      "OVERLAPPING_PATCH_EDITS",
+      "NO_PATCH_EDITS",
+    ];
     if (!eligibleCodes.includes(errorCode)) {
       return {
         attempted: false,

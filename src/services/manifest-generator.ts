@@ -1,12 +1,10 @@
 import OpenAI from "openai";
 import { FileManifest, ExecutionContract, SubTask } from "../types";
-import { MANIFEST_GENERATION_PROMPT } from "./prompts";
+import { MANIFEST_GENERATION_PROMPT } from "../ai/prompts/coding";
 import {
   detectRepositoryArchitecture,
   detectPrimaryActiveEntryPoint,
   isExistingPrimaryUIRefinement,
-  isFullPageDashboardRequest,
-  isUITask,
   buildRepositoryUISystemPromptSection,
   RepositoryArchitectureSummary,
 } from "../ai/planning/RepositoryArchitectureDetector";
@@ -16,6 +14,7 @@ export interface ManifestPlanningContext {
   repoSnapshot?: any;
   architecture?: RepositoryArchitectureSummary;
   relevantFiles?: Array<{ path: string; content: string }>;
+  baselineDiagnostics?: Array<{ filePath?: string; errorCode?: string; symbolName?: string; message: string }>;
   [key: string]: any;
 }
 
@@ -32,7 +31,12 @@ export class ManifestGenerator {
   }
 
   /**
-   * Generates a FileManifest JSON using OpenAI based on user request and contract constraints.
+   * Generates a FileManifest JSON using OpenAI based on contract constraints and repository evidence.
+   *
+   * Invariants (Phase 1B):
+   * 1. Fails closed with MANIFEST_GENERATION_FAILED if OpenAI fails or output is malformed.
+   * 2. Zero invented paths (no src/index.ts, <target>/index.ts, src/file_0.ts).
+   * 3. No prompt-keyword feature/template branching.
    */
   public async generateManifest(
     userRequest: string,
@@ -43,9 +47,27 @@ export class ManifestGenerator {
     const existingFileList = repositoryContext.existingFiles || [];
     const arch = repositoryContext.architecture || detectRepositoryArchitecture(existingFileList);
 
+    // If standalone pipeline, return standalone web files without guessing repo paths
+    if (contract.pipeline === "STANDALONE" || contract.environment === "HTML_CSS_JS") {
+      const existingWeb = existingFileList.filter((f) => /\.(?:html|css|js)$/i.test(f));
+      const files = existingWeb.length > 0
+        ? existingWeb.map((p) => ({ path: p, action: "modify" as const, dependencies: [] as string[], description: `Update ${p}` }))
+        : [
+            { path: "index.html", action: "create" as const, dependencies: ["./style.css", "./script.js"], description: "Main HTML page" },
+            { path: "style.css", action: "create" as const, dependencies: [], description: "CSS stylesheet" },
+            { path: "script.js", action: "create" as const, dependencies: [], description: "JS logic file" },
+          ];
+      return {
+        files,
+        totalFiles: files.length,
+        manifestVersion: "1.0.0",
+      };
+    }
+
     let contextText = `USER REQUEST:\n${userRequest}\n\n`;
     contextText += `EXECUTION CONTRACT CONSTRAINTS:\n`;
     contextText += `- Task Goal: ${contract.goal}\n`;
+    contextText += `- Task Type: ${contract.taskType}\n`;
     contextText += `- Pipeline: ${contract.pipeline}\n`;
     contextText += `- Environment: ${contract.environment}\n`;
     contextText += `- Max Files Allowed: ${contract.maxFiles}\n`;
@@ -57,9 +79,11 @@ export class ManifestGenerator {
     contextText += `- Framework: ${arch.framework}\n`;
     contextText += `- Router: ${arch.router}\n`;
     contextText += `- Existing Entry Points: ${arch.existingEntryPoints.join(", ") || "(none)"}\n`;
-    contextText += `- Planning Guidelines:\n`;
-    for (const g of arch.guidelines) {
-      contextText += `  * ${g}\n`;
+    if (arch.guidelines && arch.guidelines.length > 0) {
+      contextText += `- Planning Guidelines:\n`;
+      for (const g of arch.guidelines) {
+        contextText += `  * ${g}\n`;
+      }
     }
     if (arch.installedPackages && arch.installedPackages.length > 0) {
       contextText += `- Installed External Packages: [${arch.installedPackages.join(", ")}]\n`;
@@ -69,20 +93,16 @@ export class ManifestGenerator {
 
     const primaryActiveEntry = arch.primaryActiveEntryPoint || detectPrimaryActiveEntryPoint(existingFileList, arch);
     const isPrimaryRefinement = isExistingPrimaryUIRefinement(userRequest);
-    const isFullDashboard = isFullPageDashboardRequest(userRequest);
-    const isUI = isUITask(userRequest);
-    const isSmallComp = !isFullDashboard && /(small|badge|button|tag|pill|icon|fix|minor|single)/i.test(userRequest);
-
     if (primaryActiveEntry && isPrimaryRefinement) {
       contextText += `ACTIVE PRIMARY ENTRY POINT GROUNDING:\n`;
       contextText += `- Verified Primary Active UI File: "${primaryActiveEntry}" (renders application root "/")\n`;
       contextText += `- Primary UI Requirement: The user requested to improve/enhance/update the dashboard or primary UI. You MUST include "${primaryActiveEntry}" with action "modify" (or modify an existing component directly rendered by it) so the active dashboard at "/" visibly reflects the requested improvements. Do NOT create isolated new sub-routes while leaving "${primaryActiveEntry}" untouched.\n\n`;
     }
 
-    if (isUI) {
+    if (contract.environment === "REACT_TS" || arch.existingUIComponents.length > 0) {
       const uiSystemSection = buildRepositoryUISystemPromptSection(arch, {
-        isDashboard: isFullDashboard,
-        isSmallComponent: isSmallComp,
+        isComprehensiveUI: contract.maxFiles >= 3,
+        isSmallComponent: contract.maxFiles <= 1,
       });
       if (uiSystemSection) {
         contextText += uiSystemSection;
@@ -136,8 +156,8 @@ export class ManifestGenerator {
       return this.normalizeParsedManifest(parsed, contract);
     } catch (err: any) {
       console.error("[ManifestGenerator] Error calling OpenAI or parsing manifest:", err?.message || err);
-      // Fallback minimal manifest to avoid breaking process
-      return this.buildFallbackManifest(userRequest, contract, repositoryContext, subTaskScope);
+      // Fail closed per Phase 1B specifications: never invent fallback paths
+      throw new Error(`MANIFEST_GENERATION_FAILED: ${err?.message || "Failed to generate valid file manifest"}`);
     }
   }
 
@@ -145,25 +165,61 @@ export class ManifestGenerator {
    * Validates and normalizes raw parsed JSON into a valid FileManifest structure.
    */
   private normalizeParsedManifest(parsed: any, contract: ExecutionContract): FileManifest {
-    const filesArray = Array.isArray(parsed.files) ? parsed.files : [];
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("MANIFEST_GENERATION_FAILED: Parsed manifest is not an object");
+    }
 
-    const normalizedFiles = filesArray.map((f: any, idx: number) => ({
-      path: typeof f.path === "string" ? f.path : `src/file_${idx}.ts`,
-      action: ["create", "modify", "delete"].includes(f.action) ? f.action : "create",
-      dependencies: Array.isArray(f.dependencies) ? f.dependencies : [],
-      description: typeof f.description === "string" ? f.description : "File declaration",
-      estimatedLines: typeof f.estimatedLines === "number" ? f.estimatedLines : undefined,
-    }));
+    const filesArray = Array.isArray(parsed.files) ? parsed.files : [];
+    if (filesArray.length === 0) {
+      throw new Error("MANIFEST_GENERATION_FAILED: Manifest contains no files");
+    }
+
+    const normalizedFiles: FileManifest["files"] = [];
+    const seenPaths = new Set<string>();
+
+    for (const f of filesArray) {
+      if (!f || typeof f.path !== "string" || !f.path.trim()) {
+        throw new Error("MANIFEST_GENERATION_FAILED: File entry missing path");
+      }
+
+      const cleanPath = f.path.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+      if (seenPaths.has(cleanPath)) continue;
+      seenPaths.add(cleanPath);
+
+      let action: "create" | "modify" | "delete" = "create";
+      if (f.action === "modify" || f.action === "delete" || f.action === "create") {
+        action = f.action;
+      }
+
+      const dependencies = Array.isArray(f.dependencies)
+        ? f.dependencies.map((d: any) => String(d).trim().replace(/\\/g, "/")).filter(Boolean)
+        : [];
+
+      normalizedFiles.push({
+        path: cleanPath,
+        action,
+        dependencies,
+        description: typeof f.description === "string" ? f.description : undefined,
+      });
+
+      if (normalizedFiles.length >= contract.maxFiles) {
+        break;
+      }
+    }
+
+    if (normalizedFiles.length === 0) {
+      throw new Error("MANIFEST_GENERATION_FAILED: No valid files remained after normalization");
+    }
 
     return {
       files: normalizedFiles,
       totalFiles: normalizedFiles.length,
-      manifestVersion: parsed.manifestVersion || "1.0.0",
+      manifestVersion: "1.0.0",
     };
   }
 
   /**
-   * Builds a safe fallback manifest when LLM invocation or JSON parsing fails.
+   * Diagnostic / test fallback helper. Production generateManifest() fails closed.
    */
   public buildFallbackManifest(
     userRequest: string,
@@ -171,73 +227,22 @@ export class ManifestGenerator {
     repositoryContext?: ManifestPlanningContext,
     subTaskScope?: SubTask
   ): FileManifest {
-    if (contract.pipeline === "STANDALONE" || contract.environment === "HTML_CSS_JS") {
+    const rawTarget = contract.targetPaths.find((tp) => tp && !tp.includes("project-wide"));
+    if (rawTarget) {
+      const normalizedTarget = rawTarget.replace(/\\/g, "/").replace(/^\.\//, "");
       return {
         files: [
           {
-            path: "index.html",
-            action: "create",
-            dependencies: ["./style.css", "./script.js"],
-            description: "Main HTML page",
-          },
-          {
-            path: "style.css",
+            path: normalizedTarget,
             action: "create",
             dependencies: [],
-            description: "CSS styling sheet",
-          },
-          {
-            path: "script.js",
-            action: "create",
-            dependencies: [],
-            description: "JS logic file",
+            description: `Target file for ${userRequest}`,
           },
         ],
-        totalFiles: 3,
+        totalFiles: 1,
         manifestVersion: "1.0.0",
       };
     }
-
-    if (subTaskScope && subTaskScope.targetFiles.length > 0) {
-      const files = subTaskScope.targetFiles.map((tf) => ({
-        path: tf,
-        action: "create" as const,
-        dependencies: [],
-        description: `Target file for ${subTaskScope.category}`,
-      }));
-      return {
-        files,
-        totalFiles: files.length,
-        manifestVersion: "1.0.0",
-      };
-    }
-
-    const existingFileList = repositoryContext?.existingFiles || [];
-    const rawTarget = contract.targetPaths.find((tp) => tp && !tp.includes("project-wide"));
-    let defaultPath = "src/index.ts";
-    let defaultAction: "create" | "modify" = "create";
-
-    if (rawTarget) {
-      const normalizedTarget = rawTarget.replace(/\\/g, "/").replace(/^\.\//, "");
-      if (existingFileList.includes(normalizedTarget) || /\.[a-zA-Z0-9]+$/.test(normalizedTarget)) {
-        defaultPath = normalizedTarget;
-        defaultAction = existingFileList.includes(normalizedTarget) ? "modify" : "create";
-      } else {
-        defaultPath = `${normalizedTarget}/index.ts`;
-      }
-    }
-
-    return {
-      files: [
-        {
-          path: defaultPath,
-          action: defaultAction,
-          dependencies: [],
-          description: defaultAction === "modify" ? `Repair compiler diagnostics in ${defaultPath}` : "Fallback manifest file entry",
-        },
-      ],
-      totalFiles: 1,
-      manifestVersion: "1.0.0",
-    };
+    throw new Error("MANIFEST_GENERATION_FAILED: No target files available for manifest fallback");
   }
 }

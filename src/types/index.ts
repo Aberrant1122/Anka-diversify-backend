@@ -357,7 +357,8 @@ export type TaskType =
   | "FILE_CREATION"
   | "CONFIG_CHANGE"
   | "DOCS"
-  | "OPTIMIZATION";
+  | "OPTIMIZATION"
+  | "UNKNOWN";
 
 export type TaskRisk = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
@@ -367,7 +368,7 @@ export interface TaskClassificationResult {
   taskType: TaskType;
   risk: TaskRisk;
   estimatedComplexity: TaskComplexity;
-  intent: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION" | "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE";
+  intent: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION" | "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE" | "UNKNOWN" | "CLASSIFICATION_FAILED";
   confidence: number;
   requiresClarification: boolean;
   reasoning: string;
@@ -437,6 +438,8 @@ export interface ExecutionContract {
   contextScope: string[];
   /** Whether the Diff Critic stage should run */
   diffCriticEnabled: boolean;
+  /** Authority provenance mapping: why each path in targetPaths is authorized */
+  targetProvenance?: Record<string, string>;
 }
 
 
@@ -448,7 +451,7 @@ export interface AgentResponse {
   needsClarification?: boolean;
   question?: string;
   options?: string[];
-  intent?: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION" | "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE";
+  intent?: "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION" | "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE" | "UNKNOWN" | "CLASSIFICATION_FAILED";
   taskType?: TaskType;
   risk?: TaskRisk;
   estimatedComplexity?: TaskComplexity;
@@ -466,8 +469,9 @@ export interface AgentResponse {
   repairSuccess?: boolean;
   repairTrigger?: "SHELL_VALIDATION_FAILURE" | "LLM_REVIEW_REJECTION" | "NONE";
   buildErrors?: string;
+  successfulNoOp?: boolean;
   verificationChecklist?: ChecklistItem[];
-  lifecycleStage?: "Done" | "BuildFailed" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
+  lifecycleStage?: "Done" | "BuildFailed" | "ManifestValidationFailed" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
   pipelineMeasurementText?: string;
   patchCorrectionAttempted?: boolean;
   patchCorrectionSucceeded?: boolean;
@@ -515,6 +519,7 @@ export interface AgentResponse {
   modelRepairAttempts?: number;
   patchesAppliedCount?: number;
   buildAttemptsCount?: number;
+  visualVerification?: VisualVerificationResult;
 }
 
 export interface BaselineDiagnostic {
@@ -765,3 +770,33 @@ export interface QueryOptions {
     user?: boolean;
   };
 }
+
+// ─── Visual Verification Types ───────────────────────────────────────────────
+
+export type VisualVerificationStatus =
+  | "NOT_APPLICABLE"
+  | "PASSED"
+  | "PASSED_WITH_WARNINGS"
+  | "STARTUP_FAILED"
+  | "RUNTIME_FAILED"
+  | "BROWSER_UNAVAILABLE";
+
+export interface VisualVerificationResult {
+  status: VisualVerificationStatus;
+  framework: "NEXT_JS" | "VITE_REACT" | "UNKNOWN";
+  route: string;
+  url?: string;
+  httpStatus?: number;
+  screenshotPath?: string;
+  title?: string;
+  viewport?: {
+    width: number;
+    height: number;
+  };
+  pageErrors: string[];
+  consoleErrors: string[];
+  failedRequests: string[];
+  startupErrors?: string;
+  durationMs: number;
+}
+

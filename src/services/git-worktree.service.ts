@@ -14,6 +14,9 @@ import { BaselineRepairCoordinator } from "./baseline-repair.coordinator";
 import { BaselineDeltaVerifier, BaselineDeltaResult } from "./baseline-delta.verifier";
 import { RuntimePreflightService } from "./runtime-preflight.service";
 import { RepositoryCacheManager } from "./repository-cache.manager";
+import { VisualVerifierService } from "./visual-verifier.service";
+import { detectRepositoryArchitecture } from "../ai/planning/RepositoryArchitectureDetector";
+import { VisualVerificationResult } from "../types";
 
 const execAsync = promisify(exec);
 
@@ -46,6 +49,7 @@ export interface RepositoryRunSummary {
   validationPassed: boolean;
   validationCommands: string[];
   validationErrors?: string;
+  visualVerification?: VisualVerificationResult;
   agentResponse: AgentResponse;
 }
 
@@ -717,7 +721,49 @@ export class GitWorktreeService {
           }
         }
       } else {
-        validationPassed = Boolean(agentResponse.buildVerified !== false && !executionError);
+        validationPassed = Boolean(agentResponse.buildVerified === true && !executionError);
+      }
+
+      const totalChanges = [...baselineRepairedChanges, ...(agentResponse.changes || [])];
+      const isSuccessfulNoOp = agentResponse.successfulNoOp === true;
+
+      if (totalChanges.length === 0 && !isSuccessfulNoOp) {
+        validationPassed = false;
+        agentResponse.buildVerified = false;
+        if (!agentResponse.buildErrors) {
+          agentResponse.buildErrors = agentResponse.explanation || "Zero changes generated without explicit verified no-op.";
+        }
+      }
+
+      // Step 4: Bounded Playwright Visual Verification for supported frontend apps
+      let visualVerification: VisualVerificationResult | undefined;
+      if (validationPassed && Boolean(agentResponse.buildVerified === true) && !executionError) {
+        try {
+          const pkgPath = path.join(prepared.worktreePath, "package.json");
+          const pkgJsonContent = fs.existsSync(pkgPath) ? fs.readFileSync(pkgPath, "utf8") : undefined;
+          const arch = detectRepositoryArchitecture(
+            diffInfo.changedFiles,
+            pkgJsonContent
+          );
+
+          visualVerification = await VisualVerifierService.verify({
+            worktreePath: prepared.worktreePath,
+            changedFiles: totalChanges,
+            framework: arch.framework,
+            runId,
+            taskPrompt: request.message,
+          });
+        } catch (visErr: any) {
+          visualVerification = {
+            status: "RUNTIME_FAILED",
+            framework: "UNKNOWN",
+            route: "/",
+            pageErrors: [`Visual verification encountered unhandled error: ${visErr?.message || visErr}`],
+            consoleErrors: [],
+            failedRequests: [],
+            durationMs: 0,
+          };
+        }
       }
 
       return {
@@ -729,10 +775,11 @@ export class GitWorktreeService {
         diffSummary: diffInfo.diffSummary,
         validationPassed,
         validationCommands: agentResponse.validationCommands || baselineCommands,
-        validationErrors: !validationPassed ? agentResponse.explanation : undefined,
+        validationErrors: !validationPassed ? (agentResponse.buildErrors || agentResponse.explanation) : undefined,
+        visualVerification,
         agentResponse: {
           ...agentResponse,
-          changes: [...baselineRepairedChanges, ...(agentResponse.changes || [])],
+          changes: totalChanges,
           dependencyPreparationAttempted: depPrep.attempted,
           dependencyPreparationSucceeded: depPrep.success,
           packageManager: depPrep.packageManager,
@@ -741,7 +788,7 @@ export class GitWorktreeService {
           worktreePath: prepared.worktreePath,
           branchName: prepared.branchName,
           baseCommitSha: prepared.baseCommitSha,
-          buildVerified: agentResponse.buildVerified ?? (validationPassed && (deltaResult ? deltaResult.repositoryClean : (agentResponse.repositoryClean ?? true))),
+          buildVerified: Boolean(agentResponse.buildVerified === true),
           healthStatus: agentResponse.healthStatus || (validationPassed ? "HEALTHY" : "BASELINE_REPOSITORY_UNHEALTHY"),
           baselineDependencyInstall: "PASS",
           baselineBuild: baselineBuildPassed ? "PASS" : "FAIL",
@@ -757,6 +804,7 @@ export class GitWorktreeService {
           remainingBaselineDiagnostics: deltaResult?.remainingBaselineDiagnostics ?? agentResponse.remainingBaselineDiagnostics,
           revealedBaselineDiagnostics: deltaResult?.revealedBaselineDiagnostics ?? agentResponse.revealedBaselineDiagnostics,
           newTaskDiagnostics: deltaResult?.newTaskDiagnostics ?? agentResponse.newTaskDiagnostics,
+          visualVerification,
         },
       };
       } finally {

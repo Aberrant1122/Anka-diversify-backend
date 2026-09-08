@@ -47,42 +47,60 @@ export class CodingAgent {
       });
     }
 
-    // 2. Query project localPath from database
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { id: true, localPath: true, githubUrl: true },
-    });
+    // 2. Query target repository localPath from database
+    let targetLocalPath: string | null = null;
+    let targetGithubUrl: string | null = null;
 
-    if (!project) {
-      throw new Error(`[REPOSITORY_NOT_READY] Project "${projectId}" does not exist in database.`);
+    if (request.repositoryId) {
+      const repo = await prisma.projectRepository.findFirst({
+        where: { id: request.repositoryId, projectId },
+      });
+      if (!repo) {
+        throw new Error(
+          `[REPOSITORY_NOT_FOUND] Repository "${request.repositoryId}" does not belong to project "${projectId}".`
+        );
+      }
+      targetLocalPath = repo.localPath;
+      targetGithubUrl = repo.githubUrl;
+    } else {
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: { id: true, localPath: true, githubUrl: true },
+      });
+
+      if (!project) {
+        throw new Error(`[REPOSITORY_NOT_READY] Project "${projectId}" does not exist in database.`);
+      }
+      targetLocalPath = project.localPath;
+      targetGithubUrl = project.githubUrl;
     }
 
     const isUserConfiguredLocalPath = Boolean(
-      project.localPath && !RepositoryMaterializationService.isManagedRepositoryPath(project.localPath)
+      targetLocalPath && !RepositoryMaterializationService.isManagedRepositoryPath(targetLocalPath)
     );
 
     // 3. Materialize or refresh repository freshness if githubUrl is present or managed clone exists
-    if (project.githubUrl || (project.localPath && RepositoryMaterializationService.isManagedRepositoryPath(project.localPath))) {
+    if (!request.repositoryId && (targetGithubUrl || (targetLocalPath && RepositoryMaterializationService.isManagedRepositoryPath(targetLocalPath)))) {
       const mat = await RepositoryMaterializationService.ensureProjectRepositoryCurrent(projectId);
       if (mat.success && mat.metadata) {
-        project.localPath = mat.metadata.canonicalRoot;
-      } else if (!project.localPath) {
+        targetLocalPath = mat.metadata.canonicalRoot;
+      } else if (!targetLocalPath) {
         throw new Error(
-          `[REPOSITORY_NOT_READY] Project "${projectId}" failed repository materialization: ${mat.error || "Unknown error"}. githubUrl=${project.githubUrl}, localPathConfigured=${isUserConfiguredLocalPath}`
+          `[REPOSITORY_NOT_READY] Project "${projectId}" failed repository materialization: ${mat.error || "Unknown error"}. githubUrl=${targetGithubUrl}, localPathConfigured=${isUserConfiguredLocalPath}`
         );
       }
     }
 
     // 4. Fail-closed if no verified localPath exists
-    if (!project.localPath) {
+    if (!targetLocalPath) {
       console.log(`[ANKA_EXEC] gitRoot=none (no localPath configured)`);
       throw new Error(
-        `[REPOSITORY_NOT_READY] Project "${projectId}" has no local repository configured and no valid repository source. localPathConfigured=${isUserConfiguredLocalPath}, githubUrl=${project.githubUrl || "none"}`
+        `[REPOSITORY_NOT_READY] Repository has no local repository configured and no valid repository source. localPathConfigured=${isUserConfiguredLocalPath}, githubUrl=${targetGithubUrl || "none"}`
       );
     }
 
     // 5. Validate existence of localPath on disk
-    const resolvedPath = path.resolve(project.localPath);
+    const resolvedPath = path.resolve(targetLocalPath);
     if (!fs.existsSync(resolvedPath)) {
       throw new Error(`[REPOSITORY_NOT_FOUND] Configured localPath "${resolvedPath}" does not exist.`);
     }
@@ -124,7 +142,10 @@ export class CodingAgent {
       onProgress,
     });
 
-    return summary.agentResponse;
+    return {
+      ...summary.agentResponse,
+      visualVerification: summary.visualVerification || summary.agentResponse?.visualVerification,
+    };
   }
 
   /**
