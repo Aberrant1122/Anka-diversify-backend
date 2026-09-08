@@ -483,7 +483,8 @@ export interface AgentResponse {
   reason?: string;
   status?: string;
   verificationChecklist?: ChecklistItem[];
-  lifecycleStage?: "Done" | "BuildFailed" | "ManifestValidationFailed" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
+  lifecycleStage?: "Done" | "BuildFailed" | "ManifestValidationFailed" | "WriteAuthorityRejected" | "InsufficientRepositoryEvidence" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
+  errorCode?: string;
   pipelineMeasurementText?: string;
   patchCorrectionAttempted?: boolean;
   patchCorrectionSucceeded?: boolean;

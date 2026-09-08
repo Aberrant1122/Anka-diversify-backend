@@ -116,13 +116,20 @@ export function matchesModuleSpecifier(
   // Index file match (e.g. ./Calculator -> components/Calculator/index.tsx)
   if (normTargetNoExt === `${resolvedNoExt}/index`) return true;
 
+  // Allow src-prefix tolerance if one path starts with src/ and the other does not
+  const resolvedNoSrc = resolvedNoExt.startsWith("src/") ? resolvedNoExt.slice(4) : resolvedNoExt;
+  const targetNoSrc = normTargetNoExt.startsWith("src/") ? normTargetNoExt.slice(4) : normTargetNoExt;
+
+  if (resolvedNoSrc === targetNoSrc) return true;
+  if (targetNoSrc === `${resolvedNoSrc}/index`) return true;
+
   return false;
 }
 
 /**
  * Retrieves full text content for a file from fileContext, snapshotFiles, or disk.
  */
-function getFileContent(
+export function getFileContent(
   filePath: string,
   fileContext?: Record<string, string>,
   snapshotFiles?: Array<{ path: string; content?: string }>,
@@ -156,7 +163,7 @@ function getFileContent(
 /**
  * Extracts exported symbol names from file source code.
  */
-function extractExportedSymbols(content: string): string[] {
+export function extractExportedSymbols(content: string): string[] {
   const symbols: string[] = [];
   const exportMatches = content.matchAll(
     /export\s+(?:default\s+)?(?:interface|class|function|type|const|let|var|enum)\s+([A-Za-z0-9_]+)/g
@@ -829,6 +836,42 @@ export function evaluateDirectReverseReference(
     }
 
     // 2. Direct Static Symbol or JSX Component Reference
+    const candidateDir = path.dirname(normCandidate);
+    const importedSymbolsFromOtherModules = new Set<string>();
+    const detailedImportRegex = /import\s+(?:([a-zA-Z0-9_$]+)\s*,?\s*)?(?:\{([^}]+)\})?\s*from\s*["']([^"']+)["']/g;
+    for (const m of candidateContent.matchAll(detailedImportRegex)) {
+      const defaultImport = m[1]?.trim();
+      const namedImports = m[2];
+      const spec = m[3];
+      if (spec) {
+        let resolvedSpec: string;
+        const cleanSpec = spec.replace(/['"]/g, "").trim();
+        if (cleanSpec.startsWith("@/")) {
+          resolvedSpec = normalizeRepoPath(cleanSpec.substring(2));
+        } else if (cleanSpec.startsWith("./") || cleanSpec.startsWith("../")) {
+          resolvedSpec = normalizeRepoPath(path.join(candidateDir, cleanSpec));
+        } else {
+          resolvedSpec = normalizeRepoPath(cleanSpec);
+        }
+
+        const isMatch = matchesModuleSpecifier(normCandidate, spec, normDelete, monorepo);
+        const cleanNormDelete = normDelete.startsWith("src/") ? normDelete.slice(4) : normDelete;
+        const cleanResolvedSpec = resolvedSpec.startsWith("src/") ? resolvedSpec.slice(4) : resolvedSpec;
+        const isTargetInsideSpec =
+          cleanNormDelete.startsWith(cleanResolvedSpec + "/") ||
+          cleanNormDelete === cleanResolvedSpec;
+        if (!isMatch && !isTargetInsideSpec) {
+          if (defaultImport) importedSymbolsFromOtherModules.add(defaultImport);
+          if (namedImports) {
+            for (const rawNamed of namedImports.split(",")) {
+              const symName = rawNamed.split(/\s+as\s+/)[0].trim();
+              if (symName) importedSymbolsFromOtherModules.add(symName);
+            }
+          }
+        }
+      }
+    }
+
     const deleteSymbols = [deleteStem];
     const approvedContent = getFileContent(normDelete, fileContext, snapshotFiles, localPath);
     if (approvedContent) {
@@ -836,6 +879,9 @@ export function evaluateDirectReverseReference(
     }
 
     for (const sym of deleteSymbols) {
+      if (importedSymbolsFromOtherModules.has(sym)) {
+        continue;
+      }
       if (sym.length >= 3 && new RegExp(`\\b${sym}\\b`).test(candidateContent)) {
         return "SYMBOL_REFERENCE";
       }

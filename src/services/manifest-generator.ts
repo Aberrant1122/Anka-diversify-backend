@@ -76,6 +76,17 @@ export class ManifestGenerator {
     contextText += `- Allowed Actions: ${contract.allowedActions.join(", ")}\n`;
     contextText += `- Forbidden Actions: ${contract.forbiddenActions.join(", ")}\n\n`;
 
+    if (repositoryContext.resolvedTarget) {
+      const rt = repositoryContext.resolvedTarget;
+      contextText += `RESOLVED LOGICAL FEATURE TARGET:\n`;
+      contextText += `- Feature Name: ${rt.featureName}\n`;
+      contextText += `- Target Files to DELETE: ${rt.candidatePaths.join(", ")}\n`;
+      if (rt.importerPaths && rt.importerPaths.length > 0) {
+        contextText += `- Importers Requiring Cleanup (action: modify): ${rt.importerPaths.join(", ")}\n`;
+      }
+      contextText += `- Manifest Planning Rule: Include every resolved target file with action "delete" and every importer with action "modify". Every file in your manifest MUST cite its verified evidence IDs from the list below in "evidenceIds": [...]. Never invent evidence IDs.\n\n`;
+    }
+
     if (repositoryContext.evidenceStore) {
       const summary = repositoryContext.evidenceStore.getAllEvidence().slice(-30);
       if (summary.length > 0) {
@@ -244,6 +255,38 @@ export class ManifestGenerator {
     repositoryContext?: ManifestPlanningContext,
     subTaskScope?: SubTask
   ): FileManifest {
+    if (repositoryContext?.resolvedTarget) {
+      const rt = repositoryContext.resolvedTarget;
+      const files: FileManifest["files"] = [];
+      for (const p of rt.candidatePaths) {
+        const evs = repositoryContext.evidenceStore?.getEvidenceForFile(p) || [];
+        files.push({
+          path: p,
+          action: "delete",
+          evidenceIds: evs.map((e: any) => e.id),
+          dependencies: [],
+          description: `Delete ${rt.featureName} target file`,
+        });
+      }
+      for (const imp of rt.importerPaths || []) {
+        const evs = repositoryContext.evidenceStore?.getEvidenceForFile(imp) || [];
+        files.push({
+          path: imp,
+          action: "modify",
+          dependencies: rt.candidatePaths,
+          evidenceIds: evs.map((e: any) => e.id),
+          description: `Clean up references to deleted ${rt.featureName}`,
+        });
+      }
+      if (files.length > 0) {
+        return {
+          files,
+          totalFiles: files.length,
+          manifestVersion: "1.0.0",
+        };
+      }
+    }
+
     const rawTarget = contract.targetPaths.find((tp) => tp && !tp.includes("project-wide"));
     if (rawTarget) {
       const normalizedTarget = rawTarget.replace(/\\/g, "/").replace(/^\.\//, "");

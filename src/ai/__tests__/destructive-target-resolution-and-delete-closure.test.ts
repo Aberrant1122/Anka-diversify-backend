@@ -15,6 +15,7 @@ import { buildFinalExecutionContract } from "../contracts/ExecutionContractBuild
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { StageExecutionTransaction } from "../orchestration/StageExecutionTransaction";
 import { TaskClassificationResult, FileManifest, AgentFileChange } from "../../types";
+import { ManifestGenerator } from "../../services/manifest-generator";
 
 describe("Strict Implementation — Destructive Target Resolution + Delete Dependency Closure", () => {
   let tempDir: string;
@@ -519,5 +520,328 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
     expect(authRes.approvedPaths).toEqual([]);
     expect(authRes.rejectedPaths[0].reason).toContain("NO_FILE_EXISTENCE_EVIDENCE");
+  });
+
+  // Focused 1: feature with component + barrel auto-resolves
+  test("13. feature with component + barrel auto-resolves", () => {
+    const files = [
+      "src/components/calculator/Calculator.tsx",
+      "src/components/calculator/index.ts",
+      "src/components/calculator/Calculator.css",
+      "src/app.ts",
+    ];
+    const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
+      isDestructive: true,
+    });
+    expect(res.status).toBe("RESOLVED");
+    expect(res.requiresClarification).toBe(false);
+    expect(res.candidatePaths).toContain("src/components/calculator/Calculator.tsx");
+    expect(res.candidatePaths).toContain("src/components/calculator/index.ts");
+    expect(res.candidatePaths).toContain("src/components/calculator/Calculator.css");
+  });
+
+  // Focused 2: component family does not create file-level clarification
+  test("14. component family does not create file-level clarification", () => {
+    const files = [
+      "components/Calculator.tsx",
+      "components/CalculatorButton.tsx",
+      "components/CalculatorDisplay.tsx",
+      "app/page.tsx",
+    ];
+    const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
+      isDestructive: true,
+    });
+    expect(res.status).toBe("RESOLVED");
+    expect(res.requiresClarification).toBe(false);
+    expect(res.candidatePaths).toEqual([
+      "components/Calculator.tsx",
+      "components/CalculatorButton.tsx",
+      "components/CalculatorDisplay.tsx",
+    ]);
+  });
+
+  // Focused 3: active implementation resolved structurally
+  test("15. active implementation resolved structurally", () => {
+    const files = [
+      "components/Calculator.tsx",
+      "components/CalculatorButton.tsx",
+      "components/CalculatorDisplay.tsx",
+      "src/components/calculator/Calculator.tsx",
+      "src/components/calculator/index.ts",
+      "src/app.ts",
+      "app/page.tsx",
+    ];
+    const fileContext = {
+      "src/app.ts": "import { Calculator } from './components/calculator';\nexport default Calculator;",
+      "app/page.tsx": "export default function Page() { return <div>Home</div>; }",
+    };
+    const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
+      isDestructive: true,
+      fileContext,
+    });
+    expect(res.status).toBe("RESOLVED");
+    expect(res.requiresClarification).toBe(false);
+    expect(res.resolvedTarget?.resolutionSource).toBe("DETERMINISTIC_ACTIVE_GRAPH");
+    expect(res.candidatePaths).toEqual([
+      "src/components/calculator/Calculator.tsx",
+      "src/components/calculator/index.ts",
+    ]);
+  });
+
+  // Focused 4 & 5: deterministic FILE and importer REFERENCE evidence hydrated before planner
+  test("16 & 17. deterministic FILE and importer REFERENCE evidence hydrated before planner", () => {
+    const files = [
+      "src/components/calculator/Calculator.tsx",
+      "src/components/calculator/index.ts",
+      "src/app.ts",
+    ];
+    const fileContext = {
+      "src/app.ts": "import { Calculator } from './components/calculator';\nexport default Calculator;",
+      "src/components/calculator/Calculator.tsx": "export const Calculator = () => 42;",
+      "src/components/calculator/index.ts": "export * from './Calculator';",
+    };
+    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
+      isDestructive: true,
+      fileContext,
+      evidenceStore,
+    });
+    expect(res.status).toBe("RESOLVED");
+    expect(res.resolvedTarget).toBeDefined();
+
+    // Check target FILE evidence (REPO_READ, verified existence)
+    const calcFileEv = evidenceStore.getEvidenceForFile("src/components/calculator/Calculator.tsx");
+    expect(calcFileEv.some((e) => e.kind === "FILE" && e.provenance === "REPO_READ")).toBe(true);
+
+    // Check importer FILE and IMPORT evidence
+    const appEv = evidenceStore.getEvidenceForFile("src/app.ts");
+    expect(appEv.some((e) => e.kind === "FILE" && e.provenance === "REPO_READ")).toBe(true);
+    expect(appEv.some((e) => e.kind === "IMPORT" && e.provenance === "REPO_READ")).toBe(true);
+    expect(res.resolvedTarget?.importerPaths).toContain("src/app.ts");
+  });
+
+  // Focused 6: planner cites hydrated evidenceIds itself
+  test("18. planner cites hydrated evidenceIds itself", () => {
+    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const files = [
+      "src/components/calculator/Calculator.tsx",
+      "src/components/calculator/index.ts",
+      "src/app.ts",
+    ];
+    const fileContext = {
+      "src/app.ts": "import { Calculator } from './components/calculator';\nexport default Calculator;",
+      "src/components/calculator/Calculator.tsx": "export const Calculator = () => 42;",
+      "src/components/calculator/index.ts": "export * from './Calculator';",
+    };
+    const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
+      isDestructive: true,
+      fileContext,
+      evidenceStore,
+    });
+
+    const manifestGen = new ManifestGenerator();
+    const contract = buildFinalExecutionContract(
+      defaultDeletePolicy,
+      [...res.candidatePaths, ...(res.resolvedTarget?.importerPaths || [])],
+      files
+    );
+    const manifest = manifestGen.buildFallbackManifest("remove the calculator", contract, {
+      existingFiles: files,
+      evidenceStore,
+      resolvedTarget: res.resolvedTarget,
+    });
+
+    expect(manifest.files.some((f) => f.path === "src/components/calculator/Calculator.tsx" && f.action === "delete" && (f.evidenceIds || []).length > 0)).toBe(true);
+    expect(manifest.files.some((f) => f.path === "src/app.ts" && f.action === "modify" && (f.evidenceIds || []).length > 0)).toBe(true);
+  });
+
+  // Focused 7: semantic-only candidate remains unauthorized
+  test("19. semantic-only candidate remains unauthorized", () => {
+    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const semEv = evidenceStore.addEvidence({
+      kind: "FILE",
+      filePath: "components/CalculatorLegacy.tsx",
+      provenance: "SEMANTIC_SEARCH",
+    });
+
+    const proposed: PlannedChange[] = [
+      {
+        path: "components/CalculatorLegacy.tsx",
+        action: "delete",
+        reason: "Discovered solely via semantic search",
+        evidenceIds: [semEv.id],
+        dependencies: [],
+      },
+    ];
+
+    const authRes = EvidenceBoundWriteSetResolver.resolve({
+      policy: defaultDeletePolicy,
+      intentSpec: defaultDeleteIntent,
+      proposedChanges: proposed,
+      evidenceStore,
+      existingFiles: ["components/CalculatorLegacy.tsx"],
+    });
+
+    expect(authRes.approvedPaths).not.toContain("components/CalculatorLegacy.tsx");
+    expect(authRes.rejectedPaths[0].reason).toContain("NO_FILE_EXISTENCE_EVIDENCE");
+  });
+
+  // Focused 8: planner cannot invent related calculator files
+  test("20. planner cannot invent related calculator files without structural evidence", () => {
+    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const targetEv = evidenceStore.addEvidence({
+      kind: "FILE",
+      filePath: "src/components/calculator/Calculator.tsx",
+      provenance: "REPO_READ",
+      metadata: { exists: true },
+    });
+
+    const proposed: PlannedChange[] = [
+      {
+        path: "src/components/calculator/Calculator.tsx",
+        action: "delete",
+        reason: "Valid delete target",
+        evidenceIds: [targetEv.id],
+        dependencies: [],
+      },
+      {
+        path: "components/CalculatorDisplay.tsx",
+        action: "delete",
+        reason: "Hallucinated sibling file",
+        evidenceIds: ["invented_evi_id"],
+        dependencies: [],
+      },
+    ];
+
+    const authRes = EvidenceBoundWriteSetResolver.resolve({
+      policy: defaultDeletePolicy,
+      intentSpec: defaultDeleteIntent,
+      proposedChanges: proposed,
+      evidenceStore,
+      existingFiles: ["src/components/calculator/Calculator.tsx", "components/CalculatorDisplay.tsx"],
+    });
+
+    expect(authRes.approvedPaths).toContain("src/components/calculator/Calculator.tsx");
+    expect(authRes.approvedPaths).not.toContain("components/CalculatorDisplay.tsx");
+    expect(authRes.rejectedPaths.some((r) => r.path === "components/CalculatorDisplay.tsx")).toBe(true);
+  });
+
+  // Focused 9 & 10: true independent product features may clarify with logical options, not paths
+  test("21 & 22. true independent product features clarify with logical options, not paths", () => {
+    const files = [
+      "components/AdminTaxCalculator.tsx",
+      "components/CustomerMortgageCalculator.tsx",
+      "app/page.tsx",
+    ];
+    const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
+      isDestructive: true,
+    });
+    expect(res.status).toBe("AMBIGUOUS");
+    expect(res.requiresClarification).toBe(true);
+    expect(res.clarificationOptions).toContain("Admin Tax Calculator");
+    expect(res.clarificationOptions).toContain("Customer Mortgage Calculator");
+    expect(res.clarificationOptions).not.toContain("components/AdminTaxCalculator.tsx");
+    expect(res.clarificationOptions).not.toContain("components/CustomerMortgageCalculator.tsx");
+  });
+
+  // Focused 11: clarification state stored structurally
+  test("23. clarification state stored structurally as ResolvedTaskTarget", () => {
+    const files = [
+      "components/AdminTaxCalculator.tsx",
+      "components/CustomerMortgageCalculator.tsx",
+      "app/page.tsx",
+    ];
+    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
+      isDestructive: true,
+      selectedLogicalTarget: "Admin Tax Calculator",
+      evidenceStore,
+    });
+    expect(res.status).toBe("RESOLVED");
+    expect(res.requiresClarification).toBe(false);
+    expect(res.resolvedTarget).toBeDefined();
+    expect(res.resolvedTarget?.resolutionSource).toBe("USER_CLARIFICATION");
+    expect(res.resolvedTarget?.featureName).toBe("Admin Tax Calculator");
+    expect(res.candidatePaths).toEqual(["components/AdminTaxCalculator.tsx"]);
+  });
+
+  // Focused 12: no raw file-picker flow for ordinary feature deletion
+  test("24. no raw file-picker flow for ordinary feature deletion", () => {
+    const files = [
+      "components/Calculator.tsx",
+      "components/CalculatorButton.tsx",
+      "components/CalculatorDisplay.tsx",
+      "app/page.tsx",
+    ];
+    const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
+      isDestructive: true,
+    });
+    expect(res.requiresClarification).toBe(false);
+    expect(res.clarificationOptions).toBeUndefined();
+  });
+
+  // Focused 13: write-authority failure has correct error taxonomy
+  test("25. write-authority failure has correct error taxonomy", () => {
+    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const proposed: PlannedChange[] = [
+      {
+        path: "components/Calculator.tsx",
+        action: "delete",
+        reason: "Invalid change citing non-existent evidence",
+        evidenceIds: ["fake_id"],
+        dependencies: [],
+      },
+    ];
+    const authRes = EvidenceBoundWriteSetResolver.resolve({
+      policy: defaultDeletePolicy,
+      intentSpec: defaultDeleteIntent,
+      proposedChanges: proposed,
+      evidenceStore,
+      existingFiles: ["components/Calculator.tsx"],
+    });
+    expect(authRes.approvedPaths).toHaveLength(0);
+    expect(authRes.rejectedPaths).toHaveLength(1);
+    expect(authRes.rejectedPaths[0].reason).toContain("INVENTED_OR_MISSING_EVIDENCE_IDS");
+  });
+
+  // Focused 14: compound REMOVE -> CREATE succeeds
+  test("26. compound REMOVE -> CREATE succeeds with dependency closure", async () => {
+    const compoundMessage = "remove the calculator and add a todo list";
+    const classification: TaskClassificationResult = {
+      taskType: "NEW_FEATURE",
+      risk: "MEDIUM",
+      estimatedComplexity: "MEDIUM",
+      intent: "NEW_FEATURE",
+      confidence: 0.95,
+      requiresClarification: false,
+      reasoning: "Compound task: delete calculator, create todo list",
+      stages: [
+        {
+          id: "stage-1",
+          name: "remove the calculator",
+          taskType: "DELETE_FOLDER",
+          goal: "remove the calculator",
+          targetPath: "components/calculator/Calculator.tsx",
+          dependsOn: [],
+        },
+        {
+          id: "stage-2",
+          name: "add a todo list",
+          taskType: "NEW_FEATURE",
+          goal: "add a todo list",
+          targetPath: "components/todo/TodoList.tsx",
+          dependsOn: ["stage-1"],
+        },
+      ],
+    };
+
+    let plan = TaskExecutionPlanManager.createTaskExecutionPlan(compoundMessage, classification);
+    expect(TaskExecutionPlanManager.isStageEligible(plan, "stage-1")).toBe(true);
+    expect(TaskExecutionPlanManager.isStageEligible(plan, "stage-2")).toBe(false);
+
+    const { plan: advancedPlan, nextStage } = TaskExecutionPlanManager.advancePlanStage(plan);
+    expect(advancedPlan.stages[0].status).toBe("VERIFIED");
+    expect(nextStage?.id).toBe("stage-2");
+    expect(TaskExecutionPlanManager.isStageEligible(advancedPlan, "stage-2")).toBe(true);
   });
 });

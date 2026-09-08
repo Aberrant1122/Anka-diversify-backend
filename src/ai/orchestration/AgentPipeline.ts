@@ -19,7 +19,8 @@ import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder
 import { RepositorySearch } from "../repository/RepositorySearch";
 import { createTaskIntentSpec, TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
-import { TaskExecutionPlan } from "../shared/TaskExecutionPlan";
+import { TaskExecutionPlan, ResolvedTaskTarget } from "../shared/TaskExecutionPlan";
+import { DestructiveTargetResolver } from "../contracts/DestructiveTargetResolver";
 import { StageExecutionTransaction, StageVerificationGate } from "./StageExecutionTransaction";
 import { PolicyContract } from "../contracts/PolicyContract";
 import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
@@ -832,6 +833,96 @@ export class AgentPipeline {
         }
       }
 
+      // Authoritative Feature Resolution & Evidence Hydration before Manifest Planning
+      const compound = detectCompoundIntent(request.message);
+      const isDestructiveStage =
+        activeStage.intent.destructive ||
+        taskIntentSpec.destructive ||
+        intentResult.taskType === "DELETE_FOLDER" ||
+        intentResult.taskType === "DELETE_FILE" ||
+        intentResult.intent === "DELETE_FOLDER" ||
+        intentResult.intent === "DELETE_FILE" ||
+        activeStage.intent.taskType === "DELETE_FOLDER" ||
+        activeStage.intent.taskType === "DELETE_FILE" ||
+        compound.hasDeletion ||
+        (Array.isArray(executionContract.allowedActions) &&
+          (executionContract.allowedActions.includes("delete_file") ||
+            executionContract.allowedActions.includes("delete_folder")));
+
+      let resolvedTaskTarget: ResolvedTaskTarget | undefined =
+        activeStage.resolvedTarget || taskIntentSpec.resolvedTarget;
+
+      if (isDestructiveStage) {
+        const resolution = DestructiveTargetResolver.resolve(
+          effectiveGoal,
+          canonicalExistingFiles,
+          {
+            isDestructive: true,
+            taskType: activeStage.intent.taskType,
+            targetPath: activeStage.intent.explicitUserPaths?.[0] || executionContract.targetPaths[0],
+            evidenceStore,
+            repositoryId: projectId,
+            fileContext: optimizedContext?.fileContext,
+            snapshotFiles: pipelineSnapshotFiles,
+            localPath: effectiveLocalPath,
+            monorepo,
+            knowledgeGraph,
+            selectedLogicalTarget: clarificationData?.clarificationQas[clarificationData.clarificationQas.length - 1]?.answer,
+          }
+        );
+
+        if (resolution.status === "RESOLVED" && resolution.resolvedTarget) {
+          resolvedTaskTarget = resolution.resolvedTarget;
+          activeStage.resolvedTarget = resolvedTaskTarget;
+          taskIntentSpec.resolvedTarget = resolvedTaskTarget;
+
+          const newTargetPaths = Array.from(
+            new Set([
+              ...executionContract.targetPaths,
+              ...resolvedTaskTarget.candidatePaths,
+              ...resolvedTaskTarget.importerPaths,
+            ])
+          );
+          executionContract.targetPaths = newTargetPaths;
+
+          if (!executionContract.targetProvenance) {
+            executionContract.targetProvenance = {};
+          }
+          for (const p of resolvedTaskTarget.candidatePaths) {
+            executionContract.targetProvenance[p] =
+              resolvedTaskTarget.resolutionSource === "EXPLICIT_PATH"
+                ? "EXPLICIT_USER_PATH"
+                : "UNIQUE_NAMED_ENTITY";
+          }
+          for (const imp of resolvedTaskTarget.importerPaths) {
+            executionContract.targetProvenance[imp] = "DETERMINISTIC_REFERENCE_CLEANUP";
+          }
+
+          executionContract.searchScope = Array.from(
+            new Set([...executionContract.searchScope, ...newTargetPaths])
+          );
+        } else if (resolution.status === "NOT_FOUND" || resolution.targetCertainty === "NONEXISTENT") {
+          const failureExplanation = `[Insufficient Repository Evidence] ${resolution.reason}`;
+          await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+          return {
+            explanation: failureExplanation,
+            changes: [],
+            commitMessage: "",
+            sessionId: session.id,
+            intent: intentResult.intent,
+            taskType: intentResult.taskType,
+            risk: intentResult.risk,
+            estimatedComplexity: intentResult.estimatedComplexity,
+            targetPath: intentResult.targetPath,
+            confidence: intentResult.confidence,
+            buildVerified: false,
+            buildErrors: failureExplanation,
+            lifecycleStage: "InsufficientRepositoryEvidence",
+            errorCode: "INSUFFICIENT_REPOSITORY_EVIDENCE",
+          };
+        }
+      }
+
       const planningContext = {
         ...projectContext,
         existingFiles: canonicalExistingFiles,
@@ -840,6 +931,7 @@ export class AgentPipeline {
         baselineDiagnostics: baselineDiagnosticsList,
         monorepo,
         evidenceStore,
+        resolvedTarget: resolvedTaskTarget,
       };
 
       onProgress?.({
@@ -942,54 +1034,6 @@ export class AgentPipeline {
             }
             for (const exp of cleanupResult.approvedExpansions) {
               executionContract.targetProvenance[exp.path] = "DETERMINISTIC_REFERENCE_CLEANUP";
-
-              // Pre-seed backend evidence for importer cleanup
-              const importerFileEv = evidenceStore.addEvidence({
-                kind: "FILE",
-                filePath: exp.path,
-                provenance: "REPO_READ",
-                repositoryId: projectId,
-                metadata: { exists: true },
-              });
-              const importerRelEv = evidenceStore.addEvidence({
-                kind: exp.evidence === "SYMBOL_REFERENCE" ? "REFERENCE" : "IMPORT",
-                filePath: exp.path,
-                sourceFile: exp.sourceTarget,
-                provenance: "REFERENCE_SEARCH",
-                repositoryId: projectId,
-                metadata: { target: exp.sourceTarget, relation: exp.evidence },
-              });
-
-              // If importer is not yet in rawManifest.files, add it as a required modify action
-              const existingManifestEntry = rawManifest.files.find(
-                (f) => normalizeRepoPath(f.path) === normalizeRepoPath(exp.path)
-              );
-              if (!existingManifestEntry) {
-                rawManifest.files.push({
-                  path: exp.path,
-                  action: "modify",
-                  description: `Clean up broken import/reference to deleted target '${exp.sourceTarget}'`,
-                  evidenceIds: [importerFileEv.id, importerRelEv.id],
-                  dependencies: [exp.sourceTarget],
-                });
-                rawManifest.totalFiles = rawManifest.files.length;
-              } else {
-                if (!Array.isArray(existingManifestEntry.evidenceIds)) {
-                  existingManifestEntry.evidenceIds = [];
-                }
-                if (!existingManifestEntry.evidenceIds.includes(importerFileEv.id)) {
-                  existingManifestEntry.evidenceIds.push(importerFileEv.id);
-                }
-                if (!existingManifestEntry.evidenceIds.includes(importerRelEv.id)) {
-                  existingManifestEntry.evidenceIds.push(importerRelEv.id);
-                }
-                if (!Array.isArray(existingManifestEntry.dependencies)) {
-                  existingManifestEntry.dependencies = [];
-                }
-                if (!existingManifestEntry.dependencies.includes(exp.sourceTarget)) {
-                  existingManifestEntry.dependencies.push(exp.sourceTarget);
-                }
-              }
             }
             executionContract.searchScope = Array.from(
               new Set([...executionContract.searchScope, ...executionContract.targetPaths])
@@ -1065,7 +1109,7 @@ export class AgentPipeline {
           const rejectedReasons = writeAuthResult.rejectedPaths
             .map((r) => `• ${r.path}: ${r.reason}`)
             .join("\n");
-          const failureExplanation = `[Manifest Validation Failed] All planned file changes were rejected by evidence-bound write authority:\n${rejectedReasons}`;
+          const failureExplanation = `[Write Authority Rejected] [Manifest Validation Failed] All planned file changes were rejected by evidence-bound write authority:\n${rejectedReasons}`;
           await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
 
           return {
@@ -1081,7 +1125,8 @@ export class AgentPipeline {
             confidence: finalConfidence,
             buildVerified: false,
             buildErrors: failureExplanation,
-            lifecycleStage: "ManifestValidationFailed",
+            lifecycleStage: "WriteAuthorityRejected",
+            errorCode: "WRITE_AUTHORITY_REJECTED",
           };
         }
 

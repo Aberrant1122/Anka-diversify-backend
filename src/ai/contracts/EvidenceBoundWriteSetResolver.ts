@@ -382,7 +382,10 @@ export class EvidenceBoundWriteSetResolver {
         console.log(
           `[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=INVENTED_OR_MISSING_EVIDENCE_IDS missing=[${evidenceValidation.missingIds.join(", ")}]`
         );
-        rejectionReasons.set(normPath, `Cited non-existent or unverified evidence IDs: ${evidenceValidation.missingIds.join(", ")}`);
+        rejectionReasons.set(
+          normPath,
+          `INVENTED_OR_MISSING_EVIDENCE_IDS: Cited non-existent or unverified evidence IDs: ${evidenceValidation.missingIds.join(", ")}`
+        );
         continue;
       }
 
