@@ -12,6 +12,7 @@ export interface DestructiveSafetyAssessment {
   clarificationQuestion?: string;
   clarificationOptions?: string[];
   groundedTargets: string[];
+  resolvedTarget?: import("../shared/TaskExecutionPlan").ResolvedTaskTarget;
 }
 
 export interface DestructiveSafetyOptions extends DestructiveResolveOptions {}
@@ -46,6 +47,7 @@ export class DestructiveSafetyEvaluator {
       clarificationQuestion: resolution.clarificationQuestion,
       clarificationOptions: resolution.clarificationOptions,
       groundedTargets: resolution.candidatePaths,
+      resolvedTarget: resolution.resolvedTarget,
     };
   }
 }

@@ -13,12 +13,23 @@ export interface TaskExecutionStageSpec {
   dependsOn?: string[];
 }
 
+export interface ResolvedTaskTarget {
+  logicalTargetId: string;
+  featureName: string;
+  candidatePaths: string[];
+  evidenceIds: string[];
+  importerPaths: string[];
+  resolutionSource: "DETERMINISTIC_ACTIVE_GRAPH" | "DETERMINISTIC_UNIQUE" | "EXPLICIT_PATH" | "USER_CLARIFICATION";
+  status: "RESOLVED" | "AMBIGUOUS" | "NOT_FOUND";
+}
+
 export interface TaskExecutionStage {
   id: string;
   name: string;
   intent: TaskIntentSpec;
   dependsOn: string[];
   status: StageExecutionStatus;
+  resolvedTarget?: ResolvedTaskTarget;
 }
 
 export interface TaskExecutionPlan {

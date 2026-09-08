@@ -1,4 +1,5 @@
-import { TaskType, TaskRisk, TaskComplexity, TaskClassificationResult } from "../classification/TaskTypes";
+import { TaskClassificationResult, TaskType, TaskRisk, TaskComplexity } from "../classification/TaskTypes";
+import { ResolvedTaskTarget } from "./TaskExecutionPlan";
 
 export type TaskOperationKind = "CREATE" | "MODIFY" | "DELETE" | "REPAIR" | "REFACTOR";
 
@@ -22,6 +23,7 @@ export interface TaskIntentSpec {
   reasoning?: string;
   question?: string;
   options?: string[];
+  resolvedTarget?: ResolvedTaskTarget;
 }
 
 /**
