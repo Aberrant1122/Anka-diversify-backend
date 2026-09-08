@@ -126,6 +126,28 @@ export class IntentClassifier {
         }
       }
 
+      let stages: TaskClassificationResult["stages"] = undefined;
+      if (Array.isArray(parsed.stages) && parsed.stages.length > 0) {
+        const validatedStages = [];
+        for (let i = 0; i < parsed.stages.length; i++) {
+          const s = parsed.stages[i];
+          if (s && typeof s.goal === "string" && s.goal.trim()) {
+            const stageType: TaskType = VALID_TASK_TYPES.has(s.taskType) ? s.taskType : taskType;
+            validatedStages.push({
+              id: typeof s.id === "string" && s.id.trim() ? s.id.trim() : `stage-${i + 1}`,
+              name: s.goal.trim(),
+              taskType: stageType,
+              goal: s.goal.trim(),
+              targetPath: typeof s.targetPath === "string" && s.targetPath.trim() ? s.targetPath.trim() : undefined,
+              dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.map(String) : i > 0 ? [`stage-${i}`] : [],
+            });
+          }
+        }
+        if (validatedStages.length > 0) {
+          stages = validatedStages;
+        }
+      }
+
       return {
         taskType,
         risk,
@@ -137,6 +159,7 @@ export class IntentClassifier {
         targetPath,
         question: clarificationQuestion,
         options: clarificationOptions,
+        stages,
       };
     } catch {
       // Fail closed: Do NOT guess taskType, risk, complexity, intent, or target path from prompt keywords
