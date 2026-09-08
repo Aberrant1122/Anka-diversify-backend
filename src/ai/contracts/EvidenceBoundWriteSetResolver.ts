@@ -349,7 +349,9 @@ export class EvidenceBoundWriteSetResolver {
         }
 
         const existenceEvidence = evidenceValidation.evidence.filter(
-          (e) => normalizeRepoPath(e.filePath) === normPath && (e.kind === "FILE" || e.provenance === "REPO_READ")
+          (e) =>
+            normalizeRepoPath(e.filePath) === normPath &&
+            (e.kind === "FILE" || e.provenance === "REPO_READ" || (e.kind === "DIAGNOSTIC" && !e.metadata?.stale))
         );
         if (existenceEvidence.length === 0) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NO_FILE_EXISTENCE_EVIDENCE`);

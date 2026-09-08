@@ -54,6 +54,7 @@ import { AuthoritativeSourceHydrator } from "../manifest/AuthoritativeSourceHydr
 import { BaselineDeltaVerifier, createPreTaskSourceGetter } from "../../services/baseline-delta.verifier";
 import { TargetScopeExpander } from "../contracts/TargetScopeExpander";
 import { MonorepoDetector } from "../workspace/MonorepoDetector";
+import { DiagnosticNormalizer, NormalizedDiagnostic } from "../validation/DiagnosticNormalizer";
 
 const prisma = new PrismaClient();
 
@@ -70,6 +71,7 @@ export class AgentPipeline {
       isBaselineDeltaTask?: boolean;
       baseCommitSha?: string;
       baselineBuildPassed?: boolean;
+      [key: string]: any;
     },
   ): Promise<AgentResponse> {
     const session = await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
@@ -201,14 +203,6 @@ export class AgentPipeline {
     const effectiveGoal = activeStage.intent.goal;
 
     const baselineDiagnosticsList = options?.targetedBaselineDiagnostics || options?.baselineDiagnostics || [];
-    const diagnosticTargetPaths = Array.from(
-      new Set(
-        baselineDiagnosticsList
-          .map((d) => d.filePath)
-          .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
-          .map((p) => p.replace(/\\/g, "/").replace(/^\.\//, ""))
-      )
-    );
 
     const pipelineSnapshotFiles = Array.isArray(effectiveSnapshot)
       ? effectiveSnapshot
@@ -221,6 +215,65 @@ export class AgentPipeline {
     });
 
     const evidenceStore = new RepositoryEvidenceStore(projectId, effectiveLocalPath || undefined);
+
+    // Normalize and ingest baseline diagnostics strictly via DiagnosticNormalizer
+    const currentCheckpointId = activeStage?.id;
+    const rawErrorLog =
+      options?.baselineErrorLog ||
+      options?.baselineBuildErrors ||
+      options?.rawBaselineErrors ||
+      options?.baselineErrors;
+
+    const normalizedDiagnostics: NormalizedDiagnostic[] = [];
+    if (typeof rawErrorLog === "string" && rawErrorLog.trim().length > 0) {
+      normalizedDiagnostics.push(
+        ...DiagnosticNormalizer.normalize(rawErrorLog, {
+          repositoryId: projectId,
+          checkpointId: currentCheckpointId,
+        })
+      );
+    }
+
+    if (Array.isArray(baselineDiagnosticsList) && baselineDiagnosticsList.length > 0) {
+      for (const bd of baselineDiagnosticsList) {
+        if ((bd as any).category) {
+          normalizedDiagnostics.push(bd as any);
+        } else {
+          const rawTrace =
+            (bd as any).rawTrace ||
+            ((bd as any).filePath
+              ? `${(bd as any).filePath}(${(bd as any).line || 1},${(bd as any).column || 1}): error ${(bd as any).errorCode || "TS"}: ${(bd as any).message}`
+              : (bd as any).message);
+          const diags = DiagnosticNormalizer.normalize(rawTrace, {
+            repositoryId: projectId,
+            checkpointId: currentCheckpointId,
+          });
+          if (diags.length > 0) {
+            normalizedDiagnostics.push(...diags);
+          }
+        }
+      }
+    }
+
+    if (normalizedDiagnostics.length > 0) {
+      DiagnosticNormalizer.ingestSourceDiagnostics(
+        normalizedDiagnostics,
+        evidenceStore,
+        currentCheckpointId
+      );
+    }
+
+    const diagnosticEvidences = evidenceStore.getAllEvidence().filter((e) => e.kind === "DIAGNOSTIC");
+    const diagnosticTargetPaths = Array.from(
+      new Set(
+        [
+          ...diagnosticEvidences.map((e) => e.filePath),
+          ...baselineDiagnosticsList.map((d) => d.filePath || ""),
+        ]
+          .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+          .map((p) => normalizeRepoPath(p))
+      )
+    );
 
     let executionContract: ExecutionContract = {
       goal: policyContract.goal,
@@ -244,11 +297,17 @@ export class AgentPipeline {
 
     if (diagnosticTargetPaths.length > 0) {
       for (const dt of diagnosticTargetPaths) {
-        evidenceStore.addEvidence({
-          kind: "DIAGNOSTIC",
-          filePath: dt,
-          provenance: "BUILD_DIAGNOSTIC",
-        });
+        if (!diagnosticEvidences.some((e) => normalizeRepoPath(e.filePath) === normalizeRepoPath(dt))) {
+          evidenceStore.addEvidence({
+            kind: "DIAGNOSTIC",
+            filePath: dt,
+            provenance: "BUILD_DIAGNOSTIC",
+            metadata: {
+              checkpointId: currentCheckpointId,
+              stale: false,
+            },
+          });
+        }
       }
       executionContract.searchScope = Array.from(new Set([...diagnosticTargetPaths, ...executionContract.searchScope]));
       if (executionContract.taskType === "NEW_FEATURE" || executionContract.taskType === "REFACTOR") {
@@ -1047,16 +1106,44 @@ export class AgentPipeline {
     });
 
     const s7Start = performance.now();
-    const roadmapAndDiff = await CodeGenerator.generateRoadmapAndDiffs(
-      request.message,
-      intentResult,
-      optimizedContext,
-      systemPrompt,
-      executionContract,
-      approvedManifest,
-      hydrationResult.authoritativeModifySources,
-      hydrationResult.mergedSourceMap,
-    );
+    let roadmapAndDiff;
+    try {
+      roadmapAndDiff = await CodeGenerator.generateRoadmapAndDiffs(
+        request.message,
+        intentResult,
+        optimizedContext,
+        systemPrompt,
+        executionContract,
+        approvedManifest,
+        hydrationResult.authoritativeModifySources,
+        hydrationResult.mergedSourceMap,
+      );
+    } catch (genErr: any) {
+      if (
+        genErr?.code === "CODEGEN_MANIFEST_VIOLATION" ||
+        (genErr?.message && genErr.message.includes("[CODEGEN_MANIFEST_VIOLATION]"))
+      ) {
+        const failureExplanation = `[Execution Scope Violation] Generated file changes failed deterministic scope validation:\n• [UNDECLARED_FILE] ${genErr.message}`;
+        await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+        return {
+          explanation: failureExplanation,
+          changes: [],
+          commitMessage: "",
+          sessionId: session.id,
+          intent: intentResult.intent,
+          taskType: intentResult.taskType,
+          risk: intentResult.risk,
+          estimatedComplexity: intentResult.estimatedComplexity,
+          targetPath: intentResult.targetPath,
+          confidence: finalConfidence,
+          buildVerified: false,
+          buildErrors: failureExplanation,
+          lifecycleStage: "BuildFailed",
+        };
+      }
+      throw genErr;
+    }
     const s7Time = performance.now() - s7Start;
 
     onProgress?.({
