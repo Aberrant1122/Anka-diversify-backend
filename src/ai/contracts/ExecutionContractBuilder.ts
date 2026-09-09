@@ -1,5 +1,6 @@
 import path from "path";
 import { ExecutionContract, TaskClassificationResult, TaskType } from "../shared/types";
+import { FileActionObligation } from "../shared/TaskExecutionPlan";
 import { routeTask } from "../../services/task-router.engine";
 import { TargetPathExtractor } from "./TargetPathExtractor";
 import { TargetScopeExpander } from "./TargetScopeExpander";
@@ -442,7 +443,8 @@ export function buildPolicyContract(
 export function buildFinalExecutionContract(
   policy: PolicyContract,
   authorizedTargetPaths: string[],
-  repoFileNames: string[] = []
+  repoFileNames: string[] = [],
+  actionObligations?: FileActionObligation[]
 ): ExecutionContract {
   const searchScope = authorizedTargetPaths
     .map((tp) => {
@@ -478,5 +480,6 @@ export function buildFinalExecutionContract(
     maxFiles: policy.maxFiles,
     diffCriticEnabled: policy.diffCriticEnabled,
     targetProvenance,
+    actionObligations,
   };
 }

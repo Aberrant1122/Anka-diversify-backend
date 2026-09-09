@@ -389,11 +389,13 @@ When using an existing local component, conform to its authoritative exported pr
 
     // ── Deterministic Manifest Contract Enforcement ──
     if (approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0) {
-      const approvedPathSet = new Set(
-        approvedManifest.files
-          .map((f) => (f && f.path ? normalizeRepoPath(f.path) : ""))
-          .filter(Boolean)
-      );
+      const manifestActionMap = new Map<string, "create" | "modify" | "delete">();
+      for (const f of approvedManifest.files) {
+        if (f && f.path) {
+          manifestActionMap.set(normalizeRepoPath(f.path), f.action);
+        }
+      }
+      const approvedPathSet = new Set(manifestActionMap.keys());
 
       const findUndeclaredPaths = (changesList: any[]): string[] => {
         return changesList
@@ -401,20 +403,41 @@ When using an existing local component, conform to its authoritative exported pr
           .filter((p) => p && !approvedPathSet.has(normalizeRepoPath(p)));
       };
 
-      let undeclared = findUndeclaredPaths(rawChanges);
+      const findActionMismatches = (changesList: any[]): Array<{ path: string; expected: string; actual: string }> => {
+        const mismatches: Array<{ path: string; expected: string; actual: string }> = [];
+        for (const c of changesList) {
+          if (!c || typeof c.path !== "string") continue;
+          const norm = normalizeRepoPath(c.path);
+          const expected = manifestActionMap.get(norm);
+          if (expected) {
+            const actual = (c.action || (c.isDeleted ? "delete" : "modify")).toLowerCase();
+            if (actual !== expected) {
+              mismatches.push({ path: c.path, expected, actual });
+            }
+          }
+        }
+        return mismatches;
+      };
 
-      if (undeclared.length > 0) {
+      let undeclared = findUndeclaredPaths(rawChanges);
+      let actionMismatches = findActionMismatches(rawChanges);
+
+      if (undeclared.length > 0 || actionMismatches.length > 0) {
         console.warn(
-          `[CodeGenerator] Generated file(s) outside approved manifest: [${undeclared.join(", ")}]. Approved paths: [${Array.from(approvedPathSet).join(", ")}]. Triggering bounded corrective regeneration (Attempt 1/1)...`
+          `[CodeGenerator] Manifest contract violation: undeclared=[${undeclared.join(", ")}], actionMismatches=[${actionMismatches.map((m) => `${m.path}: expected ${m.expected} got ${m.actual}`).join(", ")}]. Triggering bounded corrective regeneration (Attempt 1/1)...`
         );
 
         let retrySucceeded = false;
         try {
-          const approvedPathsListStr = Array.from(approvedPathSet).join(", ");
-          const correctiveUserMessage = `[CODEGEN_MANIFEST_VIOLATION] You generated files outside the approved manifest: [${undeclared.join(", ")}].
-You are strictly forbidden from generating undeclared files.
-Generate changes ONLY for these approved paths: [${approvedPathsListStr}].
-Respond ONLY with valid JSON matching the required format.`;
+          const approvedSpecs = Array.from(manifestActionMap.entries()).map(([p, a]) => `${p} (action: ${a})`).join(", ");
+          let correctiveUserMessage = `[CODEGEN_MANIFEST_VIOLATION] Your generated output violated the approved manifest contract.\n`;
+          if (undeclared.length > 0) {
+            correctiveUserMessage += `- Undeclared files: [${undeclared.join(", ")}]. You are strictly forbidden from generating undeclared files.\n`;
+          }
+          if (actionMismatches.length > 0) {
+            correctiveUserMessage += `- Action mismatches: ${actionMismatches.map((m) => `${m.path} (expected action "${m.expected}", but you returned "${m.actual}")`).join(", ")}. You MUST emit EXACTLY the approved action.\n`;
+          }
+          correctiveUserMessage += `Generate changes ONLY for these approved paths with their EXACT actions: [${approvedSpecs}].\nRespond ONLY with valid JSON matching the required format.`;
 
           const retryCompletion = await openai.chat.completions.create({
             model: "gpt-4o",
@@ -432,10 +455,11 @@ Respond ONLY with valid JSON matching the required format.`;
           const retryParsed = JSON.parse(retryCompletion.choices[0]?.message?.content || "{}");
           const retryChanges: any[] = Array.isArray(retryParsed.changes) ? retryParsed.changes : [];
           const retryUndeclared = findUndeclaredPaths(retryChanges);
+          const retryActionMismatches = findActionMismatches(retryChanges);
 
-          if (retryUndeclared.length === 0 && retryChanges.length > 0) {
+          if (retryUndeclared.length === 0 && retryActionMismatches.length === 0 && retryChanges.length > 0) {
             console.log(
-              `[CodeGenerator] Bounded corrective regeneration succeeded. All ${retryChanges.length} generated changes are within approved manifest.`
+              `[CodeGenerator] Bounded corrective regeneration succeeded. All ${retryChanges.length} generated changes comply with approved manifest contract.`
             );
             rawChanges = retryChanges;
             parsed = retryParsed;
@@ -443,10 +467,8 @@ Respond ONLY with valid JSON matching the required format.`;
             commitMessage = retryParsed.commitMessage || commitMessage;
             retrySucceeded = true;
           } else {
-            console.warn(
-              `[CodeGenerator] Bounded corrective regeneration failed. Undeclared files remain: [${retryUndeclared.join(", ")}]. Failing closed.`
-            );
-            undeclared = retryUndeclared.length > 0 ? retryUndeclared : undeclared;
+            undeclared = retryUndeclared;
+            actionMismatches = retryActionMismatches;
           }
         } catch (retryErr: any) {
           console.warn(
@@ -455,13 +477,22 @@ Respond ONLY with valid JSON matching the required format.`;
         }
 
         if (!retrySucceeded) {
-          const violationErr: any = new Error(
-            `[CODEGEN_MANIFEST_VIOLATION] Generated file(s) outside approved manifest: [${undeclared.join(", ")}]. Approved paths: [${Array.from(approvedPathSet).join(", ")}].`
-          );
-          violationErr.code = "CODEGEN_MANIFEST_VIOLATION";
-          violationErr.undeclaredPaths = undeclared;
-          violationErr.approvedPaths = Array.from(approvedPathSet);
-          throw violationErr;
+          if (actionMismatches.length > 0) {
+            const violationErr: any = new Error(
+              `[CODEGEN_MANIFEST_ACTION_VIOLATION] Generated action mismatch for approved manifest file(s): ${actionMismatches.map((m) => `${m.path} (expected ${m.expected}, got ${m.actual})`).join(", ")}`
+            );
+            violationErr.code = "CODEGEN_MANIFEST_ACTION_VIOLATION";
+            violationErr.actionMismatches = actionMismatches;
+            throw violationErr;
+          } else {
+            const violationErr: any = new Error(
+              `[CODEGEN_MANIFEST_VIOLATION] Generated file(s) outside approved manifest: [${undeclared.join(", ")}]. Approved paths: [${Array.from(approvedPathSet).join(", ")}].`
+            );
+            violationErr.code = "CODEGEN_MANIFEST_VIOLATION";
+            violationErr.undeclaredPaths = undeclared;
+            violationErr.approvedPaths = Array.from(approvedPathSet);
+            throw violationErr;
+          }
         }
       }
     }

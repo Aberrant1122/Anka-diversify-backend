@@ -424,6 +424,20 @@ export class EvidenceBoundWriteSetResolver {
           rejectionReasons.set(normPath, "DELETE_WITHOUT_DESTRUCTIVE_INTENT: DELETE action proposed without structured destructive intent");
           continue;
         }
+        // Action compatibility: Importer cleanup paths are authorized for MODIFY only, never DELETE
+        const isImporterCleanup =
+          intentSpec.resolvedTarget?.importerPaths?.some((p) => normalizeRepoPath(p) === normPath) ||
+          intentSpec.resolvedTarget?.actionObligations?.some(
+            (o) => normalizeRepoPath(o.path) === normPath && (o.requiredAction === "modify" || o.role === "DEPENDENCY_CLEANUP")
+          );
+        if (isImporterCleanup) {
+          console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NOT_AUTHORIZED_FOR_DELETE`);
+          rejectionReasons.set(
+            normPath,
+            "NOT_AUTHORIZED_FOR_DELETE: Importer cleanup path is only authorized for MODIFY, not DELETE"
+          );
+          continue;
+        }
         const existenceEvidence = evidenceValidation.evidence.filter(
           (e) =>
             normalizeRepoPath(e.filePath) === normPath &&
@@ -444,6 +458,20 @@ export class EvidenceBoundWriteSetResolver {
         if (!existingSet.has(normPath)) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=EXISTING_FILE_NOT_FOUND`);
           rejectionReasons.set(normPath, "EXISTING_FILE_NOT_FOUND: Target file for modify does not exist in repository");
+          continue;
+        }
+        // Action compatibility: Primary destructive targets must be DELETED, not MODIFIED
+        const isPrimaryDestructiveTarget =
+          (intentSpec.destructive && intentSpec.resolvedTarget?.candidatePaths?.some((p) => normalizeRepoPath(p) === normPath)) ||
+          intentSpec.resolvedTarget?.actionObligations?.some(
+            (o) => normalizeRepoPath(o.path) === normPath && (o.requiredAction === "delete" || o.role === "PRIMARY_TARGET")
+          );
+        if (isPrimaryDestructiveTarget) {
+          console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=ACTION_MISMATCH_WITH_INTENT`);
+          rejectionReasons.set(
+            normPath,
+            "ACTION_MISMATCH_WITH_INTENT: Primary destructive target must be DELETED, not MODIFIED"
+          );
           continue;
         }
 

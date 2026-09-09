@@ -13,6 +13,13 @@ export interface TaskExecutionStageSpec {
   dependsOn?: string[];
 }
 
+export interface FileActionObligation {
+  path: string;
+  requiredAction: "create" | "modify" | "delete";
+  role: "PRIMARY_TARGET" | "DEPENDENCY_CLEANUP" | "INTEGRATION" | "FEATURE_CREATION";
+  evidenceIds: string[];
+}
+
 export interface ResolvedTaskTarget {
   logicalTargetId: string;
   featureName: string;
@@ -21,6 +28,7 @@ export interface ResolvedTaskTarget {
   importerPaths: string[];
   resolutionSource: "DETERMINISTIC_ACTIVE_GRAPH" | "DETERMINISTIC_UNIQUE" | "EXPLICIT_PATH" | "USER_CLARIFICATION";
   status: "RESOLVED" | "AMBIGUOUS" | "NOT_FOUND";
+  actionObligations?: FileActionObligation[];
 }
 
 export interface TaskExecutionStage {
@@ -30,6 +38,7 @@ export interface TaskExecutionStage {
   dependsOn: string[];
   status: StageExecutionStatus;
   resolvedTarget?: ResolvedTaskTarget;
+  actionObligations?: FileActionObligation[];
 }
 
 export interface TaskExecutionPlan {

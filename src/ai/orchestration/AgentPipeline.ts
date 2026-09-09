@@ -19,7 +19,7 @@ import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder
 import { RepositorySearch } from "../repository/RepositorySearch";
 import { createTaskIntentSpec, TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
-import { TaskExecutionPlan, ResolvedTaskTarget } from "../shared/TaskExecutionPlan";
+import { TaskExecutionPlan, ResolvedTaskTarget, FileActionObligation } from "../shared/TaskExecutionPlan";
 import { DestructiveTargetResolver } from "../contracts/DestructiveTargetResolver";
 import { StageExecutionTransaction, StageVerificationGate } from "./StageExecutionTransaction";
 import { PolicyContract } from "../contracts/PolicyContract";
@@ -875,6 +875,8 @@ export class AgentPipeline {
           resolvedTaskTarget = resolution.resolvedTarget;
           activeStage.resolvedTarget = resolvedTaskTarget;
           taskIntentSpec.resolvedTarget = resolvedTaskTarget;
+          activeStage.actionObligations = resolvedTaskTarget.actionObligations;
+          executionContract.actionObligations = resolvedTaskTarget.actionObligations;
 
           const newTargetPaths = Array.from(
             new Set([
@@ -901,6 +903,25 @@ export class AgentPipeline {
           executionContract.searchScope = Array.from(
             new Set([...executionContract.searchScope, ...newTargetPaths])
           );
+        } else if (resolution.status === "AMBIGUOUS") {
+          const failureExplanation = `[Target Ambiguous] ${resolution.reason}`;
+          await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+          return {
+            explanation: failureExplanation,
+            changes: [],
+            commitMessage: "",
+            sessionId: session.id,
+            intent: intentResult.intent,
+            taskType: intentResult.taskType,
+            risk: intentResult.risk,
+            estimatedComplexity: intentResult.estimatedComplexity,
+            targetPath: intentResult.targetPath,
+            confidence: intentResult.confidence,
+            buildVerified: false,
+            buildErrors: failureExplanation,
+            lifecycleStage: "TargetAmbiguous",
+            errorCode: "TARGET_AMBIGUOUS",
+          };
         } else if (resolution.status === "NOT_FOUND" || resolution.targetCertainty === "NONEXISTENT") {
           const failureExplanation = `[Insufficient Repository Evidence] ${resolution.reason}`;
           await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
@@ -932,6 +953,7 @@ export class AgentPipeline {
         monorepo,
         evidenceStore,
         resolvedTarget: resolvedTaskTarget,
+        actionObligations: executionContract.actionObligations || resolvedTaskTarget?.actionObligations,
       };
 
       onProgress?.({
@@ -953,6 +975,101 @@ export class AgentPipeline {
       } catch (e: any) {
         manifestGenerationError = e?.message || String(e);
         console.error("[AgentPipeline] Manifest generation error:", manifestGenerationError);
+      }
+
+      if (rawManifest && Array.isArray(rawManifest.files)) {
+        const obligations: FileActionObligation[] =
+          executionContract.actionObligations || planningContext.actionObligations || [];
+
+        if (obligations.length > 0) {
+          const checkManifestActionMismatches = (
+            manifest: FileManifest
+          ): Array<{ path: string; expected: string; actual: string }> => {
+            const mismatches: Array<{ path: string; expected: string; actual: string }> = [];
+            const obMap = new Map<string, FileActionObligation>();
+            for (const ob of obligations) {
+              obMap.set(normalizeRepoPath(ob.path), ob);
+            }
+            for (const f of manifest.files || []) {
+              const norm = normalizeRepoPath(f.path);
+              const ob = obMap.get(norm);
+              if (ob && f.action !== ob.requiredAction) {
+                mismatches.push({ path: f.path, expected: ob.requiredAction, actual: f.action });
+              }
+            }
+            return mismatches;
+          };
+
+          let actionMismatches = checkManifestActionMismatches(rawManifest);
+
+          if (actionMismatches.length > 0) {
+            console.warn(
+              `[AgentPipeline] Manifest action contract violation: ${actionMismatches.map((m) => `${m.path} (expected ${m.expected}, got ${m.actual})`).join(", ")}. Triggering bounded manifest correction (Attempt 1/1)...`
+            );
+
+            try {
+              const generator = new ManifestGenerator(getOpenAI());
+              const correctionNote =
+                `\n[MANIFEST_ACTION_MISMATCH] Corrective Mandate:\n` +
+                actionMismatches
+                  .map(
+                    (m) =>
+                      `File "${m.path}" was planned with action "${m.actual}", but required action is "${m.expected}".`
+                  )
+                  .join("\n") +
+                `\nYou MUST emit EXACTLY the required actions without modifying action types.`;
+              const correctedGoal = `${effectiveGoal}\n${correctionNote}`;
+              const retryManifest = await generator.generateManifest(
+                correctedGoal,
+                planningContext,
+                executionContract
+              );
+              if (retryManifest && Array.isArray(retryManifest.files)) {
+                const retryMismatches = checkManifestActionMismatches(retryManifest);
+                if (retryMismatches.length === 0) {
+                  console.log("[AgentPipeline] Bounded manifest action correction succeeded.");
+                  rawManifest = retryManifest;
+                  actionMismatches = [];
+                } else {
+                  actionMismatches = retryMismatches;
+                }
+              }
+            } catch (retryErr: any) {
+              console.warn(
+                "[AgentPipeline] Bounded manifest correction error:",
+                retryErr?.message || retryErr
+              );
+            }
+
+            if (actionMismatches.length > 0) {
+              const mismatchDetails = actionMismatches
+                .map(
+                  (m) =>
+                    `• ${m.path}: manifest declared action "${m.actual}", but required action is "${m.expected}"`
+                )
+                .join("\n");
+              const failureExplanation = `[Execution Scope Violation] [MANIFEST_ACTION_MISMATCH] Manifest action contract violation:\n${mismatchDetails}`;
+              await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+              return {
+                explanation: failureExplanation,
+                changes: [],
+                commitMessage: "",
+                sessionId: session.id,
+                intent: intentResult.intent,
+                taskType: intentResult.taskType,
+                risk: intentResult.risk,
+                estimatedComplexity: intentResult.estimatedComplexity,
+                targetPath: intentResult.targetPath,
+                confidence: finalConfidence,
+                buildVerified: false,
+                buildErrors: failureExplanation,
+                lifecycleStage: "ManifestActionMismatch",
+                errorCode: "MANIFEST_ACTION_MISMATCH",
+              };
+            }
+          }
+        }
       }
 
       if (rawManifest) {
@@ -1100,7 +1217,8 @@ export class AgentPipeline {
         executionContract = buildFinalExecutionContract(
           policyContract,
           writeAuthResult.approvedPaths,
-          canonicalExistingFiles
+          canonicalExistingFiles,
+          executionContract.actionObligations
         );
 
         // Blocker 5 fail-closed: If proposed changes exist but none were approved by evidence authority,
@@ -1342,6 +1460,30 @@ export class AgentPipeline {
         hydrationResult.mergedSourceMap,
       );
     } catch (genErr: any) {
+      if (
+        genErr?.code === "CODEGEN_MANIFEST_ACTION_VIOLATION" ||
+        (genErr?.message && genErr.message.includes("[CODEGEN_MANIFEST_ACTION_VIOLATION]"))
+      ) {
+        const failureExplanation = `[Execution Scope Violation] [CODEGEN_MANIFEST_ACTION_VIOLATION] Generated file changes attempted action violating approved manifest contract:\n• ${genErr.message}`;
+        await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+        return {
+          explanation: failureExplanation,
+          changes: [],
+          commitMessage: "",
+          sessionId: session.id,
+          intent: intentResult.intent,
+          taskType: intentResult.taskType,
+          risk: intentResult.risk,
+          estimatedComplexity: intentResult.estimatedComplexity,
+          targetPath: intentResult.targetPath,
+          confidence: finalConfidence,
+          buildVerified: false,
+          buildErrors: failureExplanation,
+          lifecycleStage: "CodegenManifestActionViolation",
+          errorCode: "CODEGEN_MANIFEST_ACTION_VIOLATION",
+        };
+      }
       if (
         genErr?.code === "CODEGEN_MANIFEST_VIOLATION" ||
         (genErr?.message && genErr.message.includes("[CODEGEN_MANIFEST_VIOLATION]"))

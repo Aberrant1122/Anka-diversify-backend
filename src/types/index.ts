@@ -1,4 +1,5 @@
-import { TaskExecutionPlan } from "../ai/shared/TaskExecutionPlan";
+import { TaskExecutionPlan, FileActionObligation } from "../ai/shared/TaskExecutionPlan";
+export { FileActionObligation };
 
 export interface User {
   id: string;
@@ -450,6 +451,8 @@ export interface ExecutionContract {
   diffCriticEnabled: boolean;
   /** Authority provenance mapping: why each path in targetPaths is authorized */
   targetProvenance?: Record<string, string>;
+  /** Deterministic file action obligations (create / modify / delete) */
+  actionObligations?: FileActionObligation[];
 }
 
 
@@ -483,7 +486,7 @@ export interface AgentResponse {
   reason?: string;
   status?: string;
   verificationChecklist?: ChecklistItem[];
-  lifecycleStage?: "Done" | "BuildFailed" | "ManifestValidationFailed" | "WriteAuthorityRejected" | "InsufficientRepositoryEvidence" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
+  lifecycleStage?: "Done" | "BuildFailed" | "ManifestValidationFailed" | "WriteAuthorityRejected" | "InsufficientRepositoryEvidence" | "ManifestActionMismatch" | "CodegenManifestActionViolation" | "TargetAmbiguous" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
   errorCode?: string;
   pipelineMeasurementText?: string;
   patchCorrectionAttempted?: boolean;

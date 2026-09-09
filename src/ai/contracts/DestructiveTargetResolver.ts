@@ -2,7 +2,7 @@ import path from "path";
 import { TargetPathExtractor } from "./TargetPathExtractor";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
-import { ResolvedTaskTarget } from "../shared/TaskExecutionPlan";
+import { ResolvedTaskTarget, FileActionObligation } from "../shared/TaskExecutionPlan";
 import {
   getFileContent,
   extractExportedSymbols,
@@ -40,6 +40,7 @@ export interface DestructiveResolveOptions {
   monorepo?: MonorepoDescriptor | null;
   knowledgeGraph?: ExtendedKnowledgeGraph | null;
   selectedLogicalTarget?: string;
+  autonomous?: boolean;
 }
 
 export interface FeatureCluster {
@@ -389,6 +390,7 @@ export class DestructiveTargetResolver {
           importerPaths: hydrated.importerPaths,
           resolutionSource: "DETERMINISTIC_UNIQUE",
           status: "RESOLVED",
+          actionObligations: hydrated.actionObligations,
         };
         return {
           status: "RESOLVED",
@@ -430,6 +432,7 @@ export class DestructiveTargetResolver {
             importerPaths: hydrated.importerPaths,
             resolutionSource: "USER_CLARIFICATION",
             status: "RESOLVED",
+            actionObligations: hydrated.actionObligations,
           };
           return {
             status: "RESOLVED",
@@ -457,6 +460,7 @@ export class DestructiveTargetResolver {
           importerPaths: hydrated.importerPaths,
           resolutionSource: "DETERMINISTIC_UNIQUE",
           status: "RESOLVED",
+          actionObligations: hydrated.actionObligations,
         };
         return {
           status: "RESOLVED",
@@ -483,6 +487,7 @@ export class DestructiveTargetResolver {
           importerPaths: hydrated.importerPaths,
           resolutionSource: "DETERMINISTIC_ACTIVE_GRAPH",
           status: "RESOLVED",
+          actionObligations: hydrated.actionObligations,
         };
         return {
           status: "RESOLVED",
@@ -497,20 +502,99 @@ export class DestructiveTargetResolver {
         };
       }
 
+      // Autonomous structural disambiguation: check if one cluster has strictly higher incoming references
+      const activeCandidates = clusters.filter((c) => c.activeReferences.length > 0);
+      if (activeCandidates.length > 1) {
+        activeCandidates.sort((a, b) => b.activeReferences.length - a.activeReferences.length);
+        if (activeCandidates[0].activeReferences.length > activeCandidates[1].activeReferences.length) {
+          const topActive = activeCandidates[0];
+          const hydrated = this.hydrateFeatureEvidence(topActive, normalizedRepo, options);
+          const resolvedTarget: ResolvedTaskTarget = {
+            logicalTargetId: topActive.id,
+            featureName: topActive.name,
+            candidatePaths: topActive.files,
+            evidenceIds: hydrated.evidenceIds,
+            importerPaths: hydrated.importerPaths,
+            resolutionSource: "DETERMINISTIC_ACTIVE_GRAPH",
+            status: "RESOLVED",
+            actionObligations: hydrated.actionObligations,
+          };
+          return {
+            status: "RESOLVED",
+            targetCertainty: "GROUNDED_UNIQUE",
+            candidatePaths: topActive.files,
+            targetEvidenceIds: hydrated.evidenceIds,
+            reason: `Autonomously resolved active feature "${token}" with highest incoming references: ${topActive.name} (${topActive.files.join(", ")})`,
+            isDestructive: true,
+            isInFileModification: false,
+            requiresClarification: false,
+            resolvedTarget,
+          };
+        }
+      }
+
+      // Step 7.5: Logical target normalization & deduplication
+      const logicalTargetMap = new Map<string, FeatureCluster[]>();
+      for (const cluster of clusters) {
+        const normName = cluster.name.trim();
+        if (!logicalTargetMap.has(normName)) {
+          logicalTargetMap.set(normName, []);
+        }
+        logicalTargetMap.get(normName)!.push(cluster);
+      }
+      const distinctLogicalTargets = Array.from(logicalTargetMap.keys());
+
+      // If deduplication collapses candidates into EXACTLY ONE logical capability:
+      // Status MUST NOT remain AMBIGUOUS. It must become RESOLVED.
+      if (distinctLogicalTargets.length === 1) {
+        const matchingClusters = logicalTargetMap.get(distinctLogicalTargets[0])!;
+        const primaryCluster =
+          matchingClusters.find((c) => c.activeReferences.length > 0) ||
+          matchingClusters.find((c) => c.files.some((f) => f.startsWith("src/"))) ||
+          matchingClusters[0];
+
+        // Merge all candidate files belonging to this single distinct logical feature
+        const mergedFiles = Array.from(new Set(matchingClusters.flatMap((c) => c.files)));
+        primaryCluster.files = mergedFiles;
+
+        const hydrated = this.hydrateFeatureEvidence(primaryCluster, normalizedRepo, options);
+        const resolvedTarget: ResolvedTaskTarget = {
+          logicalTargetId: primaryCluster.id,
+          featureName: primaryCluster.name,
+          candidatePaths: primaryCluster.files,
+          evidenceIds: hydrated.evidenceIds,
+          importerPaths: hydrated.importerPaths,
+          resolutionSource: "DETERMINISTIC_UNIQUE",
+          status: "RESOLVED",
+          actionObligations: hydrated.actionObligations,
+        };
+        return {
+          status: "RESOLVED",
+          targetCertainty: "GROUNDED_UNIQUE",
+          candidatePaths: primaryCluster.files,
+          targetEvidenceIds: hydrated.evidenceIds,
+          reason: `Resolved feature "${token}" to coherent logical target "${primaryCluster.name}": ${primaryCluster.files.join(", ")}`,
+          isDestructive: true,
+          isInFileModification: false,
+          requiresClarification: false,
+          resolvedTarget,
+        };
+      }
+
       // Step 8: Multiple active or independent product features exist -> genuine product-level ambiguity
       // FORBIDDEN UX: Never show raw internal file paths in clarification options!
-      const productOptions = Array.from(new Set(clusters.map((c) => c.name)));
+      const isAutonomous = options?.autonomous === true;
       const ambiguousResult: DestructiveTargetResolution = {
         status: "AMBIGUOUS",
         targetCertainty: "AMBIGUOUS",
         candidatePaths: [],
         targetEvidenceIds: [],
-        reason: `Multiple matching files were found for "${token}": ${productOptions.join(", ")}.`,
+        reason: `Multiple matching files were found for "${token}": ${distinctLogicalTargets.join(", ")}. Ambiguity cannot be resolved autonomously from repository evidence.`,
         isDestructive: true,
         isInFileModification: false,
-        requiresClarification: true,
-        clarificationQuestion: `Multiple matching files were found for "${token}": ${productOptions.join(", ")}. Please clarify which one to delete.`,
-        clarificationOptions: [...productOptions, "Cancel deletion"],
+        requiresClarification: isAutonomous ? false : true,
+        clarificationQuestion: `Multiple matching files were found for "${token}": ${distinctLogicalTargets.join(", ")}. Please clarify which one to delete.`,
+        clarificationOptions: isAutonomous ? undefined : [...distinctLogicalTargets, "Cancel deletion"],
       };
 
       if (!firstAmbiguousResult) {
@@ -591,8 +675,18 @@ export class DestructiveTargetResolver {
         }
       } else if (stemKey === tokenKey || stemKey.startsWith(tokenKey)) {
         // Component in shared directory starting with feature token (e.g. "Calculator", "CalculatorButton", "CalculatorDisplay")
-        clusterId = `${dir}/${tokenKey}`;
-        primaryStem = tokenKey;
+        const isGenericDir =
+          !lastDirKey ||
+          lastDirKey === "components" ||
+          lastDirKey === "src" ||
+          lastDirKey === "app" ||
+          lastDirKey === "lib" ||
+          lastDirKey === "ui" ||
+          lastDirKey === "widgets" ||
+          lastDirKey === "shared" ||
+          lastDirKey === "common";
+        clusterId = isGenericDir ? `${dir}/${tokenKey}` : `${dir}/${stem}`;
+        primaryStem = isGenericDir ? tokenKey : `${lastDir} ${stem}`;
       } else {
         // Distinct domain-prefixed or competing component (e.g. "AdminTaxCalculator", "LegacyActivityWidget")
         clusterId = `${dir}/${stem}`;
@@ -736,10 +830,28 @@ export class DestructiveTargetResolver {
     cluster: FeatureCluster,
     normalizedRepo: string[],
     options?: DestructiveResolveOptions
-  ): { evidenceIds: string[]; importerPaths: string[] } {
+  ): { evidenceIds: string[]; importerPaths: string[]; actionObligations: FileActionObligation[] } {
     const importerPaths: string[] = [...cluster.activeReferences];
+    const actionObligations: FileActionObligation[] = [];
+
     if (!options?.evidenceStore) {
-      return { evidenceIds: [], importerPaths };
+      for (const filePath of cluster.files) {
+        actionObligations.push({
+          path: normalizeRepoPath(filePath),
+          requiredAction: "delete",
+          role: "PRIMARY_TARGET",
+          evidenceIds: [],
+        });
+      }
+      for (const impPath of importerPaths) {
+        actionObligations.push({
+          path: normalizeRepoPath(impPath),
+          requiredAction: "modify",
+          role: "DEPENDENCY_CLEANUP",
+          evidenceIds: [],
+        });
+      }
+      return { evidenceIds: [], importerPaths, actionObligations };
     }
 
     const evidenceStore = options.evidenceStore;
@@ -750,6 +862,8 @@ export class DestructiveTargetResolver {
     for (const filePath of cluster.files) {
       const norm = normalizeRepoPath(filePath);
       const fileExists = normalizedRepo.includes(norm);
+      const fileEvIds: string[] = [];
+
       if (fileExists) {
         const fileEv = evidenceStore.addEvidence({
           kind: "FILE",
@@ -761,6 +875,7 @@ export class DestructiveTargetResolver {
         if (!hydratedEvidenceIds.includes(fileEv.id)) {
           hydratedEvidenceIds.push(fileEv.id);
         }
+        fileEvIds.push(fileEv.id);
 
         const content = getFileContent(norm, options.fileContext, options.snapshotFiles, options.localPath);
         if (content) {
@@ -777,14 +892,24 @@ export class DestructiveTargetResolver {
             if (!hydratedEvidenceIds.includes(symEv.id)) {
               hydratedEvidenceIds.push(symEv.id);
             }
+            fileEvIds.push(symEv.id);
           }
         }
       }
+
+      actionObligations.push({
+        path: norm,
+        requiredAction: "delete",
+        role: "PRIMARY_TARGET",
+        evidenceIds: fileEvIds,
+      });
     }
 
     // 2. Authoritative FILE and IMPORT/REFERENCE evidence for every importer cleanup
     for (const impPath of importerPaths) {
       const normImp = normalizeRepoPath(impPath);
+      const impEvIds: string[] = [];
+
       const impFileEv = evidenceStore.addEvidence({
         kind: "FILE",
         filePath: normImp,
@@ -795,6 +920,7 @@ export class DestructiveTargetResolver {
       if (!hydratedEvidenceIds.includes(impFileEv.id)) {
         hydratedEvidenceIds.push(impFileEv.id);
       }
+      impEvIds.push(impFileEv.id);
 
       for (const targetFile of cluster.files) {
         const normTarget = normalizeRepoPath(targetFile);
@@ -818,11 +944,19 @@ export class DestructiveTargetResolver {
           if (!hydratedEvidenceIds.includes(impRelEv.id)) {
             hydratedEvidenceIds.push(impRelEv.id);
           }
+          impEvIds.push(impRelEv.id);
         }
       }
+
+      actionObligations.push({
+        path: normImp,
+        requiredAction: "modify",
+        role: "DEPENDENCY_CLEANUP",
+        evidenceIds: impEvIds,
+      });
     }
 
-    return { evidenceIds: hydratedEvidenceIds, importerPaths };
+    return { evidenceIds: hydratedEvidenceIds, importerPaths, actionObligations };
   }
 
   /**
@@ -830,7 +964,7 @@ export class DestructiveTargetResolver {
    */
   private static formatFeatureName(raw: string): string {
     const base = path.basename(raw).replace(/\.[^.]+$/, "");
-    if (base.toLowerCase() === "index" || base.toLowerCase() === "calculator") {
+    if (base.toLowerCase() === "index" || base.toLowerCase() === "types" || base.toLowerCase() === "styles" || (raw.includes("/") && ["index", "main", "app"].includes(base.toLowerCase()))) {
       const parts = raw.split("/").filter(Boolean);
       const nonGeneric = parts.filter(
         (p) => !["src", "components", "app", "pages", "index", "lib", "utils"].includes(p.toLowerCase())

@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { FileManifest, ExecutionContract, SubTask } from "../types";
+import { FileManifest, ExecutionContract, SubTask, FileActionObligation } from "../types";
 import { MANIFEST_GENERATION_PROMPT } from "../ai/prompts/coding";
 import {
   detectRepositoryArchitecture,
@@ -15,6 +15,7 @@ export interface ManifestPlanningContext {
   architecture?: RepositoryArchitectureSummary;
   relevantFiles?: Array<{ path: string; content: string }>;
   baselineDiagnostics?: Array<{ filePath?: string; errorCode?: string; symbolName?: string; message: string }>;
+  actionObligations?: FileActionObligation[];
   [key: string]: any;
 }
 
@@ -85,6 +86,21 @@ export class ManifestGenerator {
         contextText += `- Importers Requiring Cleanup (action: modify): ${rt.importerPaths.join(", ")}\n`;
       }
       contextText += `- Manifest Planning Rule: Include every resolved target file with action "delete" and every importer with action "modify". Every file in your manifest MUST cite its verified evidence IDs from the list below in "evidenceIds": [...]. Never invent evidence IDs.\n\n`;
+    }
+
+    const obligations: FileActionObligation[] =
+      repositoryContext.actionObligations ||
+      contract.actionObligations ||
+      repositoryContext.resolvedTarget?.actionObligations ||
+      [];
+
+    if (obligations.length > 0) {
+      contextText += `FILE ACTION OBLIGATIONS (MANDATORY ACTION CONTRACT):\n`;
+      contextText += `You MUST emit EXACTLY the specified action for each of the following grounded paths. Do NOT change "delete" to "modify", and do NOT change "modify" to "delete":\n`;
+      for (const ob of obligations) {
+        contextText += `- Path: "${ob.path}" | Required Action: "${ob.requiredAction}" | Role: ${ob.role} | Evidence IDs: [${ob.evidenceIds.join(", ")}]\n`;
+      }
+      contextText += `- CONTRACT ENFORCEMENT: Any deviation between your manifest's action and the required action above will trigger an immediate MANIFEST_ACTION_MISMATCH rejection.\n\n`;
     }
 
     if (repositoryContext.evidenceStore) {
@@ -255,6 +271,32 @@ export class ManifestGenerator {
     repositoryContext?: ManifestPlanningContext,
     subTaskScope?: SubTask
   ): FileManifest {
+    const obligations: FileActionObligation[] =
+      repositoryContext?.actionObligations ||
+      contract.actionObligations ||
+      repositoryContext?.resolvedTarget?.actionObligations ||
+      [];
+
+    if (obligations.length > 0) {
+      const files: FileManifest["files"] = obligations.map((ob) => {
+        const evs = repositoryContext?.evidenceStore?.getEvidenceForFile(ob.path) || [];
+        const evIds = ob.evidenceIds && ob.evidenceIds.length > 0 ? ob.evidenceIds : evs.map((e: any) => e.id);
+        const deletePaths = obligations.filter((o) => o.requiredAction === "delete").map((o) => o.path);
+        return {
+          path: ob.path,
+          action: ob.requiredAction,
+          evidenceIds: evIds,
+          dependencies: ob.requiredAction === "modify" ? deletePaths : [],
+          description: `${ob.role}: ${ob.requiredAction} ${ob.path}`,
+        };
+      });
+      return {
+        files,
+        totalFiles: files.length,
+        manifestVersion: "1.0.0",
+      };
+    }
+
     if (repositoryContext?.resolvedTarget) {
       const rt = repositoryContext.resolvedTarget;
       const files: FileManifest["files"] = [];
