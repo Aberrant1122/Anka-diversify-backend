@@ -502,6 +502,13 @@ export interface AgentResponse {
   failedStage?: string;
   dependentStagesSkipped?: string[];
   checkpointId?: string;
+  actionGroupId?: string;
+  checkpointJournal?: ReadonlyArray<{
+    journalId: string;
+    sequence: number;
+    actionGroupId: string;
+    status: "VERIFIED" | "ROLLED_BACK";
+  }>;
   baseCommitSha?: string;
   validationCommands?: string[];
   dependencyPreparationAttempted?: boolean;

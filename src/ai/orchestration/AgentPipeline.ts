@@ -27,6 +27,7 @@ import { RepositoryObserver } from "./RepositoryObserver";
 import { AgentPlanner } from "./AgentPlanner";
 import { ValidationCoordinator } from "./ValidationCoordinator";
 import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
+import { VerifiedCheckpointJournal } from "../runtime/VerifiedCheckpointJournal";
 
 export class AgentPipeline {
   static async runCodingAgent(
@@ -42,6 +43,7 @@ export class AgentPipeline {
       baseCommitSha?: string;
       baselineBuildPassed?: boolean;
       authorizedCapabilityScope?: AuthorizedCapabilityScope;
+      checkpointJournal?: VerifiedCheckpointJournal;
       [key: string]: any;
     },
   ): Promise<AgentResponse> {
@@ -686,6 +688,7 @@ export class AgentPipeline {
       targetedBaselineDiagnostics: options?.targetedBaselineDiagnostics,
       baseCommitSha: options?.baseCommitSha,
       baselineBuildPassed: options?.baselineBuildPassed,
+      checkpointJournal: options?.checkpointJournal,
     });
     const {
       repairResult,
@@ -700,6 +703,8 @@ export class AgentPipeline {
       isTaskVerified,
       gateSuccess,
       isBuildVerified,
+      actionGroupId,
+      checkpointJournal,
     } = validation;
     taskExecutionPlan = validation.taskExecutionPlan;
 
@@ -819,7 +824,9 @@ export class AgentPipeline {
       dependentStagesSkipped: gateSuccess
         ? undefined
         : TaskExecutionPlanManager.getDependentStages(taskExecutionPlan, activeStage.id),
-      checkpointId: stageTransaction.checkpointId,
+      checkpointId: actionGroupId,
+      actionGroupId,
+      checkpointJournal,
       securityPass: auditResult.securityPass,
       critiqueScore: auditResult.critiqueScore,
       buildVerified: isBuildVerified,

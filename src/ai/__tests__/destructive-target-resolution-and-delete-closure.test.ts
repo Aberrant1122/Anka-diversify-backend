@@ -16,6 +16,7 @@ import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { StageExecutionTransaction } from "../orchestration/StageExecutionTransaction";
 import { TaskClassificationResult, FileManifest, AgentFileChange } from "../../types";
 import { ManifestGenerator } from "../../services/manifest-generator";
+import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 describe("Strict Implementation — Destructive Target Resolution + Delete Dependency Closure", () => {
   let tempDir: string;
@@ -456,9 +457,6 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
     fs.writeFileSync(calcFile, "export const Calculator = () => 42;", "utf8");
     fs.writeFileSync(appFile, "import { Calculator } from './components/calculator/Calculator';", "utf8");
 
-    // Capture checkpoint
-    const tx = await StageExecutionTransaction.startTransaction("stage-1", tempDir);
-
     // Apply delete mutation to Calculator.tsx and modify src/app.ts
     const changes: AgentFileChange[] = [
       {
@@ -474,6 +472,21 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
         description: "Clean up app importer",
       },
     ];
+
+    const scope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "destructive-test:stage-1",
+      grants: [
+        { path: "components/calculator/Calculator.tsx", action: "FILE_DELETE" },
+        { path: "src/app.ts", action: "FILE_MODIFY" },
+      ],
+    });
+    if (!scope) throw new Error("test capability scope must be valid");
+    const tx = await StageExecutionTransaction.startTransaction(
+      "stage-1",
+      tempDir,
+      CapabilityGuard.create({ workspaceRoot: tempDir, scopeId: "stage-1", authorizedScope: scope }),
+    );
 
     await tx.apply(changes);
 

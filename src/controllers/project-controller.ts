@@ -8,8 +8,8 @@ import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
 import { RepositoryMaterializationService } from "../services/repository-materialization.service";
-import { AuthorizedCapabilityScope, CapabilityGuard } from "../ai/runtime/CapabilityGuard";
-import { FileSystemStateManager } from "../ai/validation/FileSystemStateManager";
+import { AuthorizedCapabilityScope } from "../ai/runtime/CapabilityGuard";
+import { ValidationCoordinator } from "../ai/orchestration/ValidationCoordinator";
 const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
@@ -313,13 +313,23 @@ export class ProjectController {
             : "FILE_CREATE" as const,
         })),
       });
-      const manager = new FileSystemStateManager(
-        authorizedCapabilityScope
-          ? CapabilityGuard.create({ workspaceRoot: localPath, scopeId: capabilityScopeId, authorizedScope: authorizedCapabilityScope })
-          : CapabilityGuard.denyAll(),
-        capabilityScopeId,
-      );
-      await manager.apply(changes.map((change) => ({ ...change, description: "Authenticated local edit" })), localPath);
+      const groupedChanges = changes.map((change) => ({
+        ...change,
+        action: fs.existsSync(path.resolve(localPath, change.path)) ? "modify" as const : "create" as const,
+        description: "Authenticated local edit",
+      }));
+      if (!authorizedCapabilityScope) {
+        throw new Error("Authenticated local edit capability scope could not be established");
+      }
+      const outcome = await ValidationCoordinator.applyLocalActionGroup({
+        stageId: capabilityScopeId,
+        localPath,
+        authorizedCapabilityScope,
+        changes: groupedChanges,
+      });
+      if (outcome.journalEntry.status !== "VERIFIED") {
+        throw new Error("Authenticated local write failed deterministic validation");
+      }
       const written = changes.map((change) => change.path);
 
       res.json({ success: true, data: { written } });

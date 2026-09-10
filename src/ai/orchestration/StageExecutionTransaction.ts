@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { FileSystemStateManager } from "../validation/FileSystemStateManager";
+import { ExecutedFileMutation, FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { AgentFileChange, AgentResponse, ChatRequest, AgentProgressEvent } from "../../types";
 import { TaskExecutionPlan, TaskExecutionStage } from "../shared/TaskExecutionPlan";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
@@ -84,6 +84,10 @@ export class StageExecutionTransaction {
     return this.checkpoint.fsManager;
   }
 
+  public getExecutedMutations(): readonly ExecutedFileMutation[] {
+    return this.checkpoint.fsManager.getExecutedMutations();
+  }
+
   public isCommitted(): boolean {
     return this.checkpoint.committed;
   }
@@ -142,6 +146,12 @@ export class StageExecutionTransaction {
   public async apply(changes: AgentFileChange[]): Promise<void> {
     if (!this.checkpoint.localPath) return;
     await this.checkpoint.fsManager.apply(changes, this.checkpoint.localPath);
+  }
+
+  /** CP5-authoritative pre-mutation authorization and byte snapshot. */
+  public async snapshot(changes: AgentFileChange[]): Promise<void> {
+    if (!this.checkpoint.localPath) return;
+    await this.checkpoint.fsManager.snapshot(changes, this.checkpoint.localPath);
   }
 
   /**

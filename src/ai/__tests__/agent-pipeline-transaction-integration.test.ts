@@ -16,6 +16,7 @@ import { ValidationDetector } from "../validation/ValidationDetector";
 import { ManifestGenerator } from "../../services/manifest-generator";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { ChatRequest } from "../shared/types";
+import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
 
 // Mock PrismaClient to prevent DB connection attempts during integration testing
 jest.mock("@prisma/client", () => {
@@ -129,6 +130,16 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
     sessionId: "sess-1",
   };
 
+  function runPipeline() {
+    const authorizedCapabilityScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "pipeline-transaction-integration",
+      grants: [{ path: "src/index.ts", action: "FILE_MODIFY" }],
+    });
+    if (!authorizedCapabilityScope) throw new Error("integration capability scope must be valid");
+    return AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, { authorizedCapabilityScope });
+  }
+
   it("1. SelfHealingEngine mutates workspace then throws -> AgentPipeline catches and rolls back disk", async () => {
     jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
       if (fsManager && localPath) {
@@ -138,7 +149,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       throw new Error("SelfHealingEngine runtime explosion");
     });
 
-    await expect(AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest)).rejects.toThrow("SelfHealingEngine runtime explosion");
+    await expect(runPipeline()).rejects.toThrow("SelfHealingEngine runtime explosion");
 
     // Verify ACTUAL disk state after exception: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -154,7 +165,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
 
     jest.spyOn(SecurityAuditor, "runReflectionAndSecurityAudit").mockRejectedValue(new Error("OpenAI API RateLimitError"));
 
-    await expect(AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest)).rejects.toThrow("OpenAI API RateLimitError");
+    await expect(runPipeline()).rejects.toThrow("OpenAI API RateLimitError");
 
     // Verify ACTUAL disk state after exception: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -178,7 +189,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
 
     jest.spyOn(ValidationDetector, "runFeatureValidation").mockRejectedValue(new Error("Static validation parser crash"));
 
-    await expect(AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest)).rejects.toThrow("Static validation parser crash");
+    await expect(runPipeline()).rejects.toThrow("Static validation parser crash");
 
     // Verify ACTUAL disk state after exception: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -207,12 +218,15 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       repairActions: [],
     });
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const response = await runPipeline();
 
     expect(response.buildVerified).toBe(false);
     expect(response.securityPass).toBe(false);
     expect(response.lifecycleStage).toBe("BuildFailed");
     expect(response.changes).toEqual([]);
+    expect(response.checkpointJournal).toEqual([
+      expect.objectContaining({ actionGroupId: response.actionGroupId, status: "ROLLED_BACK" }),
+    ]);
 
     // Verify ACTUAL disk state: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -241,11 +255,15 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       repairActions: [],
     });
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const response = await runPipeline();
 
     expect(response.buildVerified).toBe(false);
     expect(response.lifecycleStage).toBe("BuildFailed");
     expect(response.changes).toEqual([]);
+    expect(response.checkpointJournal?.[0]).toMatchObject({
+      actionGroupId: response.actionGroupId,
+      status: "ROLLED_BACK",
+    });
 
     // Verify ACTUAL disk state: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -274,12 +292,19 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       repairActions: [],
     });
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const response = await runPipeline();
 
     expect(response.buildVerified).toBe(true);
     expect(response.securityPass).toBe(true);
     expect(response.lifecycleStage).toBe("Done");
     expect(response.changes.length).toBe(1);
+    expect(response.actionGroupId).toMatch(/^ag_[a-f0-9]{20}$/);
+    expect(response.checkpointId).toBe(response.actionGroupId);
+    expect(response.checkpointJournal?.[0]).toMatchObject({
+      actionGroupId: response.actionGroupId,
+      sequence: 1,
+      status: "VERIFIED",
+    });
 
     // Verify ACTUAL disk state: changes REMAIN ON DISK!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('mutated');");

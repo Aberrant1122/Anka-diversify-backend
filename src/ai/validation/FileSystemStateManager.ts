@@ -20,6 +20,13 @@ export class CapabilityAuthorizationError extends Error {
   }
 }
 
+export interface ExecutedFileMutation {
+  readonly path: string;
+  readonly action: CapabilityAction;
+  readonly content: string;
+  readonly description: string;
+}
+
 const FORBIDDEN_PATH_SEGMENTS = new Set([
   ".git",
   "node_modules",
@@ -84,8 +91,9 @@ function canonicalMutationPath(targetPath: string, worktreeRoot: string): string
 }
 
 export class FileSystemStateManager {
-  private originalState: Map<string, string | null> = new Map();
+  private originalState: Map<string, Buffer | null> = new Map();
   private readonly authorizedMutationPaths = new Set<string>();
+  private readonly executedMutations: ExecutedFileMutation[] = [];
 
   constructor(
     private readonly capabilityGuard: CapabilityGuard = CapabilityGuard.denyAll(),
@@ -109,7 +117,7 @@ export class FileSystemStateManager {
       const absPath = assertSafeWorktreePath(change.path, localPath);
       try {
         if (fs.existsSync(absPath)) {
-          const content = await fs.promises.readFile(absPath, "utf8");
+          const content = await fs.promises.readFile(absPath);
           this.originalState.set(normalizedPath, content);
         } else {
           this.originalState.set(normalizedPath, null);
@@ -140,13 +148,13 @@ export class FileSystemStateManager {
     }
 
     // Authorize the complete batch before snapshotting or performing any mutation.
-    this.authorizeChanges(changes, localPath);
+    const authorizedActions = this.authorizeChanges(changes, localPath);
     for (const change of changes) this.authorizedMutationPaths.add(change.path.replace(/\\/g, "/"));
 
     // Ensure all changes being applied are snapshotted first if not already in originalState
     await this.snapshot(changes, localPath);
 
-    for (const change of changes) {
+    for (const [index, change] of changes.entries()) {
       if (!change.path) continue;
       const abs = canonicalMutationPath(change.path, localPath);
 
@@ -161,6 +169,12 @@ export class FileSystemStateManager {
           const finalAbs = canonicalMutationPath(change.path, localPath);
           await fs.promises.writeFile(finalAbs, change.content || "", "utf8");
         }
+        this.executedMutations.push(Object.freeze({
+          path: change.path.replace(/\\/g, "/"),
+          action: authorizedActions[index],
+          content: change.content || "",
+          description: change.description,
+        }));
       } catch (err: any) {
         if (err instanceof RepairInfrastructureError) throw err;
         throw new RepairInfrastructureError(`Failed writing file "${change.path}" to "${localPath}": ${err?.message || err}`, err);
@@ -186,7 +200,7 @@ export class FileSystemStateManager {
         } else {
           await fs.promises.mkdir(path.dirname(absPath), { recursive: true });
           const finalAbs = canonicalMutationPath(relativePath, localPath);
-          await fs.promises.writeFile(finalAbs, originalContent, "utf8");
+          await fs.promises.writeFile(finalAbs, originalContent);
         }
       } catch (err) {
         console.error(`[FileSystemStateManager] Failed to rollback file "${relativePath}":`, err);
@@ -202,13 +216,18 @@ export class FileSystemStateManager {
     this.authorizedMutationPaths.clear();
   }
 
+  getExecutedMutations(): readonly ExecutedFileMutation[] {
+    return Object.freeze([...this.executedMutations]);
+  }
+
   getSnapshotSize(): number {
     return this.originalState.size;
   }
 
   getOriginalContent(relativePath: string): string | null | undefined {
     const normalized = relativePath.replace(/\\/g, "/");
-    return this.originalState.get(normalized);
+    const content = this.originalState.get(normalized);
+    return Buffer.isBuffer(content) ? content.toString("utf8") : content;
   }
 
   hasOriginalFile(relativePath: string): boolean {
@@ -216,8 +235,9 @@ export class FileSystemStateManager {
     return this.originalState.has(normalized);
   }
 
-  private authorizeChanges(changes: AgentFileChange[], localPath: string): void {
-    for (const change of changes) {
+  private authorizeChanges(changes: AgentFileChange[], localPath: string): CapabilityAction[] {
+    const actions: CapabilityAction[] = [];
+    for (const [index, change] of changes.entries()) {
       assertSafeWorktreePath(change.path, localPath);
       const action: CapabilityAction = change.action === "delete" || change.isDeleted
         ? "FILE_DELETE"
@@ -232,6 +252,8 @@ export class FileSystemStateManager {
         throw new CapabilityAuthorizationError(decision.code, `[${decision.code}] ${decision.reason}`);
       }
       canonicalMutationPath(change.path, localPath);
+      actions.push(action);
     }
+    return actions;
   }
 }

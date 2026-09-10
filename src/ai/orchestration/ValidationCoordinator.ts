@@ -1,4 +1,6 @@
 import { AgentFileChange, AgentProgressEvent, ExecutionContract, FeatureValidationResult, FileManifest } from "../shared/types";
+import fs from "fs";
+import path from "path";
 import { BaselineDiagnostic } from "../../types";
 import { BuildErrorRepair } from "../repair/BuildErrorRepair";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
@@ -12,8 +14,43 @@ import { ValidationPlanner } from "../validation/ValidationPlanner";
 import { StageExecutionTransaction, StageVerificationGate } from "./StageExecutionTransaction";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
+import {
+  ActionGroup,
+  ActionGroupExecutionResult,
+  ActionGroupExecutor,
+} from "./ActionGroup";
+import { ActionGroupJournalEntry, VerifiedCheckpointJournal } from "../runtime/VerifiedCheckpointJournal";
 
 type RepairResult = Awaited<ReturnType<typeof SelfHealingEngine.runSelfHealingLoop>>;
+
+/** Read-only receipt shape. No public constructor or issuer exists. */
+export interface ActionGroupValidationReceipt {
+  readonly passed: boolean;
+  readonly source: "VALIDATION_COORDINATOR";
+  readonly reasons: readonly string[];
+}
+
+const authenticValidationReceipts = new WeakSet<object>();
+
+class DeterministicValidationReceipt implements ActionGroupValidationReceipt {
+  public readonly source = "VALIDATION_COORDINATOR" as const;
+  public readonly reasons: readonly string[];
+
+  private constructor(public readonly passed: boolean, reasons: readonly string[]) {
+    this.reasons = Object.freeze([...reasons]);
+    authenticValidationReceipts.add(this);
+    Object.freeze(this);
+  }
+
+  public static issue(passed: boolean, reasons: readonly string[]): ActionGroupValidationReceipt {
+    return new DeterministicValidationReceipt(passed, reasons);
+  }
+}
+
+/** Runtime authenticity check for opaque ValidationCoordinator-issued receipts. */
+export function isAuthenticActionGroupValidationReceipt(value: unknown): value is ActionGroupValidationReceipt {
+  return typeof value === "object" && value !== null && authenticValidationReceipts.has(value);
+}
 
 export interface ValidationCoordinationInput {
   acceptedChanges: AgentFileChange[];
@@ -33,6 +70,7 @@ export interface ValidationCoordinationInput {
   targetedBaselineDiagnostics?: BaselineDiagnostic[];
   baseCommitSha?: string;
   baselineBuildPassed?: boolean;
+  checkpointJournal?: VerifiedCheckpointJournal;
 }
 
 export interface ValidationCoordinationResult {
@@ -50,10 +88,9 @@ export interface ValidationCoordinationResult {
   isTaskVerified: boolean;
   gateSuccess: boolean;
   isBuildVerified: boolean;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  actionGroupId: string;
+  checkpointJournal: readonly ActionGroupJournalEntry[];
+  verifiedCheckpoint?: ActionGroupJournalEntry;
 }
 
 function createExecutionCapabilityGuard(input: ValidationCoordinationInput): CapabilityGuard {
@@ -67,6 +104,52 @@ function createExecutionCapabilityGuard(input: ValidationCoordinationInput): Cap
 
 /** Coordinates existing deterministic validation authorities and their transaction boundary. */
 export class ValidationCoordinator {
+  /** Bounded production entry point for authenticated controller-local writes. */
+  public static async applyLocalActionGroup(input: {
+    stageId: string;
+    localPath: string;
+    authorizedCapabilityScope: AuthorizedCapabilityScope;
+    changes: AgentFileChange[];
+    journal?: VerifiedCheckpointJournal;
+  }): Promise<ActionGroupExecutionResult<readonly AgentFileChange[]>> {
+    const transaction = await StageExecutionTransaction.startTransaction(
+      input.stageId,
+      input.localPath,
+      CapabilityGuard.create({
+        workspaceRoot: input.localPath,
+        scopeId: input.stageId,
+        authorizedScope: input.authorizedCapabilityScope,
+      }),
+    );
+    const group = ActionGroup.create({
+      stageId: input.stageId,
+      authorizedScopeReference: input.authorizedCapabilityScope.authorityId,
+      actions: input.changes,
+    });
+    const journal = input.journal ?? new VerifiedCheckpointJournal();
+    return ActionGroupExecutor.execute({
+      group,
+      transaction,
+      journal,
+      executeActions: async () => {
+        await transaction.apply(input.changes);
+        return input.changes;
+      },
+      validate: (changes) => {
+        const passed = changes.every((change) => {
+          const target = path.resolve(input.localPath, change.path);
+          return change.action === "delete" || change.isDeleted
+            ? !fs.existsSync(target)
+            : fs.existsSync(target) && fs.readFileSync(target, "utf8") === change.content;
+        });
+        return DeterministicValidationReceipt.issue(
+          passed,
+          passed ? [] : ["Authenticated local write verification failed"],
+        );
+      },
+    });
+  }
+
   public static async validate(input: ValidationCoordinationInput): Promise<ValidationCoordinationResult> {
     input.onProgress?.({
       step: 5,
@@ -94,30 +177,22 @@ export class ValidationCoordinator {
       createExecutionCapabilityGuard(input),
     );
     const fsManager = stageTransaction.fsManager;
-    let transactionCommitted = false;
-    let transactionRolledBack = false;
-    let rollbackErrorLog: string | null = null;
+    const checkpointJournal = input.checkpointJournal ?? new VerifiedCheckpointJournal();
+    const actionGroup = ActionGroup.create({
+      stageId: input.activeStageId,
+      authorizedScopeReference: input.authorizedCapabilityScope?.authorityId ?? "UNAUTHORIZED",
+      actions: input.acceptedChanges,
+    });
+    const groupedChanges = [...actionGroup.proposedChanges()];
 
-    if (input.effectiveLocalPath) {
-      await fsManager.snapshot(input.acceptedChanges, input.effectiveLocalPath);
-    }
-
-    const safeRollback = async (): Promise<void> => {
-      if (transactionCommitted || transactionRolledBack || !input.effectiveLocalPath) return;
-      transactionRolledBack = true;
-      try {
-        await stageTransaction.rollback();
-      } catch (error: unknown) {
-        rollbackErrorLog = `[CRITICAL] Filesystem rollback failed: ${errorMessage(error)}`;
-        console.error(rollbackErrorLog, error);
-      }
-    };
-
-    let taskExecutionPlan = input.taskExecutionPlan;
-    try {
+    const execution = await ActionGroupExecutor.execute({
+      group: actionGroup,
+      transaction: stageTransaction,
+      journal: checkpointJournal,
+      executeActions: async () => {
       const stage8StartedAt = performance.now();
       const repairResult = await SelfHealingEngine.runSelfHealingLoop(
-        input.acceptedChanges,
+        groupedChanges,
         input.effectiveLocalPath,
         effectiveValidationCommands,
         input.systemPrompt,
@@ -186,42 +261,49 @@ export class ValidationCoordinator {
         featureValidationPassed: Boolean(featureValidation.overallPassed),
         hasBuildErrors: Boolean(!repairResult.success && repairResult.errorLog),
       }).passed;
-
-      if (overallGatePassed) {
-        transactionCommitted = true;
-        await stageTransaction.commit();
-        taskExecutionPlan = TaskExecutionPlanManager.markStageStatus(taskExecutionPlan, input.activeStageId, "VERIFIED");
-      } else {
-        await safeRollback();
-        taskExecutionPlan = TaskExecutionPlanManager.failStage(taskExecutionPlan, input.activeStageId);
-      }
-
       const isRepositoryClean = repairResult.repositoryClean !== undefined
         ? Boolean(repairResult.repositoryClean)
         : Boolean(repairResult.success && !repairResult.errorLog);
       const isTaskVerified = Boolean(repairResult.taskVerified ?? repairResult.success);
-      const gateSuccess = overallGatePassed && !rollbackErrorLog;
-
       return {
         repairResult,
         auditResult,
         featureValidation,
         effectiveValidationCommands,
-        stageTransaction,
-        taskExecutionPlan,
         overallGatePassed,
-        rollbackErrorLog,
         stage8DurationMs,
         stage9DurationMs,
         isRepositoryClean,
         isTaskVerified,
-        gateSuccess,
-        isBuildVerified: Boolean(gateSuccess && isRepositoryClean),
       };
-    } catch (error: unknown) {
-      await safeRollback();
-      TaskExecutionPlanManager.failStage(taskExecutionPlan, input.activeStageId);
-      throw error;
-    }
+      },
+      validate: (value) => DeterministicValidationReceipt.issue(
+        value.overallGatePassed,
+        value.overallGatePassed
+          ? []
+          : StageVerificationGate.evaluate({
+              repairSuccess: Boolean(value.repairResult.success),
+              securityPass: Boolean(value.auditResult.securityPass),
+              featureValidationPassed: Boolean(value.featureValidation.overallPassed),
+              hasBuildErrors: Boolean(!value.repairResult.success && value.repairResult.errorLog),
+            }).reasons,
+      ),
+    });
+
+    const gateSuccess = execution.journalEntry.status === "VERIFIED";
+    const taskExecutionPlan = gateSuccess
+      ? TaskExecutionPlanManager.markStageStatus(input.taskExecutionPlan, input.activeStageId, "VERIFIED")
+      : TaskExecutionPlanManager.failStage(input.taskExecutionPlan, input.activeStageId);
+    return {
+      ...execution.value,
+      stageTransaction,
+      taskExecutionPlan,
+      rollbackErrorLog: null,
+      gateSuccess,
+      isBuildVerified: Boolean(gateSuccess && execution.value.isRepositoryClean),
+      actionGroupId: execution.group.id,
+      checkpointJournal: checkpointJournal.snapshot(),
+      ...(gateSuccess ? { verifiedCheckpoint: execution.journalEntry } : {}),
+    };
   }
 }
