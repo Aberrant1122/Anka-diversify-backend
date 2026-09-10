@@ -3,9 +3,12 @@ import path from "path";
 import crypto from "crypto";
 import { ChatRequest, AgentResponse, AgentProgressEvent } from "../shared/types";
 import { AgentPipeline } from "../orchestration/AgentPipeline";
-import { GitWorktreeService } from "../../services/git-worktree.service";
+import { GitWorktreeService, RepositoryRunSummary } from "../../services/git-worktree.service";
 import { RepositoryMaterializationService } from "../../services/repository-materialization.service";
 import { prisma } from "../../services/database";
+import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
+import { TaskRuntime, VerifiedCompletionReceipt } from "../runtime/TaskRuntime";
+import { runWithTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
 
 export interface CodingAgentInternalOptions {
   /**
@@ -133,18 +136,84 @@ export class CodingAgent {
 
     // 8. Execute strictly through GitWorktreeService against the canonical Git repository root
     const runId = crypto.randomUUID().slice(0, 8);
-    const summary = await GitWorktreeService.runIsolatedAgent({
-      userId,
+    const initialWorkspace = AgentWorkspaceState.create({
       projectId,
-      repositoryPath: gitRoot,
-      runId,
-      request,
-      onProgress,
+      ...(request.repositoryId ? { repositoryId: request.repositoryId } : {}),
+      root: gitRoot,
+      revision: headSha,
+      constraints: [
+        { id: "isolated-execution", description: "Repository changes must execute in an isolated Git worktree." },
+        { id: "deterministic-completion", description: "Only deterministic validation may complete the task runtime." },
+      ],
+    }).withEvidence({
+      id: `git-head:${headSha}`,
+      kind: "MATERIALIZED_REPOSITORY",
+      description: "Git resolved the source repository HEAD before isolated execution.",
+      revision: headSha,
     });
+    const runtime = TaskRuntime.create({
+      taskId: runId,
+      originalGoal: request.message,
+      workspace: initialWorkspace,
+      runtimeScopeId: runId,
+      metadata: { projectId, executionBoundary: "CodingAgent.runCodingAgent" },
+    });
+    runtime.start();
+
+    let summary: RepositoryRunSummary;
+    try {
+      summary = await runWithTaskRuntimeScope(runtime.snapshot().runtimeScope, () =>
+        GitWorktreeService.runIsolatedAgent({
+          userId,
+          projectId,
+          repositoryPath: gitRoot,
+          runId,
+          request,
+          onProgress,
+        })
+      );
+    } catch (error) {
+      runtime.fail({
+        failureType: "TECHNICAL_FAILURE",
+        code: "ISOLATED_EXECUTION_FAILED",
+        message: error instanceof Error ? error.message : "Unknown isolated execution failure",
+      });
+      throw error;
+    }
+
+    let finalWorkspace = initialWorkspace.withRelevantPaths(summary.changedFiles);
+    if (summary.validationCommands.length > 0) {
+      finalWorkspace = finalWorkspace.withValidationFact({
+        id: "isolated-run-validation",
+        command: summary.validationCommands.join(" && "),
+        passed: summary.validationPassed,
+        source: "DETERMINISTIC_TOOL",
+      });
+    }
+    runtime.updateWorkspace(finalWorkspace);
+
+    if (summary.agentResponse.needsClarification) {
+      runtime.requestClarification({
+        question: summary.agentResponse.question || "Additional user input is required.",
+        reason: summary.agentResponse.reason || "The task cannot proceed deterministically without clarification.",
+      });
+    } else if (summary.validationPassed) {
+      runtime.complete(VerifiedCompletionReceipt.fromDeterministicValidation({
+        validationPassed: summary.validationPassed,
+        source: "GIT_WORKTREE_VALIDATION",
+      }));
+    } else {
+      runtime.fail({
+        failureType: "VALIDATION_FAILURE",
+        code: summary.agentResponse.errorCode || "DETERMINISTIC_VALIDATION_FAILED",
+        message: summary.agentResponse.reason || summary.validationErrors || "Deterministic validation did not pass.",
+      });
+    }
 
     return {
       ...summary.agentResponse,
       visualVerification: summary.visualVerification || summary.agentResponse?.visualVerification,
+      taskRuntime: runtime.snapshot(),
     };
   }
 

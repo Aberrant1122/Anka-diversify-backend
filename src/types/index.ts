@@ -1,4 +1,5 @@
 import { TaskExecutionPlan, FileActionObligation } from "../ai/shared/TaskExecutionPlan";
+import type { TaskRuntimeSnapshot } from "../ai/runtime/TaskRuntime";
 export { FileActionObligation };
 
 export interface User {
@@ -543,6 +544,7 @@ export interface AgentResponse {
   patchesAppliedCount?: number;
   buildAttemptsCount?: number;
   visualVerification?: VisualVerificationResult;
+  taskRuntime?: TaskRuntimeSnapshot;
 }
 
 export interface BaselineDiagnostic {

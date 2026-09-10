@@ -26,6 +26,7 @@ import {
 import { LLMTelemetry, LLMTelemetryContext } from "./LLMTelemetry";
 import { BudgetManager, BudgetReservation } from "./BudgetManager";
 import { ModelRouter } from "./ModelRouter";
+import { getActiveTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
 
 export const MAX_GATEWAY_RETRIES = 5;
 export const DEFAULT_GATEWAY_RETRIES = 2;
@@ -238,11 +239,17 @@ export class LLMGateway {
       temperature,
     };
     const client = options.openaiClient || getOpenAI();
-    const operationScoped = !options.context?.runId;
-    const budgetScopeId = options.context?.runId ?? this.budgetManager.createOperationScope();
+    const activeTaskScope = getActiveTaskRuntimeScope();
+    const inheritedRunId = activeTaskScope?.budgetScopeId;
+    const effectiveContext: LLMCallContext = {
+      ...options.context,
+      ...(options.context?.runId || !inheritedRunId ? {} : { runId: inheritedRunId }),
+    };
+    const operationScoped = !effectiveContext.runId;
+    const budgetScopeId = effectiveContext.runId ?? this.budgetManager.createOperationScope();
 
     this.telemetry.emit("llm.route", {
-      ...options.context,
+      ...effectiveContext,
       stage,
       model: route.primaryModel,
     }, undefined, {
@@ -255,7 +262,7 @@ export class LLMGateway {
       maxRetries,
     });
     this.telemetry.emit("llm.context", {
-      ...options.context,
+      ...effectiveContext,
       stage,
       model: route.primaryModel,
     }, managedContext.estimatedTokens, {
@@ -274,7 +281,7 @@ export class LLMGateway {
       for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
         const model = this.modelRouter.modelForAttempt(route, attempt);
         const telemetryContext: LLMTelemetryContext = {
-          ...options.context,
+          ...effectiveContext,
           stage,
           model,
           attempt,
