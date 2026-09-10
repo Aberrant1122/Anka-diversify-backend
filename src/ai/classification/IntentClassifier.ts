@@ -86,7 +86,6 @@ export class IntentClassifier {
         stages?: any[];
       }>({
         stage: PipelineStages.INTENT_CLASSIFICATION,
-        model: "gpt-4o",
         openaiClient,
         messages: [
           { role: "system", content: INTENT_CLASSIFIER_PROMPT },

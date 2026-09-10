@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import { PrismaClient } from "@prisma/client";
-import { extractDocumentText, injectImages, modelForPhase, estimateCostUSD } from "../shared/utils";
+import { extractDocumentText, injectImages, estimateCostUSD } from "../shared/utils";
 import { ChatRequest, ChatResponse, ProposedTask, EpicProposal, ProjectHealth, GeneralContext, ProjectContext, AIAction } from "../shared/types";
 import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
@@ -153,7 +153,7 @@ export class ProjectChatService {
     for (let round = 0; round < 5; round++) {
       const completion = await gateway.callWithTools({
         stage: PipelineStages.APPLICATION_SUPPORT,
-        model: "gpt-4o",
+        context: { runId: session.id },
         messages,
         temperature: 0.7,
         maxTokens: 4000,
@@ -254,7 +254,7 @@ export class ProjectChatService {
 
     const completion = await LLMGateway.getInstance().callWithTools({
       stage: PipelineStages.APPLICATION_SUPPORT,
-      model: "gpt-4o",
+      context: { runId: session.id, projectId },
       messages,
       temperature: 0.7,
       maxTokens: 2000,
@@ -461,7 +461,6 @@ export class ProjectChatService {
     const allowedTaskIds = new Set(candidateTasks.map((task) => task.id));
     const res = await LLMGateway.getInstance().callStructured<{ tasks: { taskId: string; title: string; reason: string; priority: string }[] }>({
       stage: PipelineStages.TASK_DECOMPOSITION,
-      model: "gpt-4o",
       messages: [{ role: "user", content: prompt }],
       schema: {
         name: "SprintTaskSuggestionsSchema",
@@ -524,7 +523,6 @@ export class ProjectChatService {
       suggestedTasks: { taskId: string; title: string; reason: string; priority: string }[];
     }>({
       stage: PipelineStages.TASK_DECOMPOSITION,
-      model: "gpt-4o",
       messages: [{ role: "user", content: prompt }],
       schema: {
         name: "SprintGenerationSchema", strict: true,
@@ -559,7 +557,6 @@ export class ProjectChatService {
     const validIds = new Set(tasks.map((task) => task.id));
     const completion = await LLMGateway.getInstance().callStructured<{ order: string[] }>({
       stage: PipelineStages.PLAN_REORDER,
-      model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
@@ -593,8 +590,6 @@ export class ProjectChatService {
     brief?: string,
   ): Promise<{ title: string; content: string; model: string; usage: { prompt_tokens: number; completion_tokens: number }; costUSD: number }> {
     const projectContext = await RepositoryContextBuilder.buildProjectContext(projectId);
-    const model = modelForPhase(phase);
-
     const revisionBlock = revision
       ? `\nPREVIOUS DRAFT:\n${revision.previousContent}\n\nREVIEWER FEEDBACK:\n${revision.feedback}\n`
       : "";
@@ -605,7 +600,6 @@ export class ProjectChatService {
 
     const completion = await LLMGateway.getInstance().call({
       stage: PipelineStages.ROADMAP_PLANNING,
-      model,
       messages: [{ role: "system", content: systemPrompt }],
       temperature: 0.4,
       maxTokens: 2000,
@@ -623,9 +617,9 @@ export class ProjectChatService {
     return {
       title: `${projectContext.project.name} — ${phase.charAt(0).toUpperCase() + phase.slice(1)} Proposal`,
       content,
-      model,
+      model: completion.model,
       usage,
-      costUSD: estimateCostUSD(model, usage),
+      costUSD: estimateCostUSD(completion.model, usage),
     };
   }
 

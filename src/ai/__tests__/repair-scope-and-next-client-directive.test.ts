@@ -151,6 +151,7 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       changes: [
@@ -238,6 +239,7 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       changes: [
@@ -351,6 +353,7 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -458,6 +461,41 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
         description: "safe client calculator",
       },
     ];
+
+    const mockOpenAI = {
+      chat: {
+        completions: {
+          create: jest.fn()
+            .mockResolvedValueOnce({
+              choices: [{
+                finish_reason: "stop",
+                message: {
+                  content: JSON.stringify({
+                    score: 0.95,
+                    passed: true,
+                    critique: [],
+                    improvements: "",
+                  }),
+                },
+              }],
+            })
+            .mockResolvedValueOnce({
+              choices: [{
+                finish_reason: "stop",
+                message: {
+                  content: JSON.stringify({
+                    passed: true,
+                    riskLevel: "LOW",
+                    vulnerabilities: [],
+                    recommendations: [],
+                  }),
+                },
+              }],
+            }),
+        },
+      },
+    };
+    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
     const audit = await SecurityAuditor.runReflectionAndSecurityAudit(safeCalc);
     expect(audit.securityPass).toBe(true);

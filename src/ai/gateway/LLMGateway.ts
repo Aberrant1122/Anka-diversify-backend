@@ -4,7 +4,13 @@ import OpenAI, {
   APIUserAbortError,
 } from "openai";
 import { getOpenAI } from "../shared/utils";
-import { PipelineStage, PipelineStages, isValidPipelineStage } from "./PipelineStage";
+import {
+  ContextManager,
+  RepositoryEvidenceInput,
+  estimateMessageTokens,
+} from "../context/ContextManager";
+import { ContextPackerParams } from "../context/ContextPacker";
+import { PipelineStage, isValidPipelineStage } from "./PipelineStage";
 import {
   LLMError,
   LLMTimeoutError,
@@ -15,8 +21,11 @@ import {
   LLMInvalidJsonError,
   LLMSchemaInvalidError,
   LLMRetryExhaustedError,
+  LLMBudgetExhaustedError,
 } from "./LLMError";
 import { LLMTelemetry, LLMTelemetryContext } from "./LLMTelemetry";
+import { BudgetManager, BudgetReservation } from "./BudgetManager";
+import { ModelRouter } from "./ModelRouter";
 
 export const MAX_GATEWAY_RETRIES = 5;
 export const DEFAULT_GATEWAY_RETRIES = 2;
@@ -36,18 +45,6 @@ function normalizeBoundedInteger(
   return Math.min(maximum, Math.max(minimum, Math.floor(value)));
 }
 
-/**
- * Centralized Model Resolution Hook.
- * Checkpoint 1A invariant: Production model behavior remains unchanged.
- */
-export function resolveModel(_stage: PipelineStage, requestedModel?: string): string {
-  if (requestedModel && requestedModel.trim()) {
-    return requestedModel.trim();
-  }
-
-  return process.env.OPENAI_AGENT_MODEL || "gpt-4o";
-}
-
 export interface LLMCallContext {
   runId?: string;
   projectId?: string;
@@ -56,13 +53,14 @@ export interface LLMCallContext {
 
 export interface LLMBaseCallOptions {
   stage: PipelineStage;
-  model?: string;
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
   maxRetries?: number;
   retryDelayMs?: number;
   context?: LLMCallContext;
+  repositoryEvidence?: RepositoryEvidenceInput[];
+  repositoryFiles?: ContextPackerParams;
   openaiClient?: OpenAI;
 }
 
@@ -120,12 +118,26 @@ export interface LLMCallResult<T = string> {
   stage: PipelineStage;
 }
 
+export interface LLMGatewayComponents {
+  modelRouter?: ModelRouter;
+  budgetManager?: BudgetManager;
+  contextManager?: ContextManager;
+}
+
+type LLMInvocationOptions = LLMTextCallOptions | LLMStructuredCallOptions<unknown> | LLMToolCallOptions;
+
 export class LLMGateway {
   private static instance: LLMGateway | null = null;
   private telemetry: LLMTelemetry;
+  private readonly modelRouter: ModelRouter;
+  private readonly budgetManager: BudgetManager;
+  private readonly contextManager: ContextManager;
 
-  constructor(telemetry?: LLMTelemetry) {
+  constructor(telemetry?: LLMTelemetry, components: LLMGatewayComponents = {}) {
     this.telemetry = telemetry || LLMTelemetry.getInstance();
+    this.modelRouter = components.modelRouter ?? new ModelRouter();
+    this.budgetManager = components.budgetManager ?? new BudgetManager();
+    this.contextManager = components.contextManager ?? new ContextManager();
   }
 
   public static getInstance(): LLMGateway {
@@ -179,16 +191,22 @@ export class LLMGateway {
   }
 
   private async executeWithRetry<T>(
-    options: LLMTextCallOptions | LLMStructuredCallOptions<any> | LLMToolCallOptions,
+    options: LLMInvocationOptions,
     mode: "text" | "structured" | "tools"
   ): Promise<LLMCallResult<T>> {
     const stage = options.stage;
-    const model = resolveModel(stage, options.model);
+    const route = this.modelRouter.route(stage);
+    const maxTokens = normalizeBoundedInteger(
+      options.maxTokens,
+      route.defaultMaxOutputTokens,
+      1,
+      route.maxOutputTokens
+    );
     const maxRetries = normalizeBoundedInteger(
       options.maxRetries,
-      DEFAULT_GATEWAY_RETRIES,
+      Math.min(DEFAULT_GATEWAY_RETRIES, route.maxRetries),
       0,
-      MAX_GATEWAY_RETRIES
+      Math.min(MAX_GATEWAY_RETRIES, route.maxRetries)
     );
     const timeoutMs = normalizeBoundedInteger(
       options.timeoutMs,
@@ -202,71 +220,150 @@ export class LLMGateway {
       0,
       MAX_GATEWAY_RETRY_DELAY_MS
     );
+    const temperature = this.normalizeTemperature(options.temperature, route.defaultTemperature, route.maxTemperature);
+    const requiredRequestPayloads = this.requiredRequestPayloads(options, mode);
+    const managedContext = this.contextManager.build({
+      messages: options.messages,
+      maxTokens: route.contextWindowTokens,
+      maxInputTokens: route.maxInputTokens,
+      reservedOutputTokens: maxTokens,
+      requiredRequestPayloads,
+      repositoryEvidence: options.repositoryEvidence,
+      repositoryFiles: options.repositoryFiles,
+    });
+    const preparedOptions: LLMInvocationOptions = {
+      ...options,
+      messages: managedContext.messages,
+      maxTokens,
+      temperature,
+    };
     const client = options.openaiClient || getOpenAI();
+    const operationScoped = !options.context?.runId;
+    const budgetScopeId = options.context?.runId ?? this.budgetManager.createOperationScope();
+
+    this.telemetry.emit("llm.route", {
+      ...options.context,
+      stage,
+      model: route.primaryModel,
+    }, undefined, {
+      routeId: route.routeId,
+      tier: route.tier,
+      fallbackModels: route.fallbackModels,
+      maxInputTokens: route.maxInputTokens,
+      contextWindowTokens: route.contextWindowTokens,
+      maxOutputTokens: maxTokens,
+      maxRetries,
+    });
+    this.telemetry.emit("llm.context", {
+      ...options.context,
+      stage,
+      model: route.primaryModel,
+    }, managedContext.estimatedTokens, {
+      limitTokens: managedContext.limitTokens,
+      inputLimitTokens: managedContext.inputLimitTokens,
+      reservedOutputTokens: managedContext.reservedOutputTokens,
+      safetyReserveTokens: managedContext.safetyReserveTokens,
+      requiredRequestOverheadTokens: managedContext.requiredRequestOverheadTokens,
+      truncated: managedContext.truncated,
+      omittedMessageIndexes: managedContext.omittedMessageIndexes,
+      repositoryEvidenceAuthority: managedContext.repositoryEvidenceAuthority,
+    });
 
     let lastError: LLMError | undefined;
-
-    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
-      const telemetryContext: LLMTelemetryContext = {
-        ...options.context,
-        stage,
-        model,
-        attempt,
-      };
-
-      this.telemetry.emit("llm.call", telemetryContext);
-      const startTime = Date.now();
-
-      try {
-        const result = await this.executeSingleAttempt<T>(
-          client,
-          options,
-          model,
+    try {
+      for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+        const model = this.modelRouter.modelForAttempt(route, attempt);
+        const telemetryContext: LLMTelemetryContext = {
+          ...options.context,
           stage,
-          timeoutMs,
-          mode,
-          startTime,
-          telemetryContext
-        );
-        this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
-        return result;
-      } catch (err: any) {
-        lastError = this.normalizeError(err, stage, model, attempt, maxRetries);
-        this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
-        this.recordErrorTelemetry(lastError, telemetryContext);
+          model,
+          attempt,
+          routeId: route.routeId,
+          budgetScopeId,
+        };
+        let reservation: BudgetReservation;
+        try {
+          reservation = this.budgetManager.beginAttempt({
+            scopeId: budgetScopeId,
+            stage,
+            model,
+            estimatedInputTokens: managedContext.estimatedTokens,
+            maxOutputTokens: maxTokens,
+          });
+        } catch (budgetError) {
+          this.telemetry.emit("llm.budget_exhausted", telemetryContext);
+          throw budgetError;
+        }
+        this.telemetry.emit("llm.budget_reserved", telemetryContext, reservation.reservedTokens);
+        this.telemetry.emit("llm.call", telemetryContext);
+        const startTime = Date.now();
 
-        const isLastAttempt = attempt >= maxRetries + 1;
-        if (isLastAttempt || !(lastError as LLMError).isRetryable) {
-          if (attempt > 1 && isLastAttempt) {
+        try {
+          const result = await this.executeSingleAttempt<T>(
+            client,
+            preparedOptions,
+            model,
+            stage,
+            timeoutMs,
+            mode,
+            startTime,
+            telemetryContext,
+            reservation,
+            managedContext.estimatedTokens
+          );
+          this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
+          return result;
+        } catch (err: unknown) {
+          const failedSettlement = this.budgetManager.failAttempt(reservation);
+          if (failedSettlement.outcome === "ACCOUNTED") {
+            this.telemetry.emit("llm.budget_accounted", telemetryContext, failedSettlement.accountedTokens, {
+              source: "failed-attempt-reservation",
+              ...failedSettlement.snapshot,
+            });
+          }
+          lastError = this.normalizeError(err, stage, model, attempt, maxRetries);
+          this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
+          this.recordErrorTelemetry(lastError, telemetryContext);
+
+          const isLastAttempt = attempt >= maxRetries + 1;
+          if (!lastError.isRetryable) throw lastError;
+          if (isLastAttempt) {
+            if (attempt === 1) throw lastError;
             throw new LLMRetryExhaustedError(
               `LLM call failed after ${attempt} attempts: ${lastError.message}`,
               lastError,
               { stage, model, attempt, maxRetries }
             );
           }
-          throw lastError;
-        }
 
-        this.telemetry.emit("llm.retry", telemetryContext, attempt);
-        if (retryDelayMs > 0) {
-          const delay = retryDelayMs * Math.pow(1.5, attempt - 1);
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          this.telemetry.emit("llm.retry", telemetryContext, attempt);
+          if (retryDelayMs > 0) {
+            const delay = retryDelayMs * Math.pow(1.5, attempt - 1);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          }
         }
       }
-    }
 
-    throw lastError || new LLMProviderError("LLM invocation failed unexpectedly", { stage, model });
+      throw lastError || new LLMProviderError("LLM invocation failed unexpectedly", {
+        stage,
+        model: route.primaryModel,
+      });
+    } finally {
+      if (operationScoped) this.budgetManager.releaseScope(budgetScopeId);
+    }
   }
 
   private async executeSingleAttempt<T>(
     client: OpenAI,
-    options: LLMTextCallOptions | LLMStructuredCallOptions<any> | LLMToolCallOptions,
+    options: LLMInvocationOptions,
     model: string,
     stage: PipelineStage,
     timeoutMs: number,
     mode: "text" | "structured" | "tools",
     startTime: number,
-    telemetryContext: LLMTelemetryContext
+    telemetryContext: LLMTelemetryContext,
+    reservation: BudgetReservation,
+    estimatedInputTokens: number
   ): Promise<LLMCallResult<T>> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -290,19 +387,7 @@ export class LLMGateway {
 
       if (mode === "structured") {
         const structuredOpts = options as LLMStructuredCallOptions;
-        if (structuredOpts.schema.schema) {
-          requestPayload.response_format = {
-            type: "json_schema",
-            json_schema: {
-              name: structuredOpts.schema.name,
-              description: structuredOpts.schema.description,
-              schema: structuredOpts.schema.schema,
-              strict: structuredOpts.schema.strict ?? true,
-            },
-          };
-        } else {
-          requestPayload.response_format = { type: "json_object" };
-        }
+        requestPayload.response_format = this.structuredResponseFormat(structuredOpts);
       }
 
       const response = await client.chat.completions.create(requestPayload, {
@@ -314,22 +399,45 @@ export class LLMGateway {
 
       const latencyMs = Date.now() - startTime;
 
-      // Usage accounting
-      const usage = response.usage;
-      if (usage) {
-        if (typeof usage.prompt_tokens === "number") {
-          this.telemetry.emit("llm.tokens_input", telemetryContext, usage.prompt_tokens);
-        }
-        if (typeof usage.completion_tokens === "number") {
-          this.telemetry.emit("llm.tokens_output", telemetryContext, usage.completion_tokens);
-        }
-      }
-
       const choice = response.choices?.[0];
       if (!choice) {
         throw new LLMProviderError("Provider returned empty choices array", {
           stage,
           model,
+        });
+      }
+
+      const providerUsage = response.usage;
+      const promptTokens = this.validUsageValue(providerUsage?.prompt_tokens, estimatedInputTokens);
+      const completionTokens = this.validUsageValue(
+        providerUsage?.completion_tokens,
+        estimateMessageTokens(choice.message)
+      );
+      const totalTokens = Math.max(
+        promptTokens + completionTokens,
+        this.validUsageValue(providerUsage?.total_tokens, promptTokens + completionTokens)
+      );
+      const settlement = this.budgetManager.completeAttempt(reservation, totalTokens);
+      this.telemetry.emit("llm.budget_accounted", telemetryContext, settlement.accountedTokens, {
+        source: providerUsage ? "provider" : "deterministic-estimate",
+        ...settlement.snapshot,
+      });
+      this.telemetry.emit("llm.tokens_input", telemetryContext, promptTokens, {
+        source: providerUsage ? "provider" : "deterministic-estimate",
+      });
+      this.telemetry.emit("llm.tokens_output", telemetryContext, completionTokens, {
+        source: providerUsage ? "provider" : "deterministic-estimate",
+      });
+      if (settlement.overBudget) {
+        this.telemetry.emit("llm.budget_overage", telemetryContext, settlement.accountedTokens, {
+          source: providerUsage ? "provider" : "deterministic-estimate",
+          ...settlement.snapshot,
+        });
+        throw new LLMBudgetExhaustedError("Provider usage exceeded the enforced runtime token budget", {
+          stage,
+          model,
+          accountedTokens: settlement.accountedTokens,
+          ...settlement.snapshot,
         });
       }
 
@@ -404,13 +512,11 @@ export class LLMGateway {
         content: finalContent,
         rawResponse: response,
         finishReason,
-        usage: usage
-          ? {
-              promptTokens: usage.prompt_tokens,
-              completionTokens: usage.completion_tokens,
-              totalTokens: usage.total_tokens,
-            }
-          : undefined,
+        usage: {
+          promptTokens,
+          completionTokens,
+          totalTokens,
+        },
         latencyMs,
         model,
         stage,
@@ -535,6 +641,16 @@ export class LLMGateway {
     return (validationResult.data !== undefined ? validationResult.data : parsed) as T;
   }
 
+  private normalizeTemperature(value: number | undefined, defaultValue: number, maximum: number): number {
+    if (value === undefined || !Number.isFinite(value)) return defaultValue;
+    return Math.min(maximum, Math.max(0, value));
+  }
+
+  private validUsageValue(value: number | undefined, fallback: number): number {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return fallback;
+    return Math.floor(value);
+  }
+
   private normalizeError(
     err: any,
     stage: PipelineStage,
@@ -618,6 +734,44 @@ export class LLMGateway {
       case "LLM_SCHEMA_INVALID":
         this.telemetry.emit("llm.schema_failure", context);
         break;
+      case "LLM_BUDGET_EXHAUSTED":
+        this.telemetry.emit("llm.budget_exhausted", context);
+        break;
     }
+  }
+
+  private requiredRequestPayloads(
+    options: LLMInvocationOptions,
+    mode: "text" | "structured" | "tools"
+  ): Array<{ id: string; value: unknown }> {
+    if (mode === "tools") {
+      const toolOptions = options as LLMToolCallOptions;
+      return [{
+        id: "tool-definitions",
+        value: { tools: toolOptions.tools, tool_choice: toolOptions.toolChoice },
+      }];
+    }
+    if (mode === "structured") {
+      return [{
+        id: "structured-response-format",
+        value: this.structuredResponseFormat(options as LLMStructuredCallOptions),
+      }];
+    }
+    return [];
+  }
+
+  private structuredResponseFormat(
+    options: LLMStructuredCallOptions
+  ): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming["response_format"] {
+    if (!options.schema.schema) return { type: "json_object" };
+    return {
+      type: "json_schema",
+      json_schema: {
+        name: options.schema.name,
+        description: options.schema.description,
+        schema: options.schema.schema,
+        strict: options.schema.strict ?? true,
+      },
+    };
   }
 }

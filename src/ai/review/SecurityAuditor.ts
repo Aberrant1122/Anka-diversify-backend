@@ -124,7 +124,6 @@ export class SecurityAuditor {
     try {
       const critiqueResult = await LLMGateway.getInstance().callStructured<SecurityCritiquePayload>({
         stage: PipelineStages.SECURITY_AUDIT,
-        model: "gpt-4o",
         messages: [
           { role: "system", content: CODE_CRITIQUE_PROMPT },
           { role: "user", content: diffText },
@@ -159,7 +158,6 @@ export class SecurityAuditor {
     try {
       const secResult = await LLMGateway.getInstance().callStructured<SecurityReviewPayload>({
         stage: PipelineStages.SECURITY_AUDIT,
-        model: "gpt-4o",
         messages: [
           { role: "system", content: SECURITY_REVIEW_PROMPT },
           { role: "user", content: diffText },
@@ -314,7 +312,7 @@ export class SecurityAuditor {
 
     if (!llmReviewAvailable) {
       llmReviewPass = false;
-    } else if (modelReportedSecurityFailure) {
+   } else if (modelReportedSecurityFailure) {
       llmReviewPass = false;
     } else if (!hasSevereLlmFindings) {
       llmReviewPass = true;

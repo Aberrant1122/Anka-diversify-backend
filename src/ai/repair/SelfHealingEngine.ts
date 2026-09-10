@@ -852,7 +852,6 @@ export class SelfHealingEngine {
             );
             const depResult = await LLMGateway.getInstance().callStructured<DependencyRepairPayload>({
               stage: PipelineStages.REPAIR,
-              model: "gpt-4o",
               messages: [
                 {
                   role: "system",
@@ -1347,7 +1346,6 @@ export class SelfHealingEngine {
         );
         const repairResult = await LLMGateway.getInstance().callStructured<ModelRepairPayload>({
           stage: PipelineStages.REPAIR,
-          model: "gpt-4o",
           messages: [
             { role: "system", content: prompt.system },
             { role: "user", content: prompt.user },

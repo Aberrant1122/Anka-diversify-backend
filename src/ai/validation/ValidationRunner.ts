@@ -125,7 +125,6 @@ export class ValidationRunner {
     try {
       const review = await LLMGateway.getInstance().callStructured<StaticReviewAdvisory>({
         stage: PipelineStages.STATIC_REVIEW,
-        model: "gpt-4o",
         messages: [
           {
             role: "system",

@@ -53,7 +53,6 @@ export class BuildErrorRepair {
       const allowedChanges = new Map(changes.map((change) => [normalizeRepairPath(change.path), change]));
       const result = await LLMGateway.getInstance().callStructured<BuildRepairPayload>({
         stage: PipelineStages.REPAIR,
-        model: "gpt-4o",
         messages: [
           { role: "system", content: prompt.system },
           { role: "user", content: prompt.user },

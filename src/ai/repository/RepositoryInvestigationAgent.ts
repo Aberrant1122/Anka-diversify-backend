@@ -301,7 +301,6 @@ INSTRUCTIONS:
 
       const result = await LLMGateway.getInstance().callStructured<InvestigationDecision>({
         stage: PipelineStages.REPOSITORY_REASONING,
-        model: process.env.OPENAI_AGENT_MODEL || "gpt-4o",
         messages: [{ role: "user", content: prompt }],
         temperature: 0.1,
         openaiClient: this.openaiClient,

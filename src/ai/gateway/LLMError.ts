@@ -8,7 +8,11 @@ export type LLMErrorCode =
   | "LLM_TRUNCATED"
   | "LLM_INVALID_JSON"
   | "LLM_SCHEMA_INVALID"
-  | "LLM_RETRY_EXHAUSTED";
+  | "LLM_RETRY_EXHAUSTED"
+  | "LLM_ROUTING_ERROR"
+  | "LLM_BUDGET_INVALID"
+  | "LLM_BUDGET_EXHAUSTED"
+  | "LLM_CONTEXT_OVERFLOW";
 
 export interface LLMErrorDetails {
   stage?: PipelineStage;
@@ -105,6 +109,34 @@ export class LLMRetryExhaustedError extends LLMError {
     super(message, "LLM_RETRY_EXHAUSTED", details, false, lastError);
     this.name = "LLMRetryExhaustedError";
     this.lastError = lastError;
+  }
+}
+
+export class LLMRoutingError extends LLMError {
+  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown) {
+    super(message, "LLM_ROUTING_ERROR", details, false, cause);
+    this.name = "LLMRoutingError";
+  }
+}
+
+export class LLMBudgetConfigurationError extends LLMError {
+  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown) {
+    super(message, "LLM_BUDGET_INVALID", details, false, cause);
+    this.name = "LLMBudgetConfigurationError";
+  }
+}
+
+export class LLMBudgetExhaustedError extends LLMError {
+  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown) {
+    super(message, "LLM_BUDGET_EXHAUSTED", details, false, cause);
+    this.name = "LLMBudgetExhaustedError";
+  }
+}
+
+export class LLMContextOverflowError extends LLMError {
+  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown) {
+    super(message, "LLM_CONTEXT_OVERFLOW", details, false, cause);
+    this.name = "LLMContextOverflowError";
   }
 }
 

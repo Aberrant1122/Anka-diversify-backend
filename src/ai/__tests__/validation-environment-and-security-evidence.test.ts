@@ -163,6 +163,7 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -221,6 +222,7 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -312,12 +314,13 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
         completions: {
           create: jest.fn().mockImplementation(async (opts) => {
             if (opts.messages[0].content.includes("Reflection Agent") || opts.messages[0].content.includes("Critique")) {
-              return { choices: [{ message: { content: JSON.stringify({ score: 0.95 }) } }] };
+              return { choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ score: 0.95 }) } }] };
             }
             // LLM Review hallucinates eval-like behavior
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       passed: false,
@@ -329,6 +332,7 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
                           severity: "HIGH",
                         },
                       ],
+                      recommendations: [],
                     }),
                   },
                 },
@@ -341,8 +345,8 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
     jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
     const audit = await SecurityAuditor.runReflectionAndSecurityAudit(changes);
-    // Unsupported finding is downgraded and does not fail securityPass
-    expect(audit.securityPass).toBe(true);
+    // Unsupported finding is downgraded but model failure still fails securityPass (correct fail-closed)
+    expect(audit.securityPass).toBe(false);
     expect(audit.vulnerabilities?.[0].issue).toContain("[UNSUPPORTED_SECURITY_FINDING]");
     expect(audit.vulnerabilities?.[0].severity).toBe("LOW");
   });
@@ -364,11 +368,12 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
         completions: {
           create: jest.fn().mockImplementation(async (opts) => {
             if (opts.messages[0].content.includes("Reflection Agent") || opts.messages[0].content.includes("Critique")) {
-              return { choices: [{ message: { content: JSON.stringify({ score: 0.90 }) } }] };
+              return { choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ score: 0.90 }) } }] };
             }
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       passed: false,
@@ -380,6 +385,7 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
                           severity: "HIGH",
                         },
                       ],
+                      recommendations: [],
                     }),
                   },
                 },

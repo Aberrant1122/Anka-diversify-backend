@@ -1,6 +1,7 @@
 import { PipelineStage } from "./PipelineStage";
 
 export type LLMTelemetryEventName =
+  | "llm.route"
   | "llm.call"
   | "llm.retry"
   | "llm.truncated"
@@ -13,6 +14,11 @@ export type LLMTelemetryEventName =
   | "llm.tokens_input"
   | "llm.tokens_output"
   | "llm.latency"
+  | "llm.context"
+  | "llm.budget_reserved"
+  | "llm.budget_accounted"
+  | "llm.budget_overage"
+  | "llm.budget_exhausted"
   | "clarification.user_ambiguity"
   | "clarification.repo_resolvable"
   | "clarification.technical_failure";

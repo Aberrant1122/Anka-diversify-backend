@@ -24,7 +24,6 @@ export class MemoryPersistence {
     try {
       const memoryCompletion = await LLMGateway.getInstance().callStructured<{ summaryEntry: string; keyDecisions: string[] }>({
         stage: PipelineStages.SUMMARIZATION,
-        model: "gpt-4o-mini",
         messages: [
           { role: "system", content: MEMORY_PERSISTENCE_PROMPT },
           { role: "user", content: `USER TASK: ${userMessage}\nAUDIT SUMMARY: ${auditResult.summary}` },

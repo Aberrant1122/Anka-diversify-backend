@@ -120,7 +120,6 @@ Generate a corrected, valid FileManifest JSON that resolves all validation error
         manifestVersion: string;
       }>({
         stage: PipelineStages.MANIFEST_CORRECTION,
-        model: process.env.OPENAI_AGENT_MODEL || "gpt-4o",
         openaiClient,
         messages: [
           { role: "system", content: systemPrompt },

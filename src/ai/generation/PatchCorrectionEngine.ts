@@ -111,7 +111,6 @@ ${currentContent}`;
     try {
       const result = await LLMGateway.getInstance().callStructured<PatchCorrectionPayload>({
         stage: PipelineStages.CODE_CORRECTION,
-        model: "gpt-4o",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },

@@ -4,7 +4,7 @@ import {
   PipelineStage,
   LLMGateway,
   EmbeddingGateway,
-  resolveModel,
+  ModelRouter,
   resolveEmbeddingModel,
   LLMTimeoutError,
   LLMError,
@@ -537,8 +537,14 @@ describe("Checkpoint 1A: LLM Runtime Foundation", () => {
   });
 
   // ── 19. Model resolution hook passes neutral default model without stage tiering ─
-  it("19. passes neutral default model to provider client invocation", async () => {
-    const gateway = new LLMGateway(telemetry);
+  it("19. passes the centralized route model to provider client invocation", async () => {
+    const modelRouter = new ModelRouter({
+      fastModel: "fast-test-model",
+      standardModel: "standard-test-model",
+      reasoningModel: "reasoning-test-model",
+      fallbackModel: "fallback-test-model",
+    });
+    const gateway = new LLMGateway(telemetry, { modelRouter });
     const mockClient = {
       chat: {
         completions: {
@@ -555,26 +561,26 @@ describe("Checkpoint 1A: LLM Runtime Foundation", () => {
       openaiClient: mockClient,
     });
 
-    const expectedDefault = process.env.OPENAI_AGENT_MODEL || "gpt-4o";
     expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: expectedDefault,
+        model: "fast-test-model",
       }),
       expect.any(Object)
     );
   });
 
   // ── 20. Zero stage-dependent model routing in Checkpoint 1A ────────────────
-  it("20. returns identical neutral default model for every PipelineStage with zero premature tiering", () => {
-    const expectedDefault = process.env.OPENAI_AGENT_MODEL || "gpt-4o";
+  it("20. routes deterministically by PipelineStage without accepting a requested model", () => {
+    const router = new ModelRouter({
+      fastModel: "fast-test-model",
+      standardModel: "standard-test-model",
+      reasoningModel: "reasoning-test-model",
+      fallbackModel: "fallback-test-model",
+    });
 
-    for (const stage of Object.values(PipelineStages)) {
-      expect(resolveModel(stage)).toBe(expectedDefault);
-    }
-
-    // Explicit caller-requested model is preserved exactly
-    expect(resolveModel(PipelineStages.APPLICATION_SUPPORT, "custom-model-x")).toBe("custom-model-x");
-    expect(resolveModel(PipelineStages.SUMMARIZATION, "gpt-4o-mini")).toBe("gpt-4o-mini");
+    expect(router.route(PipelineStages.APPLICATION_SUPPORT).primaryModel).toBe("fast-test-model");
+    expect(router.route(PipelineStages.REPOSITORY_REASONING).primaryModel).toBe("standard-test-model");
+    expect(router.route(PipelineStages.CODE_GENERATION).primaryModel).toBe("reasoning-test-model");
   });
 
   // ── 21. Model self-report cannot establish deterministic completion ────────

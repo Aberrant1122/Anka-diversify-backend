@@ -400,7 +400,6 @@ Respond ONLY with valid JSON:
 
     const completion = await LLMGateway.getInstance().callStructured<ExecuteChangesPayload>({
       stage: PipelineStages.CODE_GENERATION,
-      model: "gpt-4o",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
@@ -481,7 +480,6 @@ Respond ONLY with valid JSON:
       try {
         const roadmapRes = await gateway.callStructured<{ roadmap: RoadmapStep[] }>({
           stage: PipelineStages.ROADMAP_PLANNING,
-          model: "gpt-4o",
           messages: [
             { role: "system", content: IMPLEMENTATION_PLANNER_PROMPT },
             { role: "user", content: `REQUEST: ${message}\nINTENT: ${intentResult.intent}` },
@@ -544,20 +542,36 @@ Respond ONLY with valid JSON:
       }
     }
 
-    const modifySourceBlocks = Object.entries(authoritativeModifySources || {}).map(([p, s]) => {
-      return `═══════════════════════════════════════════════════\nAUTHORIZED MODIFY SOURCE\nFILE: ${p}\nSHA256: ${s.sha256}\nFULL AUTHORITATIVE CONTENT:\n═══════════════════════════════════════════════════\n${s.content}`;
-    });
+    const requiredRepositoryEvidence = Object.entries(authoritativeModifySources || {}).map(([p, s]) => ({
+      id: `authoritative-modify:${normalizeRepoPath(p)}:${s.sha256}`,
+      content: `AUTHORIZED MODIFY SOURCE\nFILE: ${p}\nSHA256: ${s.sha256}\nFULL AUTHORITATIVE CONTENT:\n${s.content}`,
+      required: true,
+      priority: 0,
+    }));
 
-    const supportingBlocks = Object.entries(optimizedContext?.fileContext || {})
+    const supportingRepositoryEvidence = Object.entries(optimizedContext?.fileContext || {})
       .filter(([p]) => !authoritativeModifySources || !authoritativeModifySources[p])
       .map(([p, c]) => {
         const fileSha = crypto.createHash("sha256").update(String(c)).digest("hex");
-        return `═══════════════════════════════════════════════════\nSUPPORTING REPOSITORY CONTEXT\nFILE: ${p}\nSHA256: ${fileSha}\nFULL CONTENT:\n═══════════════════════════════════════════════════\n${c}`;
+        return {
+          id: `supporting-file:${normalizeRepoPath(p)}:${fileSha}`,
+          content: `SUPPORTING REPOSITORY CONTEXT\nFILE: ${p}\nSHA256: ${fileSha}\nFULL CONTENT:\n${c}`,
+          required: false,
+          priority: 100,
+        };
       });
 
-    const skeletonBlocks = Object.entries(optimizedContext?.skeletonContext || {}).map(
-      ([p, c]) => `=== SKELETON DEPENDENCY: ${p} ===\n${c}`
-    );
+    const skeletonRepositoryEvidence = Object.entries(optimizedContext?.skeletonContext || {}).map(([p, c]) => ({
+      id: `skeleton-file:${normalizeRepoPath(p)}`,
+      content: `SKELETON DEPENDENCY: ${p}\n${c}`,
+      required: false,
+      priority: 200,
+    }));
+    const repositoryEvidence = [
+      ...requiredRepositoryEvidence,
+      ...supportingRepositoryEvidence,
+      ...skeletonRepositoryEvidence,
+    ];
 
     const effectiveResolutionSourceMap: Record<string, string> =
       mergedSourceMap ||
@@ -577,12 +591,7 @@ Respond ONLY with valid JSON:
 
     const componentContractBlocks = resolvedComponentContracts.map((c) => c.contractText);
 
-    const contextContent = [
-      ...modifySourceBlocks,
-      ...supportingBlocks,
-      ...skeletonBlocks,
-      ...componentContractBlocks,
-    ].join("\n\n");
+    const contextContent = componentContractBlocks.join("\n\n");
 
     let multiFileInstruction = "";
     if (approvedManifest && Array.isArray(approvedManifest.files) && manifestDeleteFiles.length > 0) {
@@ -681,17 +690,20 @@ When using an existing local component, conform to its authoritative exported pr
       ? `\n\nREMINDER: Respond ONLY with valid JSON. For CREATE actions, output complete file content. For MODIFY actions, output targeted edits[] with exact oldText/newText pairs. For DELETE actions, output deletion markers. See STRICT MODIFY RULES above.`
       : `\n\nREMINDER: Respond ONLY with valid JSON. Every file in your "changes" array MUST contain the COMPLETE 100% file content.`;
 
-    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextContent || "(Standalone Application - No repository context required)"}${multiFileInstruction}${jsonFormatReminder}`;
+    const contextSummary = contextContent || (repositoryEvidence.length > 0
+      ? "Repository evidence is supplied through the bounded ContextManager."
+      : "(Standalone Application - No repository context required)");
+    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextSummary}${multiFileInstruction}${jsonFormatReminder}`;
 
     const completion = await gateway.callStructured<CodeGenerationPayload>({
       stage: PipelineStages.CODE_GENERATION,
-      model: "gpt-4o",
       messages: [
         { role: "system", content: effectiveCodingPrompt },
         { role: "user", content: userPrompt },
       ],
       temperature: 0.2,
       maxTokens: 16000,
+      repositoryEvidence,
       schema: codeGenerationSchema("PrimaryCodeGenerationSchema", Boolean(hasManifest || isDeleteTask)),
     });
 
@@ -753,7 +765,6 @@ When using an existing local component, conform to its authoritative exported pr
 
           const retryCompletion = await gateway.callStructured<CodeGenerationPayload>({
             stage: PipelineStages.CODE_CORRECTION,
-            model: "gpt-4o",
             messages: [
               { role: "system", content: effectiveCodingPrompt },
               { role: "user", content: userPrompt },
@@ -762,6 +773,7 @@ When using an existing local component, conform to its authoritative exported pr
             ],
             temperature: 0.1,
             maxTokens: 16000,
+            repositoryEvidence,
             schema: codeGenerationSchema("ManifestCodeCorrectionSchema", true),
           });
 
@@ -1085,7 +1097,6 @@ When using an existing local component, conform to its authoritative exported pr
 
         const secCorrection = await gateway.callStructured<ContentRepairPayload>({
             stage: PipelineStages.CODE_CORRECTION,
-            model: "gpt-4o",
             messages: [
               {
                 role: "system",
@@ -1150,7 +1161,6 @@ When using an existing local component, conform to its authoritative exported pr
 
           const depCorrection = await gateway.callStructured<ContentRepairPayload>({
               stage: PipelineStages.CODE_CORRECTION,
-              model: "gpt-4o",
               messages: [
                 {
                   role: "system",

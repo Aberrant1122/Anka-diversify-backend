@@ -237,6 +237,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       repaired: true,
@@ -342,6 +343,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
                         repaired: true,
@@ -365,6 +367,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
                         repaired: true,
@@ -383,7 +386,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
               };
             }
 
-            return { choices: [{ message: { content: "{}" } }] };
+            return { choices: [{ finish_reason: "stop", message: { content: "{}" } }] };
           }),
         },
       },
@@ -460,6 +463,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
                         repaired: true,
@@ -481,6 +485,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       repaired: true,
@@ -503,7 +508,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
     };
     jest.spyOn(utils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
-    const result = await SelfHealingEngine.runSelfHealingLoop(
+    await expect(SelfHealingEngine.runSelfHealingLoop(
       [{ path: "src/auth.ts", content: "const step = 1;\n", description: "init", action: "modify" }],
       tempDir,
       ["npm run build"],
@@ -514,10 +519,8 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
       undefined,
       manifest,
       contract,
-    );
+    )).rejects.toMatchObject({ code: "LLM_SCHEMA_INVALID" });
 
-    expect(result.success).toBe(false);
-    expect(result.errorType).toBe("REPAIR_UNDECLARED_FILE");
     // package.json was never created or written to disk
     expect(fs.existsSync(path.join(tempDir, "package.json"))).toBe(false);
   });

@@ -25,7 +25,6 @@ export class PullRequestDescription {
 
     const result = await LLMGateway.getInstance().callStructured<{ title: string; description: string }>({
       stage: PipelineStages.SUMMARIZATION,
-      model: "gpt-4o",
       temperature: 0.4,
       maxTokens: 800,
       messages: [

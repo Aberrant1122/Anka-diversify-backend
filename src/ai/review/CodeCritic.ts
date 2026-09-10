@@ -10,7 +10,6 @@ export class CodeCritic {
     const diffText = changes.map((c) => `=== FILE: ${c.path} ===\n${c.content}`).join("\n\n");
     const result = await LLMGateway.getInstance().callStructured<{ score: number; passed: boolean; critique: string[]; improvements: string }>({
         stage: PipelineStages.STATIC_REVIEW,
-        model: "gpt-4o",
         messages: [
           { role: "system", content: CODE_CRITIQUE_PROMPT },
           { role: "user", content: diffText },

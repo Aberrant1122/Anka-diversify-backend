@@ -391,7 +391,6 @@ export class ValidationDetector {
     try {
       const advisory = await LLMGateway.getInstance().callStructured<FeatureValidationAdvisory>({
         stage: PipelineStages.FEATURE_VALIDATION,
-        model: "gpt-4o",
         messages: [
           {
             role: "system",

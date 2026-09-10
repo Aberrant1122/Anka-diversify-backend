@@ -47,7 +47,6 @@ export class RepositorySearch {
     const fileTree = snapshot?.fileTree?.slice(0, 300).join("\n") || "No repo connected";
     const result = await LLMGateway.getInstance().callStructured<RepositoryTaskPlan>({
       stage: PipelineStages.REPOSITORY_REASONING,
-      model: "gpt-4o",
       messages: [
         {
           role: "system",

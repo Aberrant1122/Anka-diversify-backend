@@ -87,7 +87,6 @@ export class TaskDecomposer {
       const gateway = LLMGateway.getInstance();
       const response = await gateway.callStructured<{ nodes: any[] }>({
         stage: PipelineStages.TASK_DECOMPOSITION,
-        model: process.env.OPENAI_AGENT_MODEL || "gpt-4o",
         openaiClient: this.openai,
         messages: [
           { role: "system", content: TASK_DECOMPOSITION_PROMPT },

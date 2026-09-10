@@ -163,7 +163,6 @@ Respond ONLY with valid JSON:
       const gateway = LLMGateway.getInstance();
       const response = await gateway.callStructured<{ prioritizedStageId: string }>({
         stage: PipelineStages.PLAN_REORDER,
-        model: "gpt-4o",
         openaiClient,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.0,

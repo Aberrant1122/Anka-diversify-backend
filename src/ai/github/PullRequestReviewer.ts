@@ -26,7 +26,6 @@ export class PullRequestReviewer {
 
     const result = await LLMGateway.getInstance().callStructured<PRReview>({
       stage: PipelineStages.STATIC_REVIEW,
-      model: "gpt-4o",
       temperature: 0.3,
       maxTokens: 1500,
       messages: [
