@@ -190,6 +190,9 @@ export class CodingAgent {
         source: "DETERMINISTIC_TOOL",
       });
     }
+    if (summary.diagnosticComparison) {
+      finalWorkspace = finalWorkspace.withDiagnosticComparison(summary.diagnosticComparison);
+    }
     runtime.updateWorkspace(finalWorkspace);
 
     if (summary.agentResponse.needsClarification) {

@@ -178,6 +178,8 @@ You're importing a component that needs useState. It only works in a Client Comp
       commitMessage: "fix: client",
       sessionId: "sess-new-err",
       buildVerified: true,
+      taskVerified: true,
+      repositoryClean: true,
     });
 
     const summary = await GitWorktreeService.runIsolatedAgent({
@@ -193,6 +195,8 @@ You're importing a component that needs useState. It only works in a Client Comp
     expect(summary.agentResponse.newTaskDiagnostics?.length).toBeGreaterThan(0);
     expect(summary.agentResponse.origin).toBe("CURRENT_TASK");
     expect(summary.agentResponse.agentIntroduced).toBe(true);
+    expect(summary.diagnosticComparison?.source).toBe("DETERMINISTIC_COMPARISON");
+    expect(summary.diagnosticComparison?.counts.INTRODUCED).toBeGreaterThan(0);
   });
 
   test("G. Unrelated task against broken baseline remains blocked", async () => {
@@ -743,10 +747,9 @@ Failed to compile.
 You're importing a module that depends on \`useState\` into a React Server Component module.
 `;
 
-      jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-        success: false,
-        errors: baselineErrors,
-      });
+      jest.spyOn(ValidationRunner, "validateWithShell")
+        .mockResolvedValueOnce({ success: false, errors: baselineErrors })
+        .mockResolvedValueOnce({ success: true, errors: "" });
 
       const spyAgentPipeline = jest.spyOn(AgentPipeline, "runCodingAgent").mockResolvedValue({
         explanation: "Fixed useState Server Component error",
@@ -807,10 +810,9 @@ Failed to compile.
 You're importing a module that depends on \`useState\` into a React Server Component module.
 `;
 
-      jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-        success: false,
-        errors: baselineErrors,
-      });
+      jest.spyOn(ValidationRunner, "validateWithShell")
+        .mockResolvedValueOnce({ success: false, errors: baselineErrors })
+        .mockResolvedValueOnce({ success: true, errors: "" });
 
       let passedContext: any = null;
       const spyAgentPipeline = jest.spyOn(AgentPipeline, "runCodingAgent").mockImplementation(async (u, p, req, prog, ctx) => {
@@ -882,10 +884,9 @@ Failed to compile.
 You're importing a module that depends on \`useState\` into a React Server Component module.
 `;
 
-      jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-        success: false,
-        errors: baselineErrors,
-      });
+      jest.spyOn(ValidationRunner, "validateWithShell")
+        .mockResolvedValueOnce({ success: false, errors: baselineErrors })
+        .mockResolvedValueOnce({ success: true, errors: "" });
 
       let passedContext: any = null;
       const spyAgentPipeline = jest.spyOn(AgentPipeline, "runCodingAgent").mockImplementation(async (u, p, req, prog, ctx) => {

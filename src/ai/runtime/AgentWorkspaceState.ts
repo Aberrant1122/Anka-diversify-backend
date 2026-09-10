@@ -1,4 +1,5 @@
 import path from "path";
+import type { DiagnosticBaselineComparison } from "./BaselineDiagnosticVerifier";
 
 export type WorkspaceEvidenceKind = "MATERIALIZED_REPOSITORY" | "SEMANTIC_ADVISORY";
 
@@ -38,6 +39,7 @@ export interface AgentWorkspaceSnapshot {
   relevantPaths: readonly string[];
   constraints: readonly WorkspaceConstraint[];
   validationFacts: readonly WorkspaceValidationFact[];
+  diagnosticComparisons: readonly DiagnosticBaselineComparison[];
   workingPlan?: WorkingPlanReference;
   authority: "KNOWLEDGE_ONLY_NO_MUTATION_AUTHORITY";
 }
@@ -72,11 +74,13 @@ function freezeSnapshot(snapshot: AgentWorkspaceSnapshot): AgentWorkspaceSnapsho
   snapshot.evidence.forEach(Object.freeze);
   snapshot.constraints.forEach(Object.freeze);
   snapshot.validationFacts.forEach(Object.freeze);
+  snapshot.diagnosticComparisons.forEach(Object.freeze);
   if (snapshot.workingPlan) Object.freeze(snapshot.workingPlan);
   Object.freeze(snapshot.evidence);
   Object.freeze(snapshot.relevantPaths);
   Object.freeze(snapshot.constraints);
   Object.freeze(snapshot.validationFacts);
+  Object.freeze(snapshot.diagnosticComparisons);
   return Object.freeze(snapshot);
 }
 
@@ -101,6 +105,7 @@ export class AgentWorkspaceState {
       relevantPaths: [],
       constraints,
       validationFacts: [],
+      diagnosticComparisons: [],
       authority: "KNOWLEDGE_ONLY_NO_MUTATION_AUTHORITY",
     }));
   }
@@ -146,6 +151,13 @@ export class AgentWorkspaceState {
     return this.copy({ validationFacts: [...this.value.validationFacts, normalized] });
   }
 
+  public withDiagnosticComparison(comparison: DiagnosticBaselineComparison): AgentWorkspaceState {
+    if (comparison.source !== "DETERMINISTIC_COMPARISON") {
+      throw new Error("Diagnostic comparisons require deterministic comparison provenance");
+    }
+    return this.copy({ diagnosticComparisons: [...this.value.diagnosticComparisons, comparison] });
+  }
+
   public withWorkingPlan(reference: WorkingPlanReference): AgentWorkspaceState {
     const statuses: WorkingPlanReference["status"][] = ["NOT_STARTED", "ACTIVE", "BLOCKED", "FINISHED"];
     if (!statuses.includes(reference.status)) throw new Error(`Invalid working plan status: ${reference.status}`);
@@ -165,6 +177,7 @@ export class AgentWorkspaceState {
       relevantPaths: [...(changes.relevantPaths ?? this.value.relevantPaths)],
       constraints: [...this.value.constraints],
       validationFacts: [...(changes.validationFacts ?? this.value.validationFacts)],
+      diagnosticComparisons: [...(changes.diagnosticComparisons ?? this.value.diagnosticComparisons)],
       ...(changes.workingPlan || this.value.workingPlan
         ? { workingPlan: { ...(changes.workingPlan ?? this.value.workingPlan!) } }
         : {}),
