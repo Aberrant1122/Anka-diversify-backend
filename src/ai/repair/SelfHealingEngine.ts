@@ -463,17 +463,21 @@ export class SelfHealingEngine {
             }
           }
         } else if (localPath && !isRepositoryMode) {
-          for (const change of currentChanges) {
-            try {
-              const abs = path.join(localPath, change.path);
-              if (change.action === "delete" || change.isDeleted) {
-                if (fs.existsSync(abs)) await fs.promises.rm(abs, { recursive: true, force: true });
-              } else {
-                await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-                await fs.promises.writeFile(abs, change.content, "utf8");
-              }
-            } catch {}
-          }
+          return {
+            finalChanges: currentChanges,
+            attempts: attempt,
+            success: false,
+            errorLog: "[CAPABILITY_POLICY_MISSING] Filesystem mutation requires a guarded FileSystemStateManager.",
+            infrastructureError: true,
+            errorType: "INFRA",
+            repairTrigger,
+            repairApplied,
+            repaired: attempt > 1 || repairApplied,
+            rootFailure,
+            buildAttemptsCount: buildAttempts,
+            modelRepairAttempts,
+            patchesAppliedCount,
+          };
         }
 
         if (localPath && commands.length > 0) {

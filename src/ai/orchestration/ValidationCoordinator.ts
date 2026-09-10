@@ -11,6 +11,7 @@ import { ValidationDetector } from "../validation/ValidationDetector";
 import { ValidationPlanner } from "../validation/ValidationPlanner";
 import { StageExecutionTransaction, StageVerificationGate } from "./StageExecutionTransaction";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
+import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 type RepairResult = Awaited<ReturnType<typeof SelfHealingEngine.runSelfHealingLoop>>;
 
@@ -26,6 +27,7 @@ export interface ValidationCoordinationInput {
   requestMessage: string;
   projectId: string;
   approvedManifest: FileManifest | null;
+  authorizedCapabilityScope?: AuthorizedCapabilityScope;
   onProgress?: (event: AgentProgressEvent) => void;
   baselineDiagnostics?: BaselineDiagnostic[];
   targetedBaselineDiagnostics?: BaselineDiagnostic[];
@@ -54,6 +56,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function createExecutionCapabilityGuard(input: ValidationCoordinationInput): CapabilityGuard {
+  if (!input.effectiveLocalPath || !input.authorizedCapabilityScope) return CapabilityGuard.denyAll();
+  return CapabilityGuard.create({
+    workspaceRoot: input.effectiveLocalPath,
+    scopeId: input.activeStageId,
+    authorizedScope: input.authorizedCapabilityScope,
+  });
+}
+
 /** Coordinates existing deterministic validation authorities and their transaction boundary. */
 export class ValidationCoordinator {
   public static async validate(input: ValidationCoordinationInput): Promise<ValidationCoordinationResult> {
@@ -80,6 +91,7 @@ export class ValidationCoordinator {
     const stageTransaction = await StageExecutionTransaction.startTransaction(
       input.activeStageId,
       input.effectiveLocalPath,
+      createExecutionCapabilityGuard(input),
     );
     const fsManager = stageTransaction.fsManager;
     let transactionCommitted = false;

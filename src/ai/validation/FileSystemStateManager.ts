@@ -1,11 +1,22 @@
 import fs from "fs";
 import path from "path";
 import { AgentFileChange } from "../shared/types";
+import { CapabilityAction, CapabilityDecision, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 export class RepairInfrastructureError extends Error {
   constructor(message: string, public readonly cause?: unknown) {
     super(message);
     this.name = "RepairInfrastructureError";
+  }
+}
+
+export class CapabilityAuthorizationError extends Error {
+  constructor(
+    public readonly code: Exclude<CapabilityDecision, { allowed: true }>["code"],
+    message: string,
+  ) {
+    super(message);
+    this.name = "CapabilityAuthorizationError";
   }
 }
 
@@ -53,8 +64,33 @@ export function assertSafeWorktreePath(targetPath: string, worktreeRoot: string)
   return resolvedTarget;
 }
 
+function canonicalMutationPath(targetPath: string, worktreeRoot: string): string {
+  const resolvedRoot = path.resolve(worktreeRoot);
+  const canonicalRoot = fs.realpathSync(resolvedRoot);
+  const resolvedTarget = path.resolve(resolvedRoot, targetPath);
+  let existingAncestor = resolvedTarget;
+  while (!fs.existsSync(existingAncestor)) {
+    const parent = path.dirname(existingAncestor);
+    if (parent === existingAncestor) throw new RepairInfrastructureError("Unable to resolve mutation target.");
+    existingAncestor = parent;
+  }
+  const canonicalAncestor = fs.realpathSync(existingAncestor);
+  const canonicalTarget = path.resolve(canonicalAncestor, path.relative(existingAncestor, resolvedTarget));
+  const relative = path.relative(canonicalRoot, canonicalTarget);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new RepairInfrastructureError(`Path safety violation: mutation target "${targetPath}" resolves outside the worktree.`);
+  }
+  return canonicalTarget;
+}
+
 export class FileSystemStateManager {
   private originalState: Map<string, string | null> = new Map();
+  private readonly authorizedMutationPaths = new Set<string>();
+
+  constructor(
+    private readonly capabilityGuard: CapabilityGuard = CapabilityGuard.denyAll(),
+    private readonly capabilityScopeId: string = "UNAUTHORIZED",
+  ) {}
 
   /**
    * Snapshot the current on-disk content of files affected by changes.
@@ -62,6 +98,8 @@ export class FileSystemStateManager {
    */
   async snapshot(changes: AgentFileChange[], localPath: string | null | undefined): Promise<void> {
     if (!localPath) return;
+
+    this.authorizeChanges(changes, localPath);
 
     for (const change of changes) {
       if (!change.path) continue;
@@ -101,21 +139,27 @@ export class FileSystemStateManager {
       throw new RepairInfrastructureError(`Cannot apply file changes: localPath "${localPath}" does not exist or is inaccessible.`, err);
     }
 
+    // Authorize the complete batch before snapshotting or performing any mutation.
+    this.authorizeChanges(changes, localPath);
+    for (const change of changes) this.authorizedMutationPaths.add(change.path.replace(/\\/g, "/"));
+
     // Ensure all changes being applied are snapshotted first if not already in originalState
     await this.snapshot(changes, localPath);
 
     for (const change of changes) {
       if (!change.path) continue;
-      const abs = assertSafeWorktreePath(change.path, localPath);
+      const abs = canonicalMutationPath(change.path, localPath);
 
       try {
         if (change.action === "delete" || change.isDeleted) {
-          if (fs.existsSync(abs)) {
-            await fs.promises.rm(abs, { recursive: true, force: true });
+          const finalAbs = canonicalMutationPath(change.path, localPath);
+          if (fs.existsSync(finalAbs)) {
+            await fs.promises.rm(finalAbs, { recursive: true, force: true });
           }
         } else {
           await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-          await fs.promises.writeFile(abs, change.content || "", "utf8");
+          const finalAbs = canonicalMutationPath(change.path, localPath);
+          await fs.promises.writeFile(finalAbs, change.content || "", "utf8");
         }
       } catch (err: any) {
         if (err instanceof RepairInfrastructureError) throw err;
@@ -131,15 +175,18 @@ export class FileSystemStateManager {
     if (!localPath || this.originalState.size === 0) return;
 
     for (const [relativePath, originalContent] of this.originalState.entries()) {
-      const absPath = assertSafeWorktreePath(relativePath, localPath);
+      if (!this.authorizedMutationPaths.has(relativePath)) continue;
+      const absPath = canonicalMutationPath(relativePath, localPath);
       try {
         if (originalContent === null) {
-          if (fs.existsSync(absPath)) {
-            await fs.promises.rm(absPath, { recursive: true, force: true });
+          const finalAbs = canonicalMutationPath(relativePath, localPath);
+          if (fs.existsSync(finalAbs)) {
+            await fs.promises.rm(finalAbs, { recursive: true, force: true });
           }
         } else {
           await fs.promises.mkdir(path.dirname(absPath), { recursive: true });
-          await fs.promises.writeFile(absPath, originalContent, "utf8");
+          const finalAbs = canonicalMutationPath(relativePath, localPath);
+          await fs.promises.writeFile(finalAbs, originalContent, "utf8");
         }
       } catch (err) {
         console.error(`[FileSystemStateManager] Failed to rollback file "${relativePath}":`, err);
@@ -152,6 +199,7 @@ export class FileSystemStateManager {
    */
   commit(): void {
     this.originalState.clear();
+    this.authorizedMutationPaths.clear();
   }
 
   getSnapshotSize(): number {
@@ -166,5 +214,24 @@ export class FileSystemStateManager {
   hasOriginalFile(relativePath: string): boolean {
     const normalized = relativePath.replace(/\\/g, "/");
     return this.originalState.has(normalized);
+  }
+
+  private authorizeChanges(changes: AgentFileChange[], localPath: string): void {
+    for (const change of changes) {
+      assertSafeWorktreePath(change.path, localPath);
+      const action: CapabilityAction = change.action === "delete" || change.isDeleted
+        ? "FILE_DELETE"
+        : change.action === "create" || change.action === "modify" || change.action === undefined
+          ? fs.existsSync(path.resolve(localPath, change.path))
+            ? "FILE_MODIFY"
+            : "FILE_CREATE"
+          : `FILE_${String(change.action).toUpperCase()}` as CapabilityAction;
+      const decision = this.capabilityGuard.authorize({ action, path: change.path, scopeId: this.capabilityScopeId });
+      if (!decision.allowed) {
+        if ("technical" in decision) throw new RepairInfrastructureError(`[${decision.code}] ${decision.reason}`, decision.cause);
+        throw new CapabilityAuthorizationError(decision.code, `[${decision.code}] ${decision.reason}`);
+      }
+      canonicalMutationPath(change.path, localPath);
+    }
   }
 }

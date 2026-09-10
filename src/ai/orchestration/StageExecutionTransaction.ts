@@ -5,6 +5,7 @@ import { AgentFileChange, AgentResponse, ChatRequest, AgentProgressEvent } from 
 import { TaskExecutionPlan, TaskExecutionStage } from "../shared/TaskExecutionPlan";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { RepositoryStateRefresher } from "../repository/RepositoryStateRefresher";
+import { CapabilityGuard } from "../runtime/CapabilityGuard";
 
 const IGNORED_DIRS = new Set([
   ".git",
@@ -96,12 +97,13 @@ export class StageExecutionTransaction {
    */
   public static async startTransaction(
     stageId: string,
-    localPath?: string | null
+    localPath?: string | null,
+    capabilityGuard: CapabilityGuard = CapabilityGuard.denyAll(),
   ): Promise<StageExecutionTransaction> {
     const checkpointId = `chk_${stageId}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const initialFiles = new Set<string>();
     const initialContentMap = new Map<string, string>();
-    const fsManager = new FileSystemStateManager();
+    const fsManager = new FileSystemStateManager(capabilityGuard, stageId);
 
     const normalizedLocalPath = localPath ? path.resolve(localPath) : null;
 
@@ -184,36 +186,8 @@ export class StageExecutionTransaction {
       console.error(`[StageTransaction] fsManager.rollback error for stage "${this.checkpoint.stageId}":`, err);
     }
 
-    // 2. Exact filesystem reconciliation: remove untracked files created during the stage
+    // All rollback writes are restricted to paths previously authorized and touched by fsManager.
     if (fs.existsSync(localPath)) {
-      const currentFiles = collectTrackedFiles(localPath);
-      for (const file of currentFiles) {
-        if (!this.checkpoint.initialFiles.has(file)) {
-          const absPath = path.join(localPath, file);
-          try {
-            if (fs.existsSync(absPath)) {
-              fs.rmSync(absPath, { force: true, recursive: true });
-            }
-          } catch (e) {
-            console.error(`[StageTransaction] Failed to remove created file "${file}":`, e);
-          }
-        }
-      }
-
-      // 3. Exact filesystem reconciliation: restore deleted files that existed at stage start
-      for (const file of this.checkpoint.initialFiles) {
-        const absPath = path.join(localPath, file);
-        const originalContent = this.checkpoint.initialContentMap.get(file);
-        if (originalContent !== undefined && !fs.existsSync(absPath)) {
-          try {
-            fs.mkdirSync(path.dirname(absPath), { recursive: true });
-            fs.writeFileSync(absPath, originalContent, "utf8");
-          } catch (e) {
-            console.error(`[StageTransaction] Failed to restore deleted file "${file}":`, e);
-          }
-        }
-      }
-
       try {
         await RepositoryStateRefresher.onRollback({
           projectId: this.checkpoint.stageId,

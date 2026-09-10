@@ -3,6 +3,7 @@ import path from "path";
 import os from "os";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { AgentFileChange } from "../shared/types";
+import { AuthorizedCapabilityScope, CapabilityAction, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", () => {
   let tempDir: string;
@@ -17,6 +18,30 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
     }
   });
 
+  function authorizedManager(changes: AgentFileChange[]): FileSystemStateManager {
+    const grants = changes.map((change) => ({
+      path: change.path,
+      action: (change.action === "delete" || change.isDeleted
+        ? "FILE_DELETE"
+        : change.action === "create"
+          ? "FILE_CREATE"
+          : fs.existsSync(path.join(tempDir, change.path))
+            ? "FILE_MODIFY"
+            : "FILE_CREATE") as CapabilityAction,
+    }));
+    const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "phase-a-test-configuration",
+      grants,
+    });
+    return new FileSystemStateManager(
+      authorizedScope
+        ? CapabilityGuard.create({ workspaceRoot: tempDir, scopeId: "phase-a-test", authorizedScope })
+        : CapabilityGuard.denyAll(),
+      "phase-a-test",
+    );
+  }
+
   it("TEST A: SelfHealingEngine throws after filesystem mutation -> rollback occurs, commit does NOT occur", async () => {
     const existingFile = path.join(tempDir, "src/index.ts");
     fs.mkdirSync(path.dirname(existingFile), { recursive: true });
@@ -26,7 +51,7 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
       { path: "src/index.ts", content: "console.log('mutated');", description: "test" },
     ];
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedManager(changes);
     await fsManager.snapshot(changes, tempDir);
     await fsManager.apply(changes, tempDir);
 
@@ -66,7 +91,7 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
       { path: "src/index.ts", content: "console.log('mutated');", description: "test" },
     ];
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedManager(changes);
     await fsManager.snapshot(changes, tempDir);
     await fsManager.apply(changes, tempDir);
 
@@ -106,7 +131,7 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
       { path: "src/index.ts", content: "console.log('mutated');", description: "test" },
     ];
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedManager(changes);
     await fsManager.snapshot(changes, tempDir);
     await fsManager.apply(changes, tempDir);
 
@@ -146,7 +171,7 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
       { path: "src/index.ts", content: "console.log('mutated');", description: "test" },
     ];
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedManager(changes);
     await fsManager.snapshot(changes, tempDir);
     await fsManager.apply(changes, tempDir);
 
@@ -186,7 +211,7 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
       { path: "src/index.ts", content: "eval(req.body);", description: "security issue" },
     ];
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedManager(changes);
     await fsManager.snapshot(changes, tempDir);
     await fsManager.apply(changes, tempDir);
 
@@ -226,7 +251,7 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
       { path: "src/index.ts", content: "import { missing } from './missing';", description: "broken import" },
     ];
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedManager(changes);
     await fsManager.snapshot(changes, tempDir);
     await fsManager.apply(changes, tempDir);
 
@@ -266,7 +291,7 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
       { path: "src/index.ts", content: "console.log('valid');", description: "clean update" },
     ];
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedManager(changes);
     const commitSpy = jest.spyOn(fsManager, "commit");
     const rollbackSpy = jest.spyOn(fsManager, "rollback");
 
@@ -301,8 +326,8 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
   });
 
   it("TEST H: Rollback itself throws -> original failure remains represented, rollback failure is explicitly surfaced", async () => {
-    const fsManager = new FileSystemStateManager();
     const changes: AgentFileChange[] = [{ path: "file.txt", content: "data", description: "test" }];
+    const fsManager = authorizedManager(changes);
 
     await fsManager.snapshot(changes, tempDir);
 

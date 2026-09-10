@@ -26,6 +26,7 @@ import { DiagnosticNormalizer, NormalizedDiagnostic } from "../validation/Diagno
 import { RepositoryObserver } from "./RepositoryObserver";
 import { AgentPlanner } from "./AgentPlanner";
 import { ValidationCoordinator } from "./ValidationCoordinator";
+import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
 
 export class AgentPipeline {
   static async runCodingAgent(
@@ -40,6 +41,7 @@ export class AgentPipeline {
       isBaselineDeltaTask?: boolean;
       baseCommitSha?: string;
       baselineBuildPassed?: boolean;
+      authorizedCapabilityScope?: AuthorizedCapabilityScope;
       [key: string]: any;
     },
   ): Promise<AgentResponse> {
@@ -678,6 +680,7 @@ export class AgentPipeline {
       requestMessage: request.message,
       projectId,
       approvedManifest,
+      authorizedCapabilityScope: options?.authorizedCapabilityScope,
       onProgress,
       baselineDiagnostics: options?.baselineDiagnostics,
       targetedBaselineDiagnostics: options?.targetedBaselineDiagnostics,

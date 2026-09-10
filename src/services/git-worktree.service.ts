@@ -22,6 +22,7 @@ import {
   DiagnosticBaselineComparison,
   DiagnosticValidationSnapshot,
 } from "../ai/runtime/BaselineDiagnosticVerifier";
+import { AuthorizedCapabilityScope, CapabilityGrant } from "../ai/runtime/CapabilityGuard";
 
 const execAsync = promisify(exec);
 
@@ -65,6 +66,7 @@ export interface RunIsolatedAgentOptions {
   repositoryPath: string;
   runId: string;
   request: ChatRequest;
+  authorizedCapabilities?: readonly CapabilityGrant[];
   onProgress?: (event: AgentProgressEvent) => void;
 }
 
@@ -83,6 +85,23 @@ export class GitWorktreeService {
    */
   public static isRunActive(runId: string): boolean {
     return this.activeRuns.has(runId);
+  }
+
+  /**
+   * Binds independently supplied task grants to the deterministic isolated
+   * worktree boundary. Containment alone never creates write authority.
+   */
+  public static createIsolatedCapabilityScope(
+    worktreePath: string,
+    runId: string,
+    authorizedCapabilities?: readonly CapabilityGrant[],
+  ): AuthorizedCapabilityScope | null {
+    if (!authorizedCapabilities || authorizedCapabilities.length === 0) return null;
+    return AuthorizedCapabilityScope.fromIsolatedWorktree({
+      workspaceRoot: worktreePath,
+      authorityId: `isolated-worktree:${runId}`,
+      grants: authorizedCapabilities,
+    });
   }
 
   /**
@@ -660,6 +679,11 @@ export class GitWorktreeService {
           onProgress,
           {
             effectiveLocalPath: prepared.worktreePath,
+            authorizedCapabilityScope: this.createIsolatedCapabilityScope(
+              prepared.worktreePath,
+              runId,
+              options.authorizedCapabilities,
+            ) ?? undefined,
             baselineDiagnostics,
             targetedBaselineDiagnostics,
             isBaselineDeltaTask,

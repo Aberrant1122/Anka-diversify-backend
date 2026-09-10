@@ -1,5 +1,3 @@
-import fs from "fs";
-import path from "path";
 import { AgentFileChange, ExecutionContract } from "../shared/types";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
@@ -150,17 +148,11 @@ export class BuildErrorRepair {
           if (fsManager) {
             await fsManager.apply(merged, localPath);
           } else {
-            for (const change of merged) {
-              try {
-                const abs = path.join(localPath, change.path);
-                if (change.action === "delete" || change.isDeleted) {
-                  if (fs.existsSync(abs)) await fs.promises.rm(abs, { recursive: true, force: true });
-                } else {
-                  await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-                  await fs.promises.writeFile(abs, change.content, "utf8");
-                }
-              } catch {}
-            }
+            return {
+              finalChanges: changes,
+              success: false,
+              errorLog: "[CAPABILITY_POLICY_MISSING] Build repair mutation requires a guarded FileSystemStateManager.",
+            };
           }
 
           const val = await ValidationRunner.validateWithShell(merged, localPath, commands);

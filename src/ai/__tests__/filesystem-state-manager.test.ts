@@ -3,6 +3,7 @@ import path from "path";
 import os from "os";
 import { FileSystemStateManager, RepairInfrastructureError } from "../validation/FileSystemStateManager";
 import { AgentFileChange } from "../shared/types";
+import { AuthorizedCapabilityScope, CapabilityAction, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 describe("FileSystemStateManager", () => {
   let tempDir: string;
@@ -17,6 +18,30 @@ describe("FileSystemStateManager", () => {
     }
   });
 
+  function authorizedManager(changes: AgentFileChange[]): FileSystemStateManager {
+    const grants = changes.map((change) => ({
+      path: change.path,
+      action: (change.action === "delete" || change.isDeleted
+        ? "FILE_DELETE"
+        : change.action === "create"
+          ? "FILE_CREATE"
+          : fs.existsSync(path.join(tempDir, change.path))
+            ? "FILE_MODIFY"
+            : "FILE_CREATE") as CapabilityAction,
+    }));
+    const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "filesystem-state-manager-test",
+      grants,
+    });
+    return new FileSystemStateManager(
+      authorizedScope
+        ? CapabilityGuard.create({ workspaceRoot: tempDir, scopeId: "test", authorizedScope })
+        : CapabilityGuard.denyAll(),
+      "test",
+    );
+  }
+
   it("should snapshot existing files and new files as null", async () => {
     const existingFile = path.join(tempDir, "existing.txt");
     fs.writeFileSync(existingFile, "original content", "utf8");
@@ -26,7 +51,7 @@ describe("FileSystemStateManager", () => {
       { path: "new-file.txt", content: "brand new content", description: "test" },
     ];
 
-    const manager = new FileSystemStateManager();
+    const manager = authorizedManager(changes);
     await manager.snapshot(changes, tempDir);
 
     expect(manager.getSnapshotSize()).toBe(2);
@@ -41,7 +66,7 @@ describe("FileSystemStateManager", () => {
       { path: "created.txt", content: "hello world", description: "test" },
     ];
 
-    const manager = new FileSystemStateManager();
+    const manager = authorizedManager(changes);
     await manager.apply(changes, tempDir);
 
     expect(fs.readFileSync(existingFile, "utf8")).toBe("updated content");
@@ -49,8 +74,8 @@ describe("FileSystemStateManager", () => {
   });
 
   it("should throw RepairInfrastructureError if localPath is null or invalid directory", async () => {
-    const manager = new FileSystemStateManager();
     const changes: AgentFileChange[] = [{ path: "foo.txt", content: "bar", description: "test" }];
+    const manager = authorizedManager(changes);
 
     await expect(manager.apply(changes, null)).rejects.toThrow(RepairInfrastructureError);
     await expect(manager.apply(changes, path.join(tempDir, "non-existent-folder"))).rejects.toThrow(RepairInfrastructureError);
@@ -66,7 +91,7 @@ describe("FileSystemStateManager", () => {
       { path: "src/new-feature.ts", content: "export const x = 1;", description: "test" },
     ];
 
-    const manager = new FileSystemStateManager();
+    const manager = authorizedManager(changes);
     await manager.snapshot(changes, tempDir);
     await manager.apply(changes, tempDir);
 
@@ -81,8 +106,8 @@ describe("FileSystemStateManager", () => {
   });
 
   it("should clear snapshot state on commit", async () => {
-    const manager = new FileSystemStateManager();
     const changes: AgentFileChange[] = [{ path: "file.txt", content: "data", description: "test" }];
+    const manager = authorizedManager(changes);
 
     await manager.snapshot(changes, tempDir);
     expect(manager.getSnapshotSize()).toBe(1);

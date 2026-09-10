@@ -5,6 +5,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { GitWorktreeService, PreparedRepositoryRun } from "../../services/git-worktree.service";
 import { FileSystemStateManager, RepairInfrastructureError, assertSafeWorktreePath } from "../validation/FileSystemStateManager";
+import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import { verifyFileVersionsFromDisk, sha256 } from "../validation/FileVersionGuard";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
@@ -17,6 +18,23 @@ import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { AgentFileChange, ExecutionContract, FileManifest } from "../shared/types";
 
 const execAsync = promisify(exec);
+
+function isolatedWorktreeManager(worktreePath: string, scopeId: string): FileSystemStateManager {
+  const authorizedScope = AuthorizedCapabilityScope.fromIsolatedWorktree({
+    workspaceRoot: worktreePath,
+    authorityId: `test-isolated-worktree:${scopeId}`,
+    grants: [
+      { path: "src/index.ts", action: "FILE_MODIFY" },
+      { path: "src/helper.ts", action: "FILE_MODIFY" },
+      { path: "src/new.ts", action: "FILE_CREATE" },
+    ],
+  });
+  if (!authorizedScope) throw new Error("Test worktree authority must be valid");
+  return new FileSystemStateManager(
+    CapabilityGuard.create({ workspaceRoot: worktreePath, scopeId, authorizedScope }),
+    scopeId,
+  );
+}
 
 jest.mock("@prisma/client", () => {
   return {
@@ -138,7 +156,7 @@ describe("AI Step 12 — Safe Real Repository Execution & Git Worktree Isolation
     const sourceInitialBytes = fs.readFileSync(sourceIndexPath, "utf8");
 
     // Apply change strictly to worktree
-    const manager = new FileSystemStateManager();
+    const manager = isolatedWorktreeManager(prepared.worktreePath, runId);
     const changes: AgentFileChange[] = [
       {
         path: "src/index.ts",
@@ -190,7 +208,7 @@ describe("AI Step 12 — Safe Real Repository Execution & Git Worktree Isolation
     });
     createdWorktrees.push(prepared.worktreePath);
 
-    const manager = new FileSystemStateManager();
+    const manager = isolatedWorktreeManager(prepared.worktreePath, runId);
 
     // Relative escape
     expect(() => assertSafeWorktreePath("../outside.ts", prepared.worktreePath)).toThrow(RepairInfrastructureError);
@@ -213,7 +231,7 @@ describe("AI Step 12 — Safe Real Repository Execution & Git Worktree Isolation
     });
     createdWorktrees.push(prepared.worktreePath);
 
-    const manager = new FileSystemStateManager();
+    const manager = isolatedWorktreeManager(prepared.worktreePath, runId);
 
     const protectedPaths = [
       ".git/config",

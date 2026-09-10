@@ -7,10 +7,51 @@ import { decrypt } from "../utils/encryption";
 import { listActiveReservations } from "../services/file-reservation-service";
 import { RepositoryMaterializationService } from "../services/repository-materialization.service";
 import { MultiRepoCoordinator } from "../ai/coordination/MultiRepoCoordinator";
+import { CapabilityAction, CapabilityGrant } from "../ai/runtime/CapabilityGuard";
 
 const prisma = new PrismaClient();
 
 const aiService = AiService.getInstance();
+
+const CAPABILITY_ACTIONS = new Set<CapabilityAction>(["FILE_CREATE", "FILE_MODIFY", "FILE_DELETE"]);
+
+interface CodingAgentInvocation {
+  request: ChatRequest;
+  authorizedCapabilities?: readonly CapabilityGrant[];
+}
+
+function parseCodingAgentInvocation(body: unknown): CodingAgentInvocation | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const input = body as Record<string, unknown>;
+  if (typeof input.message !== "string" || input.message.trim().length === 0) return null;
+
+  let authorizedCapabilities: CapabilityGrant[] | undefined;
+  if (input.authorizedCapabilities !== undefined) {
+    if (!Array.isArray(input.authorizedCapabilities)) return null;
+    authorizedCapabilities = [];
+    for (const value of input.authorizedCapabilities) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const grant = value as Record<string, unknown>;
+      if (
+        typeof grant.path !== "string"
+        || grant.path.trim().length === 0
+        || typeof grant.action !== "string"
+        || !CAPABILITY_ACTIONS.has(grant.action as CapabilityAction)
+      ) {
+        return null;
+      }
+      authorizedCapabilities.push({ path: grant.path, action: grant.action as CapabilityAction });
+    }
+  }
+
+  const request: ChatRequest = { message: input.message };
+  if (typeof input.sessionId === "string") request.sessionId = input.sessionId;
+  if (typeof input.repositoryId === "string") request.repositoryId = input.repositoryId;
+  if (input.context && typeof input.context === "object" && !Array.isArray(input.context)) {
+    request.context = input.context as Record<string, unknown>;
+  }
+  return { request, authorizedCapabilities };
+}
 
 export class AiController {
   // General Assistant Routes
@@ -366,11 +407,20 @@ export class AiController {
       if (!userId) return res.status(401).json({ error: "Authentication required" });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
+      const invocation = parseCodingAgentInvocation(req.body);
+      if (!invocation) return res.status(400).json({ error: "A valid message and authorizedCapabilities are required" });
+
       if (req.headers.accept?.includes("text/event-stream") || req.query.stream === "true") {
         return this.streamAgent(req, res);
       }
 
-      const result = await aiService.runCodingAgent(userId, projectId, req.body);
+      const result = await aiService.runCodingAgent(
+        userId,
+        projectId,
+        invocation.request,
+        undefined,
+        invocation.authorizedCapabilities,
+      );
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Agent run error:", error);
@@ -388,6 +438,9 @@ export class AiController {
       if (!userId) return res.status(401).json({ error: "Authentication required" });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
+      const invocation = parseCodingAgentInvocation(req.body);
+      if (!invocation) return res.status(400).json({ error: "A valid message and authorizedCapabilities are required" });
+
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -402,10 +455,11 @@ export class AiController {
       const result = await aiService.runCodingAgent(
         userId,
         projectId,
-        req.body,
+        invocation.request,
         (progressEvent: any) => {
           sendEvent("progress", progressEvent);
-        }
+        },
+        invocation.authorizedCapabilities,
       );
 
       sendEvent("complete", result);

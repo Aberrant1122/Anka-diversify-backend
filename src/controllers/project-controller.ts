@@ -8,6 +8,8 @@ import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
 import { RepositoryMaterializationService } from "../services/repository-materialization.service";
+import { AuthorizedCapabilityScope, CapabilityGuard } from "../ai/runtime/CapabilityGuard";
+import { FileSystemStateManager } from "../ai/validation/FileSystemStateManager";
 const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
@@ -293,23 +295,32 @@ export class ProjectController {
       if (!project?.localPath) {
         return res.status(400).json({ success: false, error: "No local path configured for this project" });
       }
+      const localPath = project.localPath;
 
       const { changes } = req.body as { changes: { path: string; content: string }[] };
       if (!changes?.length) {
         return res.status(400).json({ success: false, error: "No changes provided" });
       }
 
-      const written: string[] = [];
-      for (const change of changes) {
-        const abs = path.join(project.localPath, change.path);
-        // Prevent path traversal outside localPath
-        if (!abs.startsWith(path.resolve(project.localPath))) {
-          return res.status(400).json({ success: false, error: `Invalid path: ${change.path}` });
-        }
-        await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-        await fs.promises.writeFile(abs, change.content, "utf8");
-        written.push(change.path);
-      }
+      const capabilityScopeId = `project:${param(req, "id")}`;
+      const authorizedCapabilityScope = AuthorizedCapabilityScope.fromAuthenticatedProject({
+        workspaceRoot: localPath,
+        authorityId: `authenticated-local-edit:${capabilityScopeId}`,
+        grants: changes.map((change) => ({
+          path: change.path,
+          action: fs.existsSync(path.resolve(localPath, change.path))
+            ? "FILE_MODIFY" as const
+            : "FILE_CREATE" as const,
+        })),
+      });
+      const manager = new FileSystemStateManager(
+        authorizedCapabilityScope
+          ? CapabilityGuard.create({ workspaceRoot: localPath, scopeId: capabilityScopeId, authorizedScope: authorizedCapabilityScope })
+          : CapabilityGuard.denyAll(),
+        capabilityScopeId,
+      );
+      await manager.apply(changes.map((change) => ({ ...change, description: "Authenticated local edit" })), localPath);
+      const written = changes.map((change) => change.path);
 
       res.json({ success: true, data: { written } });
     } catch (error) {

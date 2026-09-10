@@ -5,6 +5,7 @@ import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { PullRequestReviewer } from "../github/PullRequestReviewer";
 import { PullRequestDescription } from "../github/PullRequestDescription";
 import { ChatRequest, ChatResponse, AgentProgressEvent, AgentResponse, ProjectHealth, PRReview } from "../shared/types";
+import { CapabilityGrant } from "../runtime/CapabilityGuard";
 
 export class AiService {
   private static instance: AiService;
@@ -34,8 +35,9 @@ export class AiService {
     projectId: string,
     request: ChatRequest,
     onProgress?: (event: AgentProgressEvent) => void,
+    authorizedCapabilities?: readonly CapabilityGrant[],
   ): Promise<AgentResponse> {
-    return CodingAgent.runCodingAgent(userId, projectId, request, onProgress);
+    return CodingAgent.runCodingAgent(userId, projectId, request, onProgress, { authorizedCapabilities });
   }
 
   async getProjectHealth(projectId: string): Promise<ProjectHealth> {

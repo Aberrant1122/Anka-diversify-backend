@@ -9,6 +9,7 @@ import { prisma } from "../../services/database";
 import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
 import { TaskRuntime, VerifiedCompletionReceipt } from "../runtime/TaskRuntime";
 import { runWithTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
+import { AuthorizedCapabilityScope, CapabilityGrant } from "../runtime/CapabilityGuard";
 
 export interface CodingAgentInternalOptions {
   /**
@@ -22,6 +23,11 @@ export interface CodingAgentInternalOptions {
    * Internal-only override path for trusted execution harnesses.
    */
   effectiveLocalPath?: string;
+  /**
+   * Explicit task write authority supplied by trusted backend code. This is a
+   * separate argument so ChatRequest/model data cannot create or widen it.
+   */
+  authorizedCapabilities?: readonly CapabilityGrant[];
 }
 
 export class CodingAgent {
@@ -45,8 +51,16 @@ export class CodingAgent {
 
     // 1. Trusted internal-only direct execution path (used by EvalRunner and explicit test fixtures)
     if (internalOptions?.allowDirectExecution || internalOptions?.effectiveLocalPath) {
+      const directScope = internalOptions.effectiveLocalPath && internalOptions.authorizedCapabilities
+        ? AuthorizedCapabilityScope.fromBackendConfiguration({
+            workspaceRoot: internalOptions.effectiveLocalPath,
+            authorityId: `trusted-direct-execution:${projectId}`,
+            grants: internalOptions.authorizedCapabilities,
+          }) ?? undefined
+        : undefined;
       return AgentPipeline.runCodingAgent(userId, projectId, request, onProgress, {
         effectiveLocalPath: internalOptions.effectiveLocalPath,
+        authorizedCapabilityScope: directScope,
       });
     }
 
@@ -169,6 +183,7 @@ export class CodingAgent {
           repositoryPath: gitRoot,
           runId,
           request,
+          authorizedCapabilities: internalOptions?.authorizedCapabilities,
           onProgress,
         })
       );
