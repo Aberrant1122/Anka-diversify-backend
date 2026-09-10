@@ -1,7 +1,8 @@
 import { PrismaClient } from "@prisma/client";
-import { getOpenAI } from "../shared/utils";
 import { GitHubService } from "./GitHubService";
 import { decrypt } from "../../utils/encryption";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
 
 const prisma = new PrismaClient();
 
@@ -22,12 +23,11 @@ export class PullRequestDescription {
       ? `Branch: ${pr.headBranch} → ${pr.baseBranch}\nChanged files: ${pr.changedFiles}, +${pr.additions} -${pr.deletions} lines`
       : `PR #${prNumber}`;
 
-    const openai = getOpenAI();
-    const completion = await openai.chat.completions.create({
+    const result = await LLMGateway.getInstance().callStructured<{ title: string; description: string }>({
+      stage: PipelineStages.SUMMARIZATION,
       model: "gpt-4o",
       temperature: 0.4,
-      max_tokens: 800,
-      response_format: { type: "json_object" },
+      maxTokens: 800,
       messages: [
         {
           role: "system",
@@ -39,13 +39,26 @@ Return JSON: { "title": "concise PR title under 72 chars", "description": "markd
           content: `${prMeta}\n\n--- DIFF ---\n${diff.slice(0, 8000)}`,
         },
       ],
+      schema: {
+        name: "PullRequestDescriptionSchema",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["title", "description"],
+          properties: {
+            title: { type: "string", minLength: 1, maxLength: 72 },
+            description: { type: "string", minLength: 1 },
+          },
+        },
+        validate: (value: unknown) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Description must be an object"] };
+          const description = value as Record<string, unknown>;
+          if (Object.keys(description).some((key) => !["title", "description"].includes(key)) || typeof description.title !== "string" || !description.title.trim() || description.title.length > 72 || typeof description.description !== "string" || !description.description.trim()) return { valid: false, errors: ["Description fields are invalid"] };
+          return { valid: true, data: description as unknown as { title: string; description: string } };
+        },
+      },
     });
-
-    const raw = completion.choices[0]?.message?.content ?? "{}";
-    try {
-      return JSON.parse(raw) as { title: string; description: string };
-    } catch {
-      return { title: pr?.title || `PR #${prNumber}`, description: "Could not generate description." };
-    }
+    return result.content;
   }
 }

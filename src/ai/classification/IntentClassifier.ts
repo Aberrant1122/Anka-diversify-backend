@@ -3,6 +3,10 @@ import { INTENT_CLASSIFIER_PROMPT } from "../prompts/classification";
 import { TaskType, TaskRisk, TaskComplexity, TaskClassificationResult } from "./TaskTypes";
 import { DestructiveSafetyEvaluator } from "./DestructiveSafetyEvaluator";
 import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
+import { ClarificationPolicy } from "../gateway/ClarificationPolicy";
+import { AgentOutcomeType } from "../gateway/AgentOutcome";
 
 const VALID_TASK_TYPES = new Set<TaskType>([
   "DELETE_FOLDER",
@@ -18,17 +22,37 @@ const VALID_TASK_TYPES = new Set<TaskType>([
 
 const VALID_RISKS = new Set<TaskRisk>(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
 const VALID_COMPLEXITIES = new Set<TaskComplexity>(["SMALL", "MEDIUM", "LARGE", "COMPLEX"]);
+const VALID_INTENTS = new Set<TaskClassificationResult["intent"]>([
+  "BUG_FIX", "FEATURE_ADD", "REFACTOR", "DOCS", "OPTIMIZATION", "DELETE_FOLDER",
+  "DELETE_FILE", "NEW_FEATURE", "UNKNOWN", "CLASSIFICATION_FAILED",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function onlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const set = new Set(allowed);
+  return Object.keys(value).every((key) => set.has(key));
+}
+
+function isSafeRelativePath(value: unknown): boolean {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\0")) return false;
+  const normalized = value.replace(/\\/g, "/");
+  return !normalized.startsWith("/") && !/^[A-Za-z]:\//.test(normalized) && normalized.split("/").every((part) => part && part !== "." && part !== "..");
+}
 
 export class IntentClassifier {
   /**
    * Classifies user intent and evaluates ambiguity.
    *
    * Invariants (Phase 1B):
-   * 1. LLM structured classification is the ONLY semantic authority.
+   * 1. LLM structured classification via LLMGateway is the ONLY semantic authority.
    * 2. No prompt keywords or regex overrides decide taskType, risk, complexity, intent, or target path.
    * 3. Explicit literal file paths supplied by user are parsed deterministically.
    * 4. If LLM result is unavailable or malformed, fails closed with UNKNOWN / CLASSIFICATION_FAILED.
    * 5. Destructive safety checks execute deterministically only after structured intent is established.
+   * 6. Provider/technical errors NEVER produce user clarification requests.
    */
   static async classifyIntentAndAmbiguity(
     message: string,
@@ -47,9 +71,23 @@ export class IntentClassifier {
       .map((p) => p.path);
 
     try {
-      const openai = openaiClient || getOpenAI();
-      const completion = await openai.chat.completions.create({
+      const gateway = LLMGateway.getInstance();
+      const structuredRes = await gateway.callStructured<{
+        taskType: TaskType;
+        risk: TaskRisk;
+        estimatedComplexity: TaskComplexity;
+        intent: string;
+        targetPath?: string | string[];
+        confidence: number;
+        requiresClarification: boolean;
+        question?: string;
+        options?: string[];
+        reasoning: string;
+        stages?: any[];
+      }>({
+        stage: PipelineStages.INTENT_CLASSIFICATION,
         model: "gpt-4o",
+        openaiClient,
         messages: [
           { role: "system", content: INTENT_CLASSIFIER_PROMPT },
           {
@@ -58,33 +96,91 @@ export class IntentClassifier {
           },
         ],
         temperature: 0.1,
-        response_format: { type: "json_object" },
+        schema: {
+          name: "IntentClassificationSchema",
+          strict: false,
+          schema: {
+            type: "object",
+            properties: {
+              taskType: {
+                type: "string",
+                enum: Array.from(VALID_TASK_TYPES),
+              },
+              risk: {
+                type: "string",
+                enum: Array.from(VALID_RISKS),
+              },
+              estimatedComplexity: {
+                type: "string",
+                enum: Array.from(VALID_COMPLEXITIES),
+              },
+              intent: { type: "string" },
+              targetPath: {
+                anyOf: [
+                  { type: "string" },
+                  { type: "array", items: { type: "string" } },
+                ],
+              },
+              confidence: { type: "number" },
+              requiresClarification: { type: "boolean" },
+              question: { type: "string" },
+              options: { type: "array", items: { type: "string" } },
+              reasoning: { type: "string" },
+              stages: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: "string" },
+                    taskType: { type: "string" },
+                    goal: { type: "string" },
+                    targetPath: { type: "string" },
+                    dependsOn: { type: "array", items: { type: "string" } },
+                  },
+                  required: ["id", "taskType", "goal", "dependsOn"],
+                },
+              },
+            },
+            required: ["taskType", "risk", "estimatedComplexity", "intent", "confidence", "requiresClarification", "reasoning"],
+            additionalProperties: false,
+          },
+          validate: (parsed) => {
+            if (!isRecord(parsed) || !onlyKeys(parsed, ["taskType", "risk", "estimatedComplexity", "intent", "targetPath", "confidence", "requiresClarification", "question", "options", "reasoning", "stages"])) return { valid: false, errors: ["Parsed intent output contains invalid fields"] };
+            if (!VALID_TASK_TYPES.has(parsed.taskType as TaskType)) return { valid: false, errors: [`Invalid or missing taskType: ${parsed.taskType}`] };
+            if (!VALID_RISKS.has(parsed.risk as TaskRisk)) return { valid: false, errors: ["Invalid or missing risk"] };
+            if (!VALID_COMPLEXITIES.has(parsed.estimatedComplexity as TaskComplexity)) return { valid: false, errors: ["Invalid or missing estimatedComplexity"] };
+            if (!VALID_INTENTS.has(parsed.intent as TaskClassificationResult["intent"])) return { valid: false, errors: ["Invalid or missing intent"] };
+            if (typeof parsed.confidence !== "number" || !Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1) return { valid: false, errors: ["Invalid or missing confidence"] };
+            if (typeof parsed.requiresClarification !== "boolean") return { valid: false, errors: ["Invalid or missing clarification flag"] };
+            if (typeof parsed.reasoning !== "string" || !parsed.reasoning.trim() || (parsed.question !== undefined && (typeof parsed.question !== "string" || !parsed.question.trim()))) return { valid: false, errors: ["Invalid narrative field"] };
+            if (parsed.options !== undefined && (!Array.isArray(parsed.options) || parsed.options.some((item) => typeof item !== "string" || !item.trim()))) return { valid: false, errors: ["Invalid clarification options"] };
+            const paths = Array.isArray(parsed.targetPath) ? parsed.targetPath : parsed.targetPath === undefined ? [] : [parsed.targetPath];
+            if (paths.some((item) => !isSafeRelativePath(item))) return { valid: false, errors: ["Invalid targetPath"] };
+            if (parsed.stages !== undefined) {
+              if (!Array.isArray(parsed.stages) || parsed.stages.length === 0) return { valid: false, errors: ["Invalid stages"] };
+              const ids = new Set<string>();
+              for (const stage of parsed.stages) {
+                if (!isRecord(stage) || !onlyKeys(stage, ["id", "taskType", "goal", "targetPath", "dependsOn"]) || typeof stage.id !== "string" || !stage.id.trim() || ids.has(stage.id) || !VALID_TASK_TYPES.has(stage.taskType as TaskType) || typeof stage.goal !== "string" || !stage.goal.trim() || (stage.targetPath !== undefined && !isSafeRelativePath(stage.targetPath)) || !Array.isArray(stage.dependsOn) || stage.dependsOn.some((id) => typeof id !== "string" || !id.trim() || id === stage.id)) return { valid: false, errors: ["Invalid stage decomposition"] };
+                ids.add(stage.id);
+              }
+              if (parsed.stages.some((stage: any) => stage.dependsOn.some((id: string) => !ids.has(id)))) return { valid: false, errors: ["Stage dependency references an unknown ID"] };
+            }
+            return { valid: true };
+          },
+        },
       });
 
-      const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
-
-      // Strict schema validation of LLM output
-      if (!parsed.taskType || !VALID_TASK_TYPES.has(parsed.taskType)) {
-        return {
-          taskType: "UNKNOWN",
-          risk: "HIGH",
-          estimatedComplexity: "COMPLEX",
-          intent: "CLASSIFICATION_FAILED",
-          confidence: 0,
-          requiresClarification: true,
-          reasoning: "Classification failed: structured taskType is missing or invalid.",
-          targetPath: explicitUserPaths[0],
-          question: "Could you please clarify your request?",
-          options: [],
-        };
-      }
+      const parsed = structuredRes.content;
 
       let taskType: TaskType = parsed.taskType;
-      const risk: TaskRisk = VALID_RISKS.has(parsed.risk) ? parsed.risk : "MEDIUM";
-      const estimatedComplexity: TaskComplexity = VALID_COMPLEXITIES.has(parsed.estimatedComplexity)
+      const risk: TaskRisk = parsed.risk && VALID_RISKS.has(parsed.risk) ? parsed.risk : "MEDIUM";
+      const estimatedComplexity: TaskComplexity = parsed.estimatedComplexity && VALID_COMPLEXITIES.has(parsed.estimatedComplexity)
         ? parsed.estimatedComplexity
         : "MEDIUM";
-      let intent = parsed.intent || (taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" ? taskType : "NEW_FEATURE");
+      let intent: TaskClassificationResult["intent"] = (parsed.intent && VALID_INTENTS.has(parsed.intent as any))
+        ? (parsed.intent as TaskClassificationResult["intent"])
+        : (taskType === "DELETE_FOLDER" || taskType === "DELETE_FILE" ? taskType : "NEW_FEATURE");
 
       // Extract target path from explicit user input or structured LLM response
       let parsedTargetPath: string | undefined;
@@ -97,7 +193,7 @@ export class IntentClassifier {
       let targetPath = explicitUserPaths[0] || parsedTargetPath;
 
       let confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0.85;
-      let requiresClarification = Boolean(parsed.requiresClarification);
+      let rawRequiresClarification = Boolean(parsed.requiresClarification);
       let clarificationQuestion = parsed.question;
       let clarificationOptions = parsed.options;
       let reasoning = parsed.reasoning || `Classified as ${taskType} (${risk} risk, ${estimatedComplexity} complexity)`;
@@ -109,6 +205,8 @@ export class IntentClassifier {
         taskType,
         targetPath: explicitUserPaths[0],
       });
+
+      let requiresClarification = rawRequiresClarification;
 
       if (
         taskType === "DELETE_FOLDER" ||
@@ -140,20 +238,33 @@ export class IntentClassifier {
         }
       }
 
+      // Clarification Decision routing via ClarificationPolicy
+      let outcome: AgentOutcomeType | undefined = undefined;
+      if (requiresClarification) {
+        const decision = ClarificationPolicy.evaluate({
+          category: "USER_AMBIGUITY",
+          question: clarificationQuestion,
+          options: clarificationOptions,
+          reason: reasoning,
+          targetPath,
+        });
+        requiresClarification = decision.requiresClarification;
+        outcome = decision.outcome;
+      }
+
       let stages: TaskClassificationResult["stages"] = undefined;
       if (Array.isArray(parsed.stages) && parsed.stages.length > 0) {
         const validatedStages = [];
         for (let i = 0; i < parsed.stages.length; i++) {
           const s = parsed.stages[i];
           if (s && typeof s.goal === "string" && s.goal.trim()) {
-            const stageType: TaskType = VALID_TASK_TYPES.has(s.taskType) ? s.taskType : taskType;
             validatedStages.push({
-              id: typeof s.id === "string" && s.id.trim() ? s.id.trim() : `stage-${i + 1}`,
+              id: s.id.trim(),
               name: s.goal.trim(),
-              taskType: stageType,
+              taskType: s.taskType as TaskType,
               goal: s.goal.trim(),
               targetPath: typeof s.targetPath === "string" && s.targetPath.trim() ? s.targetPath.trim() : undefined,
-              dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.map(String) : i > 0 ? [`stage-${i}`] : [],
+              dependsOn: s.dependsOn,
             });
           }
         }
@@ -171,23 +282,32 @@ export class IntentClassifier {
         requiresClarification,
         reasoning,
         targetPath,
-        question: clarificationQuestion,
-        options: clarificationOptions,
+        question: requiresClarification ? clarificationQuestion : undefined,
+        options: requiresClarification ? clarificationOptions : undefined,
         stages,
+        outcome,
       };
-    } catch {
-      // Fail closed: Do NOT guess taskType, risk, complexity, intent, or target path from prompt keywords
+    } catch (err: any) {
+      // Technical/provider failure: NEVER becomes user clarification!
+      const failureDecision = ClarificationPolicy.evaluate({
+        category: "TECHNICAL_FAILURE",
+        technicalError: err instanceof Error ? err : new Error(String(err)),
+        reason: err?.message || "Classification failed due to technical failure.",
+      });
+
       return {
         taskType: "UNKNOWN",
         risk: "HIGH",
         estimatedComplexity: "COMPLEX",
         intent: "CLASSIFICATION_FAILED",
         confidence: 0,
-        requiresClarification: true,
-        reasoning: "Classification failed: LLM structured response unavailable or malformed.",
+        requiresClarification: false, // Strictly FALSE on technical failure
+        reasoning: `Classification failed due to technical failure: ${failureDecision.reason}`,
         targetPath: explicitUserPaths[0],
-        question: "Could you please clarify your request?",
+        question: undefined,
         options: [],
+        outcome: "TECHNICAL_FAILURE",
+        technicalError: failureDecision.technicalError,
       };
     }
   }

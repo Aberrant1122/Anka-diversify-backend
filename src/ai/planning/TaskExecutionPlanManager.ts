@@ -7,6 +7,8 @@ import {
 import { createTaskIntentSpec, TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { TaskClassificationResult, TaskType } from "../classification/TaskTypes";
 import { getOpenAI } from "../shared/utils";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
 
 export class TaskExecutionPlanManager {
   /**
@@ -138,12 +140,12 @@ export class TaskExecutionPlanManager {
 
     // 1. Try structured model-based priority matching
     try {
-      const openai = openaiClient || getOpenAI();
       const stageSummaries = plan.stages.map((s) => ({
         id: s.id,
         taskType: s.intent.taskType,
         goal: s.intent.goal,
       }));
+      const allowedStageIds = new Set(plan.stages.map((stage) => stage.id));
 
       const prompt = `You are a Task Priority Classifier.
 Given these planned execution stages:
@@ -158,19 +160,42 @@ Respond ONLY with valid JSON:
   "prioritizedStageId": "stage-id-string"
 }`;
 
-      const response = await openai.chat.completions.create({
+      const gateway = LLMGateway.getInstance();
+      const response = await gateway.callStructured<{ prioritizedStageId: string }>({
+        stage: PipelineStages.PLAN_REORDER,
         model: "gpt-4o",
+        openaiClient,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.0,
-        response_format: { type: "json_object" },
+        schema: {
+          name: "PlanReorderSchema",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: {
+              prioritizedStageId: { type: "string" },
+            },
+            required: ["prioritizedStageId"],
+            additionalProperties: false,
+          },
+          validate: (parsed) => {
+            const valid = Boolean(
+              parsed && typeof parsed === "object" && !Array.isArray(parsed)
+              && Object.keys(parsed).length === 1
+              && typeof parsed.prioritizedStageId === "string"
+              && allowedStageIds.has(parsed.prioritizedStageId)
+            );
+            return { valid, errors: valid ? undefined : ["prioritizedStageId must identify a current plan stage"], data: parsed };
+          },
+        },
       });
 
-      const parsed = JSON.parse(response.choices[0]?.message?.content || "{}");
+      const parsed = response.content;
       if (parsed.prioritizedStageId && plan.stages.some((s) => s.id === parsed.prioritizedStageId)) {
         prioritizedStageId = parsed.prioritizedStageId;
       }
     } catch {
-      // Fallback to deterministic semantic matching below
+      // Fallback to deterministic semantic matching below (zero user clarification manufactured)
     }
 
     // 2. Deterministic semantic token matching fallback (zero keyword hardcoding)
@@ -219,16 +244,14 @@ Respond ONLY with valid JSON:
       return plan;
     }
 
+    if ((plan.stages[prioritizedIndex].dependsOn || []).length > 0) {
+      return plan;
+    }
+
     const reorderedStages = [...plan.stages];
     const [prioritizedStage] = reorderedStages.splice(prioritizedIndex, 1);
 
-    // Update dependencies: prioritized stage has no dependencies; subsequent stage depends on it
-    prioritizedStage.dependsOn = [];
     reorderedStages.unshift(prioritizedStage);
-
-    for (let i = 1; i < reorderedStages.length; i++) {
-      reorderedStages[i].dependsOn = [reorderedStages[i - 1].id];
-    }
 
     return {
       ...plan,

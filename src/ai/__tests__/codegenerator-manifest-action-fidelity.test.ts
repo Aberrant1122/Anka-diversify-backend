@@ -64,9 +64,11 @@ describe("CodeGenerator Manifest Action Fidelity", () => {
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       explanation: "Removed calculator and enhanced dashboard",
+                      commitMessage: "Remove calculator and enhance dashboard",
                       changes: [
                         { path: "app/components/Calculator.tsx", action: "delete", isDeleted: true, content: "", description: "Delete Calculator" },
                         { path: "app/styles/calculator.css", action: "delete", isDeleted: true, content: "", description: "Delete styles" },
@@ -166,9 +168,11 @@ describe("CodeGenerator Manifest Action Fidelity", () => {
           create: async () => ({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     explanation: "Removed calculator and enhanced dashboard",
+                    commitMessage: "Remove calculator and enhance dashboard",
                     changes: [
                       { path: "app/components/Calculator.tsx", action: "delete", isDeleted: true, content: "", description: "Delete Calculator" },
                       { path: "app/styles/calculator.css", action: "delete", isDeleted: true, content: "", description: "Delete styles" },
@@ -292,9 +296,11 @@ describe("CodeGenerator Manifest Action Fidelity", () => {
           create: async () => ({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     explanation: "Removed calculator and cleaned imports",
+                    commitMessage: "Remove calculator and clean imports",
                     changes: [
                       { path: "app/components/Calculator.tsx", action: "delete", isDeleted: true, content: "", description: "Delete Calculator" },
                       {
@@ -375,9 +381,11 @@ describe("CodeGenerator Manifest Action Fidelity", () => {
           create: async () => ({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     explanation: "Deleted files",
+                    commitMessage: "Delete calculator files",
                     changes: [
                       { path: "app/components/Calculator.tsx", action: "delete", isDeleted: true, content: "", description: "Delete" },
                       { path: "app/styles/calculator.css", action: "delete", isDeleted: true, content: "", description: "Delete" },
@@ -456,9 +464,11 @@ describe("CodeGenerator Manifest Action Fidelity", () => {
           create: async () => ({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     explanation: "Mixed changes",
+                    commitMessage: "Apply mixed manifest changes",
                     changes: [
                       { path: "app/components/Dashboard.tsx", action: "create", content: "export function Dashboard() { return <div>Dashboard</div>; }", description: "Create Dashboard" },
                       {

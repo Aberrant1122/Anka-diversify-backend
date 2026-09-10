@@ -44,9 +44,11 @@ jest.mock("@prisma/client", () => {
 describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
   let tempDir: string;
   let targetFilePath: string;
+  let targetEvidenceId: string;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pipeline-integration-test-"));
+    jest.spyOn(process, "cwd").mockReturnValue(tempDir);
     targetFilePath = path.join(tempDir, "src", "index.ts");
     fs.mkdirSync(path.dirname(targetFilePath), { recursive: true });
     fs.writeFileSync(targetFilePath, "console.log('original');", "utf8");
@@ -77,12 +79,20 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       confidence: 0.9,
     } as any);
 
-    jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockResolvedValue({
-      optimizedContext: { fileContext: {} },
-      executionMemory: { inspectedFiles: new Set() },
-      finalConfidence: 0.9,
-      searchSummary: "ok",
-    } as any);
+    jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
+      const evidenceStore = args[7];
+      targetEvidenceId = evidenceStore.addEvidence({
+        kind: "FILE",
+        filePath: "src/index.ts",
+        provenance: "REPO_READ",
+      }).id;
+      return {
+        optimizedContext: { fileContext: {} },
+        executionMemory: { inspectedFiles: new Set(["src/index.ts"]) },
+        finalConfidence: 0.9,
+        searchSummary: "ok",
+      } as any;
+    });
 
     jest.spyOn(CodeGenerator, "buildAgentSystemPrompt").mockReturnValue("system prompt");
     jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -96,11 +106,11 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
     jest.spyOn(ValidationPlanner, "detectValidationCommands").mockReturnValue([]);
 
     process.env.OPENAI_API_KEY = "test-mock-api-key";
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-      files: [{ path: "src/index.ts", action: "modify", dependencies: [], description: "test change" }],
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async () => ({
+      files: [{ path: "src/index.ts", action: "modify", dependencies: [], description: "test change", evidenceIds: [targetEvidenceId] }],
       totalFiles: 1,
       manifestVersion: "1.0.0",
-    });
+    }));
     jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({
       valid: true,
       errors: [],

@@ -1,4 +1,8 @@
-import OpenAI from "openai";
+import OpenAI, {
+  APIConnectionError,
+  APIConnectionTimeoutError,
+  APIUserAbortError,
+} from "openai";
 import { getOpenAI } from "../shared/utils";
 import { PipelineStage, PipelineStages, isValidPipelineStage } from "./PipelineStage";
 import {
@@ -13,6 +17,24 @@ import {
   LLMRetryExhaustedError,
 } from "./LLMError";
 import { LLMTelemetry, LLMTelemetryContext } from "./LLMTelemetry";
+
+export const MAX_GATEWAY_RETRIES = 5;
+export const DEFAULT_GATEWAY_RETRIES = 2;
+export const DEFAULT_GATEWAY_TIMEOUT_MS = 60000;
+export const MAX_GATEWAY_TIMEOUT_MS = 120000;
+export const DEFAULT_GATEWAY_RETRY_DELAY_MS = 250;
+export const MAX_GATEWAY_RETRY_DELAY_MS = 10000;
+
+function normalizeBoundedInteger(
+  value: number | undefined,
+  defaultValue: number,
+  minimum: number,
+  maximum: number
+): number {
+  if (value === undefined) return defaultValue;
+  if (!Number.isFinite(value)) return defaultValue;
+  return Math.min(maximum, Math.max(minimum, Math.floor(value)));
+}
 
 /**
  * Centralized Model Resolution Hook.
@@ -46,16 +68,37 @@ export interface LLMBaseCallOptions {
 
 export interface LLMTextCallOptions extends LLMBaseCallOptions {
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
-  tools?: OpenAI.Chat.Completions.ChatCompletionTool[];
-  toolChoice?: OpenAI.Chat.Completions.ChatCompletionToolChoiceOption;
 }
+
+export interface LLMToolValidationResult<T = unknown> {
+  valid: boolean;
+  errors?: string[];
+  data?: T;
+}
+
+export interface LLMToolCallOptions extends LLMBaseCallOptions {
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+  tools: OpenAI.Chat.Completions.ChatCompletionTool[];
+  toolChoice?: OpenAI.Chat.Completions.ChatCompletionToolChoiceOption;
+  validateToolCall: (name: string, args: unknown) => LLMToolValidationResult;
+}
+
+export interface LLMValidatedToolCall {
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+
+export type LLMToolCompletion =
+  | { type: "text"; text: string; toolCalls: [] }
+  | { type: "tool_calls"; text: string | null; toolCalls: LLMValidatedToolCall[] };
 
 export interface LLMStructuredSchema<T = any> {
   name: string;
   description?: string;
   schema?: Record<string, any>;
   strict?: boolean;
-  validate?: (parsed: any) => { valid: boolean; errors?: string[]; data?: T };
+  validate: (parsed: any) => { valid: boolean; errors?: string[]; data?: T };
 }
 
 export interface LLMStructuredCallOptions<T = any> extends LLMBaseCallOptions {
@@ -97,7 +140,7 @@ export class LLMGateway {
    */
   public async call(options: LLMTextCallOptions): Promise<LLMCallResult<string>> {
     this.assertValidStage(options.stage);
-    return this.executeWithRetry<string>(options, false);
+    return this.executeWithRetry<string>(options, "text");
   }
 
   /**
@@ -105,12 +148,26 @@ export class LLMGateway {
    */
   public async callStructured<T = any>(options: LLMStructuredCallOptions<T>): Promise<LLMCallResult<T>> {
     this.assertValidStage(options.stage);
-    if (!options.schema || typeof options.schema !== "object") {
-      throw new LLMSchemaInvalidError("Schema configuration is required for callStructured", {
+    if (!options.schema || typeof options.schema !== "object" || typeof options.schema.validate !== "function") {
+      throw new LLMSchemaInvalidError("A deterministic schema validator is required for callStructured", {
         stage: options.stage,
       });
     }
-    return this.executeWithRetry<T>(options, true);
+    return this.executeWithRetry<T>(options, "structured");
+  }
+
+  /**
+   * Explicit typed tool-proposal path. It validates tool names and parsed
+   * arguments but never executes a tool or grants operational authority.
+   */
+  public async callWithTools(options: LLMToolCallOptions): Promise<LLMCallResult<LLMToolCompletion>> {
+    this.assertValidStage(options.stage);
+    if (!Array.isArray(options.tools) || options.tools.length === 0 || typeof options.validateToolCall !== "function") {
+      throw new LLMSchemaInvalidError("Tool calls require declared tools and deterministic argument validation", {
+        stage: options.stage,
+      });
+    }
+    return this.executeWithRetry<LLMToolCompletion>(options, "tools");
   }
 
   private assertValidStage(stage: PipelineStage): void {
@@ -122,14 +179,29 @@ export class LLMGateway {
   }
 
   private async executeWithRetry<T>(
-    options: LLMTextCallOptions | LLMStructuredCallOptions<any>,
-    isStructured: boolean
+    options: LLMTextCallOptions | LLMStructuredCallOptions<any> | LLMToolCallOptions,
+    mode: "text" | "structured" | "tools"
   ): Promise<LLMCallResult<T>> {
     const stage = options.stage;
     const model = resolveModel(stage, options.model);
-    const maxRetries = typeof options.maxRetries === "number" ? Math.max(0, options.maxRetries) : 2;
-    const timeoutMs = typeof options.timeoutMs === "number" ? options.timeoutMs : 60000;
-    const retryDelayMs = typeof options.retryDelayMs === "number" ? options.retryDelayMs : 250;
+    const maxRetries = normalizeBoundedInteger(
+      options.maxRetries,
+      DEFAULT_GATEWAY_RETRIES,
+      0,
+      MAX_GATEWAY_RETRIES
+    );
+    const timeoutMs = normalizeBoundedInteger(
+      options.timeoutMs,
+      DEFAULT_GATEWAY_TIMEOUT_MS,
+      1,
+      MAX_GATEWAY_TIMEOUT_MS
+    );
+    const retryDelayMs = normalizeBoundedInteger(
+      options.retryDelayMs,
+      DEFAULT_GATEWAY_RETRY_DELAY_MS,
+      0,
+      MAX_GATEWAY_RETRY_DELAY_MS
+    );
     const client = options.openaiClient || getOpenAI();
 
     let lastError: LLMError | undefined;
@@ -152,16 +224,15 @@ export class LLMGateway {
           model,
           stage,
           timeoutMs,
-          isStructured,
+          mode,
           startTime,
           telemetryContext
         );
+        this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
         return result;
       } catch (err: any) {
         lastError = this.normalizeError(err, stage, model, attempt, maxRetries);
-        const duration = Date.now() - startTime;
-        this.telemetry.emit("llm.latency", telemetryContext, duration);
-
+        this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
         this.recordErrorTelemetry(lastError, telemetryContext);
 
         const isLastAttempt = attempt >= maxRetries + 1;
@@ -189,11 +260,11 @@ export class LLMGateway {
 
   private async executeSingleAttempt<T>(
     client: OpenAI,
-    options: LLMTextCallOptions | LLMStructuredCallOptions<any>,
+    options: LLMTextCallOptions | LLMStructuredCallOptions<any> | LLMToolCallOptions,
     model: string,
     stage: PipelineStage,
     timeoutMs: number,
-    isStructured: boolean,
+    mode: "text" | "structured" | "tools",
     startTime: number,
     telemetryContext: LLMTelemetryContext
   ): Promise<LLMCallResult<T>> {
@@ -211,15 +282,13 @@ export class LLMGateway {
         requestPayload.max_tokens = options.maxTokens;
       }
 
-      const textOptions = options as LLMTextCallOptions;
-      if (textOptions.tools) {
-        requestPayload.tools = textOptions.tools;
-      }
-      if (textOptions.toolChoice) {
-        requestPayload.tool_choice = textOptions.toolChoice;
+      if (mode === "tools") {
+        const toolOptions = options as LLMToolCallOptions;
+        requestPayload.tools = toolOptions.tools;
+        if (toolOptions.toolChoice) requestPayload.tool_choice = toolOptions.toolChoice;
       }
 
-      if (isStructured) {
+      if (mode === "structured") {
         const structuredOpts = options as LLMStructuredCallOptions;
         if (structuredOpts.schema.schema) {
           requestPayload.response_format = {
@@ -238,18 +307,20 @@ export class LLMGateway {
 
       const response = await client.chat.completions.create(requestPayload, {
         signal: controller.signal,
+        // The gateway owns retry accounting. Disable hidden SDK retries so one
+        // gateway attempt always corresponds to one provider request attempt.
+        maxRetries: 0,
       });
 
       const latencyMs = Date.now() - startTime;
-      this.telemetry.emit("llm.latency", telemetryContext, latencyMs);
 
       // Usage accounting
       const usage = response.usage;
       if (usage) {
-        if (usage.prompt_tokens) {
+        if (typeof usage.prompt_tokens === "number") {
           this.telemetry.emit("llm.tokens_input", telemetryContext, usage.prompt_tokens);
         }
-        if (usage.completion_tokens) {
+        if (typeof usage.completion_tokens === "number") {
           this.telemetry.emit("llm.tokens_output", telemetryContext, usage.completion_tokens);
         }
       }
@@ -264,9 +335,8 @@ export class LLMGateway {
 
       // ── COMPLETION / TRUNCATION CONTRACT ──
       // Critical: Inspect finish_reason.
-      const finishReason = choice.finish_reason || "stop";
+      const finishReason = choice.finish_reason;
       if (finishReason === "length") {
-        this.telemetry.emit("llm.truncated", telemetryContext);
         throw new LLMTruncationError(
           `LLM response was truncated due to output token exhaustion (finish_reason: length). Business result discarded.`,
           {
@@ -286,10 +356,31 @@ export class LLMGateway {
         });
       }
 
+      if (finishReason === "function_call") {
+        throw new LLMProviderError(
+          `Provider returned ${finishReason}, which is unsupported by the generic gateway result contract`,
+          { stage, model, finishReason }
+        );
+      }
+
+      if (finishReason === "tool_calls" && mode !== "tools") {
+        throw new LLMProviderError(
+          "Provider returned tool_calls, which is unsupported by the generic gateway result contract",
+          { stage, model, finishReason }
+        );
+      }
+
+      if (finishReason !== "stop" && finishReason !== "tool_calls") {
+        throw new LLMProviderError(
+          `Provider returned an unsupported or missing finish_reason: ${String(finishReason)}`,
+          { stage, model, finishReason }
+        );
+      }
+
       const rawContent = choice.message?.content ?? "";
 
       let finalContent: T;
-      if (isStructured) {
+      if (mode === "structured") {
         finalContent = this.parseAndValidateStructured<T>(
           rawContent,
           (options as LLMStructuredCallOptions).schema,
@@ -297,6 +388,14 @@ export class LLMGateway {
           model,
           telemetryContext
         );
+      } else if (mode === "tools") {
+        finalContent = this.parseAndValidateToolCompletion(
+          choice.message,
+          finishReason,
+          options as LLMToolCallOptions,
+          stage,
+          model
+        ) as unknown as T;
       } else {
         finalContent = rawContent as unknown as T;
       }
@@ -321,6 +420,60 @@ export class LLMGateway {
     }
   }
 
+  private parseAndValidateToolCompletion(
+    message: OpenAI.Chat.Completions.ChatCompletionMessage,
+    finishReason: string,
+    options: LLMToolCallOptions,
+    stage: PipelineStage,
+    model: string
+  ): LLMToolCompletion {
+    if (finishReason === "stop") {
+      if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+        throw new LLMSchemaInvalidError("Provider returned tool payloads with a text completion finish reason", { stage, model });
+      }
+      return { type: "text", text: message.content ?? "", toolCalls: [] };
+    }
+
+    const calls = message.tool_calls;
+    if (!Array.isArray(calls) || calls.length === 0) {
+      throw new LLMSchemaInvalidError("Provider reported tool_calls without tool payloads", { stage, model });
+    }
+
+    const declaredNames = new Set(
+      options.tools
+        .filter((tool) => tool.type === "function")
+        .map((tool) => tool.function.name)
+    );
+    const validated: LLMValidatedToolCall[] = [];
+
+    for (const call of calls) {
+      if (call.type !== "function" || !call.id || !declaredNames.has(call.function.name)) {
+        throw new LLMSchemaInvalidError("Provider returned an undeclared or malformed tool call", { stage, model });
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(call.function.arguments);
+      } catch (err: any) {
+        throw new LLMInvalidJsonError(`Tool arguments are not valid JSON: ${err.message}`, { stage, model }, err);
+      }
+      let validation: LLMToolValidationResult;
+      try {
+        validation = options.validateToolCall(call.function.name, parsed);
+      } catch (err: any) {
+        throw new LLMSchemaInvalidError(`Tool argument validator threw: ${err?.message || String(err)}`, { stage, model }, err);
+      }
+      if (!validation || validation.valid !== true) {
+        throw new LLMSchemaInvalidError(
+          `Tool arguments failed validation: ${(validation?.errors || []).join("; ")}`,
+          { stage, model, validationErrors: validation?.errors }
+        );
+      }
+      validated.push({ id: call.id, name: call.function.name, arguments: validation.data ?? parsed });
+    }
+
+    return { type: "tool_calls", text: message.content, toolCalls: validated };
+  }
+
   private parseAndValidateStructured<T>(
     rawContent: string,
     schema: LLMStructuredSchema<T>,
@@ -333,7 +486,6 @@ export class LLMGateway {
     try {
       parsed = JSON.parse(rawContent);
     } catch (parseErr: any) {
-      this.telemetry.emit("llm.parse_failure", telemetryContext);
       throw new LLMInvalidJsonError(
         `Failed to parse structured model response as valid JSON: ${parseErr.message}`,
         {
@@ -346,24 +498,41 @@ export class LLMGateway {
     }
 
     // ── DEFENSE IN DEPTH: DETERMINISTIC SCHEMA VALIDATION ──
-    if (schema.validate) {
-      const validationResult = schema.validate(parsed);
-      if (!validationResult.valid) {
-        this.telemetry.emit("llm.schema_failure", telemetryContext);
-        throw new LLMSchemaInvalidError(
-          `Structured model response failed schema validation: ${(validationResult.errors || []).join("; ")}`,
-          {
-            stage,
-            model,
-            validationErrors: validationResult.errors,
-            rawPayloadSnippet: rawContent.slice(0, 300),
-          }
-        );
-      }
-      return (validationResult.data !== undefined ? validationResult.data : parsed) as T;
+    if (typeof schema.validate !== "function") {
+      throw new LLMSchemaInvalidError("A deterministic schema validator is required for structured output", {
+        stage,
+        model,
+      });
     }
 
-    return parsed as T;
+    let validationResult: ReturnType<LLMStructuredSchema<T>["validate"]>;
+    try {
+      validationResult = schema.validate(parsed);
+    } catch (validationErr: any) {
+      throw new LLMSchemaInvalidError(
+        `Structured model response validator threw: ${validationErr?.message || String(validationErr)}`,
+        {
+          stage,
+          model,
+          validationErrors: [validationErr?.message || String(validationErr)],
+          rawPayloadSnippet: rawContent.slice(0, 300),
+        },
+        validationErr
+      );
+    }
+
+    if (!validationResult || validationResult.valid !== true) {
+      throw new LLMSchemaInvalidError(
+        `Structured model response failed schema validation: ${(validationResult?.errors || []).join("; ")}`,
+        {
+          stage,
+          model,
+          validationErrors: validationResult?.errors,
+          rawPayloadSnippet: rawContent.slice(0, 300),
+        }
+      );
+    }
+    return (validationResult.data !== undefined ? validationResult.data : parsed) as T;
   }
 
   private normalizeError(
@@ -379,19 +548,40 @@ export class LLMGateway {
 
     const details = { stage, model, attempt, maxRetries, originalMessage: err?.message };
 
-    // Timeout detection
-    if (err?.name === "AbortError" || err?.message?.toLowerCase().includes("aborted") || err?.message?.toLowerCase().includes("timeout")) {
+    const errorName = typeof err?.name === "string" ? err.name : "";
+    const errorCode = typeof err?.code === "string" ? err.code : "";
+    const errorMessage = typeof err?.message === "string" ? err.message : "";
+    const lowerMessage = errorMessage.toLowerCase();
+
+    // SDK connection timeouts and gateway-triggered aborts are timeouts.
+    if (
+      err instanceof APIConnectionTimeoutError ||
+      err instanceof APIUserAbortError ||
+      errorName === "APIConnectionTimeoutError" ||
+      errorName === "APIUserAbortError" ||
+      errorName === "AbortError" ||
+      lowerMessage.includes("aborted") ||
+      lowerMessage.includes("timed out") ||
+      lowerMessage.includes("timeout")
+    ) {
       return new LLMTimeoutError(`LLM call timed out: ${err.message}`, details, err);
     }
 
     // Rate limit detection
-    if (err?.status === 429 || err?.message?.includes("429") || err?.message?.toLowerCase().includes("rate limit")) {
+    if (err?.status === 429 || errorName === "RateLimitError" || errorMessage.includes("429") || lowerMessage.includes("rate limit")) {
       return new LLMRateLimitError(`LLM rate limit exceeded (429): ${err.message}`, details, err);
     }
 
     // Network error detection
-    const networkCodes = ["ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"];
-    if (networkCodes.includes(err?.code) || err?.message?.toLowerCase().includes("fetch failed") || err?.message?.toLowerCase().includes("network error")) {
+    const networkCodes = ["ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"];
+    if (
+      err instanceof APIConnectionError ||
+      errorName === "APIConnectionError" ||
+      networkCodes.includes(errorCode) ||
+      lowerMessage.includes("fetch failed") ||
+      lowerMessage.includes("network error") ||
+      lowerMessage === "connection error."
+    ) {
       return new LLMNetworkError(`LLM network connectivity failure: ${err.message}`, details, err);
     }
 

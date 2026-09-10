@@ -1,11 +1,20 @@
 import OpenAI from "openai";
 import { FileManifest, ValidationError, ExecutionContract } from "../../types";
 import { RepositoryArchitectureSummary } from "./RepositoryArchitectureDetector";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
 
 export interface ManifestCorrectionContext {
   existingFiles?: string[];
   architecture?: RepositoryArchitectureSummary;
   relevantFiles?: Array<{ path: string; content: string }>;
+}
+
+function normalizeBoundedPath(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\0")) return null;
+  const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  return normalized;
 }
 
 export class ManifestCorrectionEngine {
@@ -60,8 +69,7 @@ CRITICAL RULES:
    - If the project uses Next.js App Router (app/), do NOT create pages/ or src/pages/ files. Use app/**/page.tsx or embed/modify in existing app/page.tsx and existing components.
    - If the project uses Next.js Pages Router (pages/), do NOT create app/ or src/app/ files.
    - If the project already has existing components (e.g. components/Calculator.tsx, components/CalculatorButton.tsx, components/CalculatorDisplay.tsx), prefer modifying/reusing them over creating duplicate or parallel files.
-4. If modify-source-missing errors were detected:
-   - You MUST NOT attempt to MODIFY a file that does not exist in the repository. Either change action to 'create' if creating a genuinely new file, or target an existing file present in the repository.
+4. Keep every path and action identical to the rejected manifest. A correction may fix metadata and dependencies, but may not invent a path or change mutation authority.
 5. Keep totalFiles <= maxFiles (${contract.maxFiles}).
 6. If external-dependency-missing errors were detected:
    - You MUST NOT use or invent uninstalled packages. Only use packages listed in installed external packages (${arch?.installedPackages?.join(", ") || "none"}), or implement using standard library/native JS.
@@ -96,35 +104,89 @@ ${errorList}
 Generate a corrected, valid FileManifest JSON that resolves all validation errors.`;
 
     try {
-      const response = await openaiClient.chat.completions.create({
+      const allowedActionByPath = new Map<string, "create" | "modify" | "delete">();
+      for (const file of rejectedManifest.files || []) {
+        const path = normalizeBoundedPath(file.path);
+        if (path && ["create", "modify", "delete"].includes(file.action)) allowedActionByPath.set(path, file.action);
+      }
+      for (const obligation of contract.actionObligations || []) {
+        const path = normalizeBoundedPath(obligation.path);
+        if (path) allowedActionByPath.set(path, obligation.requiredAction);
+      }
+      const gateway = LLMGateway.getInstance();
+      const response = await gateway.callStructured<{
+        files: any[];
+        totalFiles: number;
+        manifestVersion: string;
+      }>({
+        stage: PipelineStages.MANIFEST_CORRECTION,
         model: process.env.OPENAI_AGENT_MODEL || "gpt-4o",
+        openaiClient,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
         temperature: 0.1,
-        response_format: { type: "json_object" },
+        schema: {
+          name: "ManifestCorrectionSchema",
+          strict: false,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              files: {
+                type: "array",
+                minItems: 1,
+                maxItems: contract.maxFiles,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    path: { type: "string" },
+                    action: { type: "string", enum: ["create", "modify", "delete"] },
+                    dependencies: { type: "array", items: { type: "string" } },
+                    description: { type: "string" },
+                    estimatedLines: { type: "number" },
+                  },
+                  required: ["path", "action", "dependencies", "description"],
+                },
+              },
+              totalFiles: { type: "number" },
+              manifestVersion: { type: "string" },
+            },
+            required: ["files", "totalFiles", "manifestVersion"],
+          },
+          validate: (parsed) => {
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).some((key) => !["files", "totalFiles", "manifestVersion"].includes(key)) || !Array.isArray(parsed.files) || parsed.files.length === 0 || parsed.files.length > contract.maxFiles || parsed.totalFiles !== parsed.files.length || parsed.manifestVersion !== "1.0.0") return { valid: false, errors: ["Invalid corrected manifest envelope"] };
+            const seen = new Set<string>();
+            for (const file of parsed.files) {
+              const path = normalizeBoundedPath(file?.path);
+              if (!file || typeof file !== "object" || Array.isArray(file) || Object.keys(file).some((key) => !["path", "action", "dependencies", "description", "estimatedLines"].includes(key)) || !path || seen.has(path) || allowedActionByPath.get(path) !== file.action) return { valid: false, errors: ["Correction contains an unauthorized path or action"] };
+              seen.add(path);
+              if (!Array.isArray(file.dependencies) || new Set(file.dependencies).size !== file.dependencies.length || file.dependencies.some((dep: unknown) => typeof dep !== "string" || !dep.trim() || dep.includes("\0") || dep.replace(/\\/g, "/").split("/").includes("..")) || typeof file.description !== "string" || !file.description.trim() || (file.estimatedLines !== undefined && (!Number.isInteger(file.estimatedLines) || file.estimatedLines < 0))) return { valid: false, errors: ["Correction entry fields are invalid"] };
+            }
+            return { valid: true, data: parsed };
+          },
+        },
       });
 
-      const rawContent = response.choices[0]?.message?.content || "{}";
-      const parsed = JSON.parse(rawContent);
-
+      const parsed = response.content;
       if (!parsed || !Array.isArray(parsed.files)) {
         return null;
       }
 
-      const normalizedFiles = parsed.files.map((f: any, idx: number) => ({
-        path: typeof f.path === "string" ? f.path : `src/file_${idx}.ts`,
-        action: ["create", "modify", "delete"].includes(f.action) ? f.action : "create",
-        dependencies: Array.isArray(f.dependencies) ? f.dependencies : [],
-        description: typeof f.description === "string" ? f.description : "File declaration",
-        estimatedLines: typeof f.estimatedLines === "number" ? f.estimatedLines : undefined,
+      const normalizedFiles = parsed.files.map((f: any) => ({
+        path: normalizeBoundedPath(f.path)!,
+        action: f.action,
+        dependencies: f.dependencies,
+        description: f.description,
+        estimatedLines: f.estimatedLines,
       }));
 
       return {
         files: normalizedFiles,
         totalFiles: normalizedFiles.length,
-        manifestVersion: parsed.manifestVersion || "1.0.0",
+        manifestVersion: parsed.manifestVersion,
       };
     } catch (err: any) {
       console.warn("[ManifestCorrectionEngine] Correction attempt failed:", err?.message || err);

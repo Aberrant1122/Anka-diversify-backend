@@ -167,7 +167,7 @@ export interface PRReview {
 }
 
 export interface AIAction {
-  type: 'project_created' | 'document_proposed' | 'document_saved';
+  type: 'project_proposed' | 'project_created' | 'document_proposed' | 'document_saved';
   data: Record<string, unknown>;
 }
 
@@ -386,6 +386,8 @@ export interface TaskClassificationResult {
     targetPath?: string;
     dependsOn?: string[];
   }>;
+  outcome?: "SUCCESS" | "CLARIFICATION_NEEDED" | "TECHNICAL_FAILURE" | "POLICY_BLOCKED" | "BUDGET_EXHAUSTED";
+  technicalError?: Error;
 }
 
 export type PipelineMode =

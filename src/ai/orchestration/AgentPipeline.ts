@@ -146,6 +146,28 @@ export class AgentPipeline {
     const intentResult = await IntentClassifier.classifyIntentAndAmbiguity(effectiveMessageForIntent, projectContext, canonicalExistingFiles);
     const s1Time = performance.now() - s1Start;
 
+    if (intentResult.outcome === "TECHNICAL_FAILURE" || intentResult.intent === "CLASSIFICATION_FAILED") {
+      const failureExplanation = `[Technical Failure] Intent classification failed: ${intentResult.reasoning}`;
+      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+      return {
+        explanation: failureExplanation,
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        intent: intentResult.intent,
+        taskType: intentResult.taskType,
+        risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity,
+        targetPath: intentResult.targetPath,
+        confidence: intentResult.confidence,
+        buildVerified: false,
+        compoundTaskStatus: "FAILED",
+        needsClarification: false,
+        reason: intentResult.reasoning,
+        errorCode: "TECHNICAL_FAILURE",
+      };
+    }
+
     const explicitUserPaths = intentResult.targetPath ? [intentResult.targetPath] : [];
 
     let taskExecutionPlan: TaskExecutionPlan =

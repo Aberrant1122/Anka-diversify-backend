@@ -12,36 +12,33 @@ Analyze the terminal error trace and diagnostics, then output surgical repairs s
 CRITICAL INSTRUCTIONS:
 1. Repair ONLY files declared in the APPROVED FILE PLAN.
 2. Every action must match the approved manifest declaration ("modify", "create", or "delete").
-3. For MODIFY actions, output structured "edits" array ONLY. Do NOT output full file content for modify operations.
-4. "oldText" must match the EXACT text from the CURRENT file content provided in this prompt (exact byte match).
-5. Ensure "oldText" contains enough surrounding context so it is unique within the file.
-6. Every edit MUST make a real modification (oldText and newText must NOT be identical). No-op edits are rejected.
-7. Do NOT use line numbers, unified diffs, ellipses, or placeholder comments.
+3. Use the output contract supplied for this repair operation. Do not invent alternate fields or representations.
+4. Follow the selected output contract exactly.
+5. Keep every generated change bounded to the approved repair scope.
+6. Do not generate no-op changes.
+7. Do not use placeholder comments.
 8. Preserve existing behavior outside the targeted error fix. Do not perform unrelated refactors.
-9. For CREATE actions, output the full "content" of the new file.
-10. For DELETE actions, set "action": "delete", "isDeleted": true, and "content": "".
+9. Follow the selected output contract for CREATE actions.
+10. Follow the selected output contract for DELETE actions.
 11. SECURITY MANDATE: Never use eval(), new Function(), or unrestricted dynamic code execution on user input. For calculations, use explicit mathematical operators or safe deterministic parsers.
 12. PUBLIC CONTRACT PRESERVATION: Never remove or rename exported interface properties, component Props, or exported types unless the user explicitly requested an API change. When fixing unused parameter errors (TS6133), remove the symbol from the function parameter destructuring ONLY, not from the exported interface. Retain all type imports required by public interfaces.
 13. EXISTING COMPONENT REPAIR: When repairing usage of an existing local component, repair against the authoritative existing component interface. Do not rename one invented prop to another without evidence.
 
-RESPONSE FORMAT (JSON ONLY):
-{
-  "repaired": boolean,
-  "patchExplanation": "What was fixed in response to the terminal errors",
-  "changes": [
-    {
-      "path": "relative/path/to/file.ts",
-      "action": "modify",
-      "description": "Short explanation of surgical fix",
-      "edits": [
-        {
-          "oldText": "exact current source text to replace",
-          "newText": "replacement text"
-        }
-      ]
-    }
-  ]
-}`;
+`;
+
+const EDIT_REPAIR_OUTPUT_CONTRACT = `
+REPAIR OUTPUT CONTRACT (JSON ONLY):
+Return {"repaired":boolean,"patchExplanation":"...","changes":[...]}.
+For MODIFY actions, each change requires an "edits" array whose oldText exactly matches current content and whose newText is a real change. CREATE requires full content. DELETE requires action "delete", isDeleted true, and empty content.
+Do not use line numbers, unified diffs, ellipses, or placeholder comments.`;
+
+const FULL_CONTENT_REPAIR_OUTPUT_CONTRACT = `
+BUILD ERROR REPAIR OUTPUT CONTRACT (JSON ONLY):
+Return only {"changes":[...]} with no repaired or patchExplanation fields.
+CREATE requires path, action "create", description, and non-empty full content; do not include edits or isDeleted.
+MODIFY requires path, action "modify", description, and non-empty full replacement content; do not include edits or isDeleted.
+DELETE requires path, action "delete", description, content "", and isDeleted true; do not include edits.
+Do not return success, buildPassed, validationPassed, verified, complete, or other undeclared fields.`;
 
 export interface StructuredRepairPromptInput {
   errorLog: string;
@@ -56,6 +53,7 @@ export interface StructuredRepairPromptInput {
   alternativeAttemptFeedback?: string;
   appliedDiff?: string;
   localPath?: string | null;
+  outputContract?: "edits" | "fullContent";
 }
 
 /**
@@ -110,7 +108,7 @@ export function isJsxInTsDiagnostic(diag: DiagnosticError, fileContent?: string)
 }
 
 export function buildRepairSystemPrompt(input?: StructuredRepairPromptInput): string {
-  let prompt = SELF_HEALING_REPAIR_PROMPT;
+  let prompt = SELF_HEALING_REPAIR_PROMPT + (input?.outputContract === "fullContent" ? FULL_CONTENT_REPAIR_OUTPUT_CONTRACT : EDIT_REPAIR_OUTPUT_CONTRACT);
 
   if (input?.approvedManifest && Array.isArray(input.approvedManifest.files)) {
     const fileList = input.approvedManifest.files
@@ -266,7 +264,10 @@ export function buildRepairUserPrompt(input: StructuredRepairPromptInput): strin
     filesText = `CURRENT CHANGES:\n${JSON.stringify(input.changes, null, 2)}\n\n`;
   }
 
-  return `${reqText}${diagsText}${causalDiagnosticGuidance}${jsxInTsGuidance}${componentContractGuidance}${alternativeFeedbackText}${diffText}${filesText}ACTUAL TERMINAL ERROR TRACE${attemptText}:\n${input.errorLog}\n\nFix all build/type/lint errors shown above. Return JSON with structured "changes" using edits[] for MODIFY actions.`;
+  const outputInstruction = input.outputContract === "fullContent"
+    ? "Return JSON using the BUILD ERROR REPAIR OUTPUT CONTRACT above."
+    : "Return JSON using the REPAIR OUTPUT CONTRACT above, including edits[] for MODIFY actions.";
+  return `${reqText}${diagsText}${causalDiagnosticGuidance}${jsxInTsGuidance}${componentContractGuidance}${alternativeFeedbackText}${diffText}${filesText}ACTUAL TERMINAL ERROR TRACE${attemptText}:\n${input.errorLog}\n\nFix all build/type/lint errors shown above. ${outputInstruction}`;
 }
 
 export function buildSelfHealingRepairPrompt(input: StructuredRepairPromptInput): { system: string; user: string } {

@@ -98,6 +98,7 @@ describe("Active Entry-Point Grounding & Feature Validation Truthfulness", () =>
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
                         files: [
@@ -105,12 +106,14 @@ describe("Active Entry-Point Grounding & Feature Validation Truthfulness", () =>
                             path: "app/page.tsx",
                             action: "modify",
                             dependencies: ["./components/SupportDashboard"],
+                            evidenceIds: [],
                             description: "Render support dashboard on root view",
                           },
                           {
                             path: "app/components/SupportDashboard.tsx",
                             action: "create",
                             dependencies: [],
+                            evidenceIds: [],
                             description: "Support dashboard component",
                           },
                         ],
@@ -156,6 +159,7 @@ describe("Active Entry-Point Grounding & Feature Validation Truthfulness", () =>
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
                         files: [
@@ -163,6 +167,7 @@ describe("Active Entry-Point Grounding & Feature Validation Truthfulness", () =>
                             path: "app/support/page.tsx",
                             action: "create",
                             dependencies: [],
+                            evidenceIds: [],
                             description: "Standalone support page",
                           },
                         ],

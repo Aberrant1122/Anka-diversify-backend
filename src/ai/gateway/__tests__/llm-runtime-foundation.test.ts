@@ -1,3 +1,4 @@
+import { APIConnectionError, APIConnectionTimeoutError, APIUserAbortError } from "openai";
 import {
   PipelineStages,
   PipelineStage,
@@ -6,6 +7,7 @@ import {
   resolveModel,
   resolveEmbeddingModel,
   LLMTimeoutError,
+  LLMError,
   LLMRateLimitError,
   LLMNetworkError,
   LLMProviderError,
@@ -13,6 +15,7 @@ import {
   LLMInvalidJsonError,
   LLMSchemaInvalidError,
   LLMRetryExhaustedError,
+  MAX_GATEWAY_RETRIES,
   ClarificationPolicy,
   ClarificationDecisionType,
   AgentOutcomeType,
@@ -47,7 +50,8 @@ describe("Checkpoint 1A: LLM Runtime Foundation", () => {
       gateway.callStructured({
         stage: "INVALID_STAGE" as any,
         messages: [{ role: "user", content: "hello" }],
-        schema: { name: "test" },
+        // Deliberately bypasses the static contract to exercise the earlier stage guard.
+        schema: { name: "test" } as any,
         openaiClient: mockClient,
       })
     ).rejects.toThrow(/PipelineStage is strictly required/);
@@ -139,14 +143,15 @@ describe("Checkpoint 1A: LLM Runtime Foundation", () => {
       gateway.callStructured({
         stage: PipelineStages.CODE_GENERATION,
         messages: [{ role: "user", content: "code" }],
-        schema: { name: "CodeSchema" },
+        schema: { name: "CodeSchema", validate: (parsed) => ({ valid: true, data: parsed }) },
         maxRetries: 0,
         openaiClient: mockClient,
       })
     ).rejects.toThrow(LLMInvalidJsonError);
 
     const parseFailures = telemetry.getEvents().filter((e) => e.name === "llm.parse_failure");
-    expect(parseFailures.length).toBeGreaterThanOrEqual(1);
+    expect(parseFailures.length).toBe(1);
+    expect(telemetry.getEvents().filter((e) => e.name === "llm.latency")).toHaveLength(1);
   });
 
   // ── 5. Schema mismatch → LLM_SCHEMA_INVALID ────────────────────────────────
@@ -179,7 +184,8 @@ describe("Checkpoint 1A: LLM Runtime Foundation", () => {
     ).rejects.toThrow(LLMSchemaInvalidError);
 
     const schemaFailures = telemetry.getEvents().filter((e) => e.name === "llm.schema_failure");
-    expect(schemaFailures.length).toBeGreaterThanOrEqual(1);
+    expect(schemaFailures.length).toBe(1);
+    expect(telemetry.getEvents().filter((e) => e.name === "llm.latency")).toHaveLength(1);
   });
 
   // ── 6. finish_reason=length → LLM_TRUNCATED ────────────────────────────────
@@ -205,7 +211,8 @@ describe("Checkpoint 1A: LLM Runtime Foundation", () => {
     ).rejects.toThrow(LLMTruncationError);
 
     const truncEvents = telemetry.getEvents().filter((e) => e.name === "llm.truncated");
-    expect(truncEvents.length).toBeGreaterThanOrEqual(1);
+    expect(truncEvents.length).toBe(1);
+    expect(telemetry.getEvents().filter((e) => e.name === "llm.latency")).toHaveLength(1);
   });
 
   // ── 7. Truncated response never reaches business caller ────────────────────
@@ -635,6 +642,400 @@ describe("Checkpoint 1A: LLM Runtime Foundation", () => {
     expect(result.data).toEqual(mockVector);
     expect(result.model).toBe("text-embedding-3-small");
     expect((result as any).finishReason).toBeUndefined(); // Finish reason is intentionally not part of embedding contract
+  });
+
+  it("24. callStructured fails before provider invocation without a deterministic validator", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const create = jest.fn();
+
+    await expect(
+      gateway.callStructured({
+        stage: PipelineStages.MANIFEST_GENERATION,
+        messages: [{ role: "user", content: "manifest" }],
+        // Deliberately bypasses the static contract to exercise runtime defense in depth.
+        schema: { name: "ProviderSchemaOnly", schema: { type: "object" } } as any,
+        openaiClient: { chat: { completions: { create } } } as any,
+      })
+    ).rejects.toThrow(LLMSchemaInvalidError);
+
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("25. structured business data is returned only after deterministic validation succeeds", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const validator = jest.fn().mockReturnValue({ valid: true, data: { accepted: true } });
+    const mockClient = {
+      chat: {
+        completions: {
+          create: jest.fn().mockResolvedValue({
+            choices: [{ message: { content: JSON.stringify({ accepted: true }) }, finish_reason: "stop" }],
+          }),
+        },
+      },
+    } as any;
+
+    const result = await gateway.callStructured<{ accepted: boolean }>({
+      stage: PipelineStages.MANIFEST_GENERATION,
+      messages: [{ role: "user", content: "manifest" }],
+      schema: { name: "Validated", validate: validator },
+      openaiClient: mockClient,
+    });
+
+    expect(validator).toHaveBeenCalledWith({ accepted: true });
+    expect(result.content).toEqual({ accepted: true });
+  });
+
+  it("26. retry configuration is finite, integral, non-negative, and hard bounded", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const retryable: any = new Error("rate limit");
+    retryable.status = 429;
+
+    const run = async (maxRetries: number) => {
+      telemetry.clear();
+      const create = jest.fn().mockRejectedValue(retryable);
+      await expect(
+        gateway.call({
+          stage: PipelineStages.REPAIR,
+          messages: [{ role: "user", content: "repair" }],
+          maxRetries,
+          retryDelayMs: 0,
+          openaiClient: { chat: { completions: { create } } } as any,
+        })
+      ).rejects.toBeInstanceOf(LLMError);
+      return create.mock.calls.length;
+    };
+
+    expect(await run(Infinity)).toBe(3); // invalid input normalizes to the finite default of 2 retries
+    expect(await run(-10)).toBe(1);
+    expect(await run(2.9)).toBe(3);
+    expect(await run(999)).toBe(MAX_GATEWAY_RETRIES + 1);
+  });
+
+  it("27. timeout and retry-delay configuration cannot create non-finite timers", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const create = jest.fn().mockResolvedValue({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+    });
+
+    await gateway.call({
+      stage: PipelineStages.APPLICATION_SUPPORT,
+      messages: [{ role: "user", content: "hello" }],
+      timeoutMs: Infinity,
+      retryDelayMs: Number.NaN,
+      openaiClient: { chat: { completions: { create } } } as any,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("28. disables SDK retries on every provider request", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const create = jest.fn().mockResolvedValue({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+    });
+
+    await gateway.call({
+      stage: PipelineStages.APPLICATION_SUPPORT,
+      messages: [{ role: "user", content: "hello" }],
+      openaiClient: { chat: { completions: { create } } } as any,
+    });
+
+    expect(create).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({ maxRetries: 0 }));
+  });
+
+  it("29. normalizes OpenAI SDK connection and timeout errors", async () => {
+    const gateway = new LLMGateway(telemetry);
+
+    const connectionClient = {
+      chat: { completions: { create: jest.fn().mockRejectedValue(new APIConnectionError({ message: "Connection error." })) } },
+    } as any;
+    await expect(
+      gateway.call({
+        stage: PipelineStages.REPOSITORY_REASONING,
+        messages: [{ role: "user", content: "inspect" }],
+        maxRetries: 0,
+        openaiClient: connectionClient,
+      })
+    ).rejects.toThrow(LLMNetworkError);
+
+    const timeoutClient = {
+      chat: { completions: { create: jest.fn().mockRejectedValue(new APIConnectionTimeoutError({ message: "Request timed out." })) } },
+    } as any;
+    await expect(
+      gateway.call({
+        stage: PipelineStages.REPOSITORY_REASONING,
+        messages: [{ role: "user", content: "inspect" }],
+        maxRetries: 0,
+        openaiClient: timeoutClient,
+      })
+    ).rejects.toThrow(LLMTimeoutError);
+  });
+
+  it("30. gateway timer aborts normalize to LLMTimeoutError", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const create = jest.fn((_body: any, requestOptions: any) =>
+      new Promise((_resolve, reject) => {
+        requestOptions.signal.addEventListener("abort", () => reject(new APIUserAbortError()));
+      })
+    );
+
+    await expect(
+      gateway.call({
+        stage: PipelineStages.REPOSITORY_REASONING,
+        messages: [{ role: "user", content: "inspect" }],
+        timeoutMs: 1,
+        maxRetries: 0,
+        openaiClient: { chat: { completions: { create } } } as any,
+      })
+    ).rejects.toThrow(LLMTimeoutError);
+  });
+
+  it("31. provider 5xx retries remain bounded with accurate retry telemetry", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const providerError: any = new Error("service unavailable");
+    providerError.status = 503;
+    const create = jest.fn().mockRejectedValue(providerError);
+
+    await expect(
+      gateway.call({
+        stage: PipelineStages.REPAIR,
+        messages: [{ role: "user", content: "repair" }],
+        maxRetries: 2,
+        retryDelayMs: 0,
+        openaiClient: { chat: { completions: { create } } } as any,
+      })
+    ).rejects.toThrow(LLMRetryExhaustedError);
+
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(telemetry.getEvents().filter((event) => event.name === "llm.retry")).toHaveLength(2);
+    expect(telemetry.getEvents().filter((event) => event.name === "llm.latency")).toHaveLength(3);
+  });
+
+  it.each([undefined, "mystery_reason"])(
+    "32. missing or unknown finish_reason %p fails closed",
+    async (finishReason) => {
+      const gateway = new LLMGateway(telemetry);
+      const mockClient = {
+        chat: {
+          completions: {
+            create: jest.fn().mockResolvedValue({
+              choices: [{ message: { content: "business data" }, finish_reason: finishReason }],
+            }),
+          },
+        },
+      } as any;
+
+      await expect(
+        gateway.call({
+          stage: PipelineStages.CODE_GENERATION,
+          messages: [{ role: "user", content: "generate" }],
+          maxRetries: 0,
+          openaiClient: mockClient,
+        })
+      ).rejects.toThrow(LLMProviderError);
+    }
+  );
+
+  it("33. token telemetry remains accurate when the provider returns usage", async () => {
+    const gateway = new LLMGateway(telemetry);
+    await gateway.call({
+      stage: PipelineStages.CODE_GENERATION,
+      messages: [{ role: "user", content: "generate" }],
+      openaiClient: {
+        chat: {
+          completions: {
+            create: jest.fn().mockResolvedValue({
+              choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+              usage: { prompt_tokens: 7, completion_tokens: 11, total_tokens: 18 },
+            }),
+          },
+        },
+      } as any,
+    });
+
+    expect(telemetry.getEvents().filter((event) => event.name === "llm.tokens_input").map((event) => event.value)).toEqual([7]);
+    expect(telemetry.getEvents().filter((event) => event.name === "llm.tokens_output").map((event) => event.value)).toEqual([11]);
+  });
+
+  it("34. telemetry retention evicts oldest records while listeners receive every event", () => {
+    const listener = jest.fn();
+    const unsubscribe = telemetry.subscribe(listener);
+    const emitted = LLMTelemetry.MAX_RECORDED_EVENTS + 5;
+
+    for (let index = 0; index < emitted; index++) {
+      telemetry.emit("llm.call", { attempt: index + 1 });
+    }
+
+    unsubscribe();
+    expect(listener).toHaveBeenCalledTimes(emitted);
+    expect(telemetry.getEvents()).toHaveLength(LLMTelemetry.MAX_RECORDED_EVENTS);
+    expect(telemetry.getEvents()[0].context.attempt).toBe(6);
+  });
+
+  it.each(["tool_calls", "function_call"])(
+    "35. generic calls fail closed for finish_reason=%s",
+    async (finishReason) => {
+      const gateway = new LLMGateway(telemetry);
+      const create = jest.fn().mockResolvedValue({
+        choices: [{ message: { content: "ordinary-looking content" }, finish_reason: finishReason }],
+      });
+
+      await expect(
+        gateway.call({
+          stage: PipelineStages.CODE_GENERATION,
+          messages: [{ role: "user", content: "generate" }],
+          maxRetries: 0,
+          openaiClient: { chat: { completions: { create } } } as any,
+        })
+      ).rejects.toThrow(LLMProviderError);
+    }
+  );
+
+  it.each(["tool_calls", "function_call"])(
+    "36. empty generic content cannot succeed for finish_reason=%s",
+    async (finishReason) => {
+      const gateway = new LLMGateway(telemetry);
+      await expect(
+        gateway.call({
+          stage: PipelineStages.CODE_GENERATION,
+          messages: [{ role: "user", content: "generate" }],
+          maxRetries: 0,
+          openaiClient: {
+            chat: {
+              completions: {
+                create: jest.fn().mockResolvedValue({
+                  choices: [{ message: { content: "" }, finish_reason: finishReason }],
+                }),
+              },
+            },
+          } as any,
+        })
+      ).rejects.toThrow(LLMProviderError);
+    }
+  );
+
+  it("37. finish_reason=stop remains a successful generic completion", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const result = await gateway.call({
+      stage: PipelineStages.CODE_GENERATION,
+      messages: [{ role: "user", content: "generate" }],
+      openaiClient: {
+        chat: {
+          completions: {
+            create: jest.fn().mockResolvedValue({
+              choices: [{ message: { content: "completed text" }, finish_reason: "stop" }],
+            }),
+          },
+        },
+      } as any,
+    });
+
+    expect(result.content).toBe("completed text");
+    expect(result.finishReason).toBe("stop");
+  });
+
+  it("38. validator exceptions fail closed with one schema-failure event", async () => {
+    const gateway = new LLMGateway(telemetry);
+    await expect(
+      gateway.callStructured({
+        stage: PipelineStages.MANIFEST_GENERATION,
+        messages: [{ role: "user", content: "manifest" }],
+        schema: {
+          name: "ThrowingValidator",
+          validate: () => {
+            throw new Error("validator failure");
+          },
+        },
+        maxRetries: 0,
+        openaiClient: {
+          chat: {
+            completions: {
+              create: jest.fn().mockResolvedValue({
+                choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
+              }),
+            },
+          },
+        } as any,
+      })
+    ).rejects.toThrow(LLMSchemaInvalidError);
+
+    expect(telemetry.getEvents().filter((event) => event.name === "llm.schema_failure")).toHaveLength(1);
+  });
+
+  it("39. zero input and output token usage are retained in telemetry", async () => {
+    const gateway = new LLMGateway(telemetry);
+    await gateway.call({
+      stage: PipelineStages.CODE_GENERATION,
+      messages: [{ role: "user", content: "generate" }],
+      openaiClient: {
+        chat: {
+          completions: {
+            create: jest.fn().mockResolvedValue({
+              choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+              usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+            }),
+          },
+        },
+      } as any,
+    });
+
+    expect(telemetry.getEvents().filter((event) => event.name === "llm.tokens_input").map((event) => event.value)).toEqual([0]);
+    expect(telemetry.getEvents().filter((event) => event.name === "llm.tokens_output").map((event) => event.value)).toEqual([0]);
+  });
+
+  it("40. typed tool path exposes only declared, deterministically validated proposals", async () => {
+    const gateway = new LLMGateway(telemetry);
+    const validator = jest.fn((name: string, args: unknown) => ({
+      valid: name === "lookup" && Boolean(args && typeof args === "object" && (args as any).query === "term"),
+      data: args,
+    }));
+    const result = await gateway.callWithTools({
+      stage: PipelineStages.APPLICATION_SUPPORT,
+      messages: [{ role: "user", content: "lookup" }],
+      tools: [{ type: "function", function: { name: "lookup", description: "Lookup", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false } } }],
+      validateToolCall: validator,
+      maxRetries: 0,
+      openaiClient: { chat: { completions: { create: jest.fn().mockResolvedValue({ choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "lookup", arguments: '{"query":"term"}' } }] } }] }) } } } as any,
+    });
+
+    expect(result.content).toEqual({ type: "tool_calls", text: null, toolCalls: [{ id: "call-1", name: "lookup", arguments: { query: "term" } }] });
+    expect(validator).toHaveBeenCalledWith("lookup", { query: "term" });
+  });
+
+  it("41. typed tool path rejects malformed arguments", async () => {
+    const gateway = new LLMGateway(telemetry);
+    await expect(gateway.callWithTools({
+      stage: PipelineStages.APPLICATION_SUPPORT,
+      messages: [{ role: "user", content: "lookup" }],
+      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
+      validateToolCall: () => ({ valid: true }),
+      maxRetries: 0,
+      openaiClient: { chat: { completions: { create: jest.fn().mockResolvedValue({ choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "lookup", arguments: "{" } }] } }] }) } } } as any,
+    })).rejects.toThrow(LLMInvalidJsonError);
+  });
+
+  it("42. typed tool path rejects undeclared tool names before caller execution", async () => {
+    const gateway = new LLMGateway(telemetry);
+    await expect(gateway.callWithTools({
+      stage: PipelineStages.APPLICATION_SUPPORT,
+      messages: [{ role: "user", content: "lookup" }],
+      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
+      validateToolCall: () => ({ valid: true }),
+      maxRetries: 0,
+      openaiClient: { chat: { completions: { create: jest.fn().mockResolvedValue({ choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "delete_everything", arguments: "{}" } }] } }] }) } } } as any,
+    })).rejects.toThrow(LLMSchemaInvalidError);
+  });
+
+  it("43. typed tool path rejects tool payloads mislabeled as a text completion", async () => {
+    const gateway = new LLMGateway(telemetry);
+    await expect(gateway.callWithTools({
+      stage: PipelineStages.APPLICATION_SUPPORT,
+      messages: [{ role: "user", content: "lookup" }],
+      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
+      validateToolCall: () => ({ valid: true }),
+      maxRetries: 0,
+      openaiClient: { chat: { completions: { create: jest.fn().mockResolvedValue({ choices: [{ finish_reason: "stop", message: { content: "", tool_calls: [{ id: "call-1", type: "function", function: { name: "lookup", arguments: "{}" } }] } }] }) } } } as any,
+    })).rejects.toThrow(LLMSchemaInvalidError);
   });
 });
 

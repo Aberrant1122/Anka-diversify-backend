@@ -1,4 +1,3 @@
-import { getOpenAI } from "../shared/utils";
 import { RepositoryExecutionMemory, ExecutionContract } from "../shared/types";
 import { RepositoryToolEngine } from "../../services/repository-tool.engine";
 import { IterativeReasoningEngine } from "../../services/iterative-reasoning.engine";
@@ -9,6 +8,36 @@ import { RepositoryEvidenceStore } from "./RepositoryEvidenceStore";
 import { RepositoryInvestigationAgent } from "./RepositoryInvestigationAgent";
 import { PolicyContract } from "../contracts/PolicyContract";
 import { TaskIntentSpec } from "../shared/TaskIntentSpec";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
+
+interface RepositoryTaskPlan {
+  approach: string;
+  filesToRead: string[];
+  validationCommands: string[];
+}
+
+function isSafeRepositoryRelativePath(value: string): boolean {
+  if (!value || value !== value.trim() || value.includes("\0")) return false;
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return false;
+  return normalized.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
+function validateRepositoryTaskPlan(value: unknown): { valid: boolean; errors?: string[]; data?: RepositoryTaskPlan } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Plan must be an object"] };
+  const plan = value as Record<string, unknown>;
+  const allowed = new Set(["approach", "filesToRead", "validationCommands"]);
+  if (Object.keys(plan).some((key) => !allowed.has(key))) return { valid: false, errors: ["Plan contains unknown fields"] };
+  if (typeof plan.approach !== "string") return { valid: false, errors: ["approach must be a string"] };
+  if (!Array.isArray(plan.filesToRead) || plan.filesToRead.length > 10 || !plan.filesToRead.every((path) => typeof path === "string" && isSafeRepositoryRelativePath(path))) {
+    return { valid: false, errors: ["filesToRead must contain at most 10 safe repository-relative paths"] };
+  }
+  if (!Array.isArray(plan.validationCommands) || !plan.validationCommands.every((command) => typeof command === "string" && command.trim().length > 0)) {
+    return { valid: false, errors: ["validationCommands must contain non-empty strings"] };
+  }
+  return { valid: true, data: plan as unknown as RepositoryTaskPlan };
+}
 
 export class RepositorySearch {
   static async planTask(
@@ -16,9 +45,8 @@ export class RepositorySearch {
     snapshot: any,
   ): Promise<{ approach: string; filesToRead: string[]; validationCommands: string[] }> {
     const fileTree = snapshot?.fileTree?.slice(0, 300).join("\n") || "No repo connected";
-    const openai = getOpenAI();
-
-    const completion = await openai.chat.completions.create({
+    const result = await LLMGateway.getInstance().callStructured<RepositoryTaskPlan>({
+      stage: PipelineStages.REPOSITORY_REASONING,
       model: "gpt-4o",
       messages: [
         {
@@ -36,15 +64,24 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
         { role: "user", content: message },
       ],
       temperature: 0.1,
-      max_tokens: 600,
-      response_format: { type: "json_object" },
+      maxTokens: 600,
+      schema: {
+        name: "RepositoryTaskPlanSchema",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["approach", "filesToRead", "validationCommands"],
+          properties: {
+            approach: { type: "string" },
+            filesToRead: { type: "array", maxItems: 10, items: { type: "string" } },
+            validationCommands: { type: "array", items: { type: "string", minLength: 1 } },
+          },
+        },
+        validate: validateRepositoryTaskPlan,
+      },
     });
-
-    try {
-      return JSON.parse(completion.choices[0]?.message?.content || "{}");
-    } catch {
-      return { approach: "", filesToRead: [], validationCommands: ["tsc --noEmit"] };
-    }
+    return result.content;
   }
 
   static async buildFileContext(

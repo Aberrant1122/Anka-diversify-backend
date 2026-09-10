@@ -105,8 +105,7 @@ Respond ONLY with valid JSON:
       "targetFiles": ["path/to/file.ts"],
       "description": "What will be accomplished in this phase"
     }
-  ],
-  "validationCommands": ["npx tsc --noEmit", "npm run build"]
+  ]
 }`;
 
 export const CODING_AGENT_PROMPT = `You are an Expert Full-Stack Coding Agent operating with Lovable/Cursor/v0-level software engineering standards.

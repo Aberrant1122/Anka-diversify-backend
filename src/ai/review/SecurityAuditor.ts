@@ -1,7 +1,8 @@
-import { getOpenAI } from "../shared/utils";
 import { AgentFileChange } from "../shared/types";
 import { SECURITY_REVIEW_PROMPT, CODE_CRITIQUE_PROMPT } from "../prompts/coding";
 import { SecurityPolicy } from "../security/SecurityPolicy";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
 
 export interface SecurityVulnerability {
   file: string;
@@ -20,6 +21,83 @@ export interface SecurityAuditResult {
   recommendations?: string[];
   summary: string;
 }
+
+interface SecurityCritiquePayload {
+  score: number;
+  passed: boolean;
+  critique: string[];
+  improvements: string;
+}
+
+interface SecurityReviewPayload {
+  passed: boolean;
+  riskLevel: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  vulnerabilities: Array<{ file: string; issue: string; severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" }>;
+  recommendations: string[];
+}
+
+const securityCritiqueSchema = {
+  name: "SecurityCritiqueSchema",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["score", "passed", "critique", "improvements"],
+    properties: {
+      score: { type: "number", minimum: 0, maximum: 1 },
+      passed: { type: "boolean" },
+      critique: { type: "array", maxItems: 100, items: { type: "string", minLength: 1 } },
+      improvements: { type: "string" },
+    },
+  },
+  validate: (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Security critique must be an object"] };
+    const critique = value as Record<string, unknown>;
+    if (Object.keys(critique).some((key) => !["score", "passed", "critique", "improvements"].includes(key)) || typeof critique.score !== "number" || !Number.isFinite(critique.score) || critique.score < 0 || critique.score > 1 || typeof critique.passed !== "boolean" || !Array.isArray(critique.critique) || typeof critique.improvements !== "string") return { valid: false, errors: ["Security critique fields are invalid"] };
+    if (critique.critique.some((item) => typeof item !== "string" || !item.trim())) return { valid: false, errors: ["Security critique entries are invalid"] };
+    return { valid: true, data: critique as unknown as SecurityCritiquePayload };
+  },
+};
+
+const securityReviewSchema = {
+  name: "SecurityReviewSchema",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["passed", "riskLevel", "vulnerabilities", "recommendations"],
+    properties: {
+      passed: { type: "boolean" },
+      riskLevel: { type: "string", enum: ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+      vulnerabilities: {
+        type: "array",
+        maxItems: 100,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["file", "issue", "severity"],
+          properties: {
+            file: { type: "string", minLength: 1 },
+            issue: { type: "string", minLength: 1 },
+            severity: { type: "string", enum: ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+          },
+        },
+      },
+      recommendations: { type: "array", maxItems: 100, items: { type: "string", minLength: 1 } },
+    },
+  },
+  validate: (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Security review must be an object"] };
+    const review = value as Record<string, unknown>;
+    if (Object.keys(review).some((key) => !["passed", "riskLevel", "vulnerabilities", "recommendations"].includes(key)) || typeof review.passed !== "boolean" || !["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(String(review.riskLevel)) || !Array.isArray(review.vulnerabilities) || !Array.isArray(review.recommendations)) return { valid: false, errors: ["Security review fields are invalid"] };
+    if (review.vulnerabilities.some((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return true;
+      const finding = item as Record<string, unknown>;
+      return Object.keys(finding).some((key) => !["file", "issue", "severity"].includes(key)) || typeof finding.file !== "string" || !finding.file.trim() || typeof finding.issue !== "string" || !finding.issue.trim() || !["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(String(finding.severity));
+    }) || review.recommendations.some((item) => typeof item !== "string" || !item.trim())) return { valid: false, errors: ["Security review findings are invalid"] };
+    return { valid: true, data: review as unknown as SecurityReviewPayload };
+  },
+};
 
 export class SecurityAuditor {
   static async runReflectionAndSecurityAudit(
@@ -42,29 +120,22 @@ export class SecurityAuditor {
     const diffText = changes.map((c) => `=== FILE: ${c.path} ===\n${c.content}`).join("\n\n");
 
     let critiqueScore = 0.90;
+    let critiqueAvailable = true;
     try {
-      const openai = getOpenAI();
-      const critiqueCompletion = await openai.chat.completions.create({
+      const critiqueResult = await LLMGateway.getInstance().callStructured<SecurityCritiquePayload>({
+        stage: PipelineStages.SECURITY_AUDIT,
         model: "gpt-4o",
         messages: [
           { role: "system", content: CODE_CRITIQUE_PROMPT },
           { role: "user", content: diffText },
         ],
         temperature: 0.1,
-        response_format: { type: "json_object" },
+        schema: securityCritiqueSchema,
       });
-      const critiqueResult = JSON.parse(critiqueCompletion.choices[0]?.message?.content || "{}");
-      if (typeof critiqueResult.score === "number" && !isNaN(critiqueResult.score)) {
-        let rawScore = critiqueResult.score;
-        if (rawScore > 1.0 && rawScore <= 10.0) {
-          rawScore = rawScore / 10.0;
-        } else if (rawScore > 10.0 && rawScore <= 100.0) {
-          rawScore = rawScore / 100.0;
-        }
-        critiqueScore = Math.max(0.0, Math.min(1.0, rawScore));
-      }
+      critiqueScore = critiqueResult.content.score;
     } catch {
-      critiqueScore = 0.90;
+      critiqueScore = 0.0;
+      critiqueAvailable = false;
     }
 
     let riskLevel: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" = "LOW";
@@ -82,24 +153,26 @@ export class SecurityAuditor {
 
     let deterministicPolicyPass = policyDelta.safe;
     let llmReviewPass = true;
+    let llmReviewAvailable = true;
+    let modelReportedSecurityFailure = false;
 
     try {
-      const openai = getOpenAI();
-      const secCompletion = await openai.chat.completions.create({
+      const secResult = await LLMGateway.getInstance().callStructured<SecurityReviewPayload>({
+        stage: PipelineStages.SECURITY_AUDIT,
         model: "gpt-4o",
         messages: [
           { role: "system", content: SECURITY_REVIEW_PROMPT },
           { role: "user", content: diffText },
         ],
         temperature: 0.0,
-        response_format: { type: "json_object" },
+        schema: securityReviewSchema,
       });
-      const secResult = JSON.parse(secCompletion.choices[0]?.message?.content || "{}");
-      if (["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(secResult.riskLevel)) {
-        riskLevel = secResult.riskLevel;
+      if (!secResult.content.passed) modelReportedSecurityFailure = true;
+      if (["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(secResult.content.riskLevel)) {
+        riskLevel = secResult.content.riskLevel;
       }
-      if (Array.isArray(secResult.vulnerabilities)) {
-        for (const rawV of secResult.vulnerabilities) {
+      if (Array.isArray(secResult.content.vulnerabilities)) {
+        for (const rawV of secResult.content.vulnerabilities) {
           const file = String(rawV?.file || "unknown");
           const issue = String(rawV?.issue || "Security concern detected");
           let severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" = ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(rawV?.severity)
@@ -167,12 +240,14 @@ export class SecurityAuditor {
           }
         }
       }
-      if (Array.isArray(secResult.recommendations)) {
-        recommendations = secResult.recommendations.map(String);
+      if (Array.isArray(secResult.content.recommendations)) {
+        recommendations = secResult.content.recommendations.map(String);
       }
     } catch {
-      llmReviewPass = true;
-      riskLevel = "LOW";
+      llmReviewPass = false;
+      llmReviewAvailable = false;
+      riskLevel = "HIGH";
+      recommendations.push("Security review unavailable; changes remain unverified.");
     }
 
     if (!policyDelta.safe) {
@@ -237,13 +312,17 @@ export class SecurityAuditor {
              !v.issue.startsWith("[PRE_EXISTING_BASELINE]")
     );
 
-    if (!hasSevereLlmFindings) {
+    if (!llmReviewAvailable) {
+      llmReviewPass = false;
+    } else if (modelReportedSecurityFailure) {
+      llmReviewPass = false;
+    } else if (!hasSevereLlmFindings) {
       llmReviewPass = true;
     } else {
       llmReviewPass = false;
     }
 
-    const securityPass = deterministicPolicyPass && llmReviewPass;
+    const securityPass = deterministicPolicyPass && llmReviewPass && critiqueAvailable;
     const passed = securityPass && critiqueScore >= 0.80;
 
     let summary = `Reflection Pass Score: ${(critiqueScore * 100).toFixed(0)}%. Deterministic Policy: ${deterministicPolicyPass ? "PASS" : "FAIL"}. LLM Review: ${llmReviewPass ? "PASS" : "FLAGGED"} (${riskLevel} risk).`;

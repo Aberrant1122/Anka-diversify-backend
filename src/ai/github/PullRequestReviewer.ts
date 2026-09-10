@@ -1,8 +1,9 @@
 import { PrismaClient } from "@prisma/client";
-import { getOpenAI } from "../shared/utils";
 import { PRReview } from "../shared/types";
 import { GitHubService } from "./GitHubService";
 import { decrypt } from "../../utils/encryption";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
 
 const prisma = new PrismaClient();
 
@@ -23,12 +24,11 @@ export class PullRequestReviewer {
       ? `PR #${pr.number}: ${pr.title}\nAuthor: ${pr.author}\nBranch: ${pr.headBranch} → ${pr.baseBranch}\n${pr.body ? `\nDescription:\n${pr.body}` : ""}`
       : `PR #${prNumber}`;
 
-    const openai = getOpenAI();
-    const completion = await openai.chat.completions.create({
+    const result = await LLMGateway.getInstance().callStructured<PRReview>({
+      stage: PipelineStages.STATIC_REVIEW,
       model: "gpt-4o",
       temperature: 0.3,
-      max_tokens: 1500,
-      response_format: { type: "json_object" },
+      maxTokens: 1500,
       messages: [
         {
           role: "system",
@@ -47,19 +47,31 @@ Be specific and reference actual code from the diff. Keep each risk/suggestion u
           content: `${prMeta}\n\n--- DIFF ---\n${diff}`,
         },
       ],
+      schema: {
+        name: "PullRequestReviewSchema",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["summary", "risks", "suggestions", "verdict", "qualityScore"],
+          properties: {
+            summary: { type: "string", minLength: 1 },
+            risks: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 120 } },
+            suggestions: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 120 } },
+            verdict: { type: "string", enum: ["approve", "request_changes", "needs_discussion"] },
+            qualityScore: { type: "number", minimum: 0, maximum: 100 },
+          },
+        },
+        validate: (value: unknown) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Review must be an object"] };
+          const review = value as Record<string, unknown>;
+          if (Object.keys(review).some((key) => !["summary", "risks", "suggestions", "verdict", "qualityScore"].includes(key))) return { valid: false, errors: ["Review contains unknown fields"] };
+          if (typeof review.summary !== "string" || !review.summary.trim() || !Array.isArray(review.risks) || !Array.isArray(review.suggestions) || !["approve", "request_changes", "needs_discussion"].includes(String(review.verdict)) || typeof review.qualityScore !== "number" || !Number.isFinite(review.qualityScore) || review.qualityScore < 0 || review.qualityScore > 100) return { valid: false, errors: ["Review fields are invalid"] };
+          if (review.risks.some((item) => typeof item !== "string" || !item.trim() || item.length > 120) || review.suggestions.some((item) => typeof item !== "string" || !item.trim() || item.length > 120)) return { valid: false, errors: ["Review lists are invalid"] };
+          return { valid: true, data: review as unknown as PRReview };
+        },
+      },
     });
-
-    const raw = completion.choices[0]?.message?.content ?? "{}";
-    try {
-      return JSON.parse(raw) as PRReview;
-    } catch {
-      return {
-        summary: "Could not parse AI review response.",
-        risks: [],
-        suggestions: [],
-        verdict: "needs_discussion",
-        qualityScore: 50,
-      };
-    }
+    return result.content;
   }
 }

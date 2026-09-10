@@ -42,6 +42,7 @@ export type LLMTelemetryListener = (event: LLMTelemetryEvent) => void;
  * Provides structured observation without throwing into business logic.
  */
 export class LLMTelemetry {
+  public static readonly MAX_RECORDED_EVENTS = 1000;
   private static instance: LLMTelemetry | null = null;
   private listeners: Set<LLMTelemetryListener> = new Set();
   private recordedEvents: LLMTelemetryEvent[] = [];
@@ -70,6 +71,12 @@ export class LLMTelemetry {
     };
 
     this.recordedEvents.push(event);
+    if (this.recordedEvents.length > LLMTelemetry.MAX_RECORDED_EVENTS) {
+      this.recordedEvents.splice(
+        0,
+        this.recordedEvents.length - LLMTelemetry.MAX_RECORDED_EVENTS
+      );
+    }
 
     for (const listener of this.listeners) {
       try {

@@ -1,5 +1,4 @@
 import crypto from "crypto";
-import { getOpenAI } from "../shared/utils";
 import { AgentFileChange, ExecutionContract, RoadmapStep } from "../shared/types";
 import { FileManifest } from "../../types";
 import {
@@ -26,6 +25,259 @@ import {
   detectRepositoryArchitecture,
   buildRepositoryUISystemPromptSection,
 } from "../planning/RepositoryArchitectureDetector";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
+
+type ModelChangeAction = "create" | "modify" | "delete";
+
+interface ModelPatchEdit {
+  oldText: string;
+  newText: string;
+}
+
+interface ModelGeneratedChange {
+  path: string;
+  action?: ModelChangeAction;
+  content?: string;
+  description: string;
+  edits?: ModelPatchEdit[];
+  isDeleted?: boolean;
+  layer?: "Controller" | "Service" | "Repository" | "Schema" | "UI";
+  repositoryId?: string;
+}
+
+interface CodeGenerationPayload {
+  explanation: string;
+  changes: ModelGeneratedChange[];
+  commitMessage: string;
+}
+
+interface ClarificationPayload {
+  needsClarification: true;
+  question: string;
+  options?: string[];
+}
+
+interface ExecuteGenerationPayload {
+  explanation: string;
+  changes: AgentFileChange[];
+  commitMessage: string;
+}
+
+type ExecuteChangesPayload = ExecuteGenerationPayload | ClarificationPayload;
+
+interface ContentRepairPayload {
+  content: string;
+}
+
+const MODEL_CHANGE_PROPERTIES = {
+  path: { type: "string", minLength: 1 },
+  action: { type: "string", enum: ["create", "modify", "delete"] },
+  content: { type: "string" },
+  description: { type: "string", minLength: 1 },
+  edits: {
+    type: "array",
+    minItems: 1,
+    items: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        oldText: { type: "string", minLength: 1 },
+        newText: { type: "string" },
+      },
+      required: ["oldText", "newText"],
+    },
+  },
+  isDeleted: { type: "boolean" },
+  layer: { type: "string", enum: ["Controller", "Service", "Repository", "Schema", "UI"] },
+  repositoryId: { type: "string", minLength: 1 },
+} as const;
+
+function isPlainObject(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function unexpectedKeys(value: Record<string, any>, allowed: readonly string[]): string[] {
+  const allowedSet = new Set(allowed);
+  return Object.keys(value).filter((key) => !allowedSet.has(key));
+}
+
+function isSafeRepositoryRelativePath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value !== value.trim() || value.includes("\0")) {
+    return false;
+  }
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return false;
+  return !normalized.split("/").some((segment) => segment === "." || segment === ".." || segment.length === 0);
+}
+
+function validateModelGeneratedChange(change: unknown, requireExplicitAction: boolean): string[] {
+  if (!isPlainObject(change)) return ["change must be an object"];
+
+  const errors: string[] = [];
+  const extraKeys = unexpectedKeys(change, [
+    "path", "action", "content", "description", "edits", "isDeleted", "layer", "repositoryId",
+  ]);
+  if (extraKeys.length > 0) errors.push(`unexpected fields: ${extraKeys.join(", ")}`);
+  if (!isSafeRepositoryRelativePath(change.path)) errors.push("path must be a safe repository-relative path");
+  if (typeof change.description !== "string" || change.description.length === 0) {
+    errors.push("description must be a non-empty string");
+  }
+  if (change.repositoryId !== undefined && (typeof change.repositoryId !== "string" || change.repositoryId.length === 0)) {
+    errors.push("repositoryId must be a non-empty string when supplied");
+  }
+  if (
+    change.layer !== undefined &&
+    !["Controller", "Service", "Repository", "Schema", "UI"].includes(change.layer)
+  ) {
+    errors.push("layer is invalid");
+  }
+
+  const action = change.action;
+  if (requireExplicitAction && !["create", "modify", "delete"].includes(action)) {
+    errors.push("action must be explicitly create, modify, or delete");
+    return errors;
+  }
+  if (action !== undefined && !["create", "modify", "delete"].includes(action)) {
+    errors.push("action is invalid");
+    return errors;
+  }
+
+  if (action === "modify") {
+    if (!Array.isArray(change.edits) || change.edits.length === 0) {
+      errors.push("modify requires a non-empty edits array");
+    } else {
+      change.edits.forEach((edit: unknown, index: number) => {
+        if (
+          !isPlainObject(edit) ||
+          unexpectedKeys(edit, ["oldText", "newText"]).length > 0 ||
+          typeof edit.oldText !== "string" ||
+          edit.oldText.length === 0 ||
+          typeof edit.newText !== "string" ||
+          edit.oldText === edit.newText
+        ) {
+          errors.push(`edit ${index} must contain distinct string oldText and newText values`);
+        }
+      });
+    }
+    if (change.content !== undefined || change.isDeleted !== undefined) {
+      errors.push("modify cannot contain content or isDeleted");
+    }
+  } else if (action === "delete") {
+    if (change.isDeleted !== true || change.content !== "" || change.edits !== undefined) {
+      errors.push("delete requires isDeleted=true, empty content, and no edits");
+    }
+  } else {
+    if (typeof change.content !== "string" || change.edits !== undefined || change.isDeleted === true) {
+      errors.push(`${action === "create" ? "create" : "legacy full-content change"} requires string content and no edits/deletion marker`);
+    }
+  }
+
+  return errors;
+}
+
+function validateCodeGenerationPayload(
+  parsed: unknown,
+  requireExplicitAction: boolean,
+): { valid: boolean; errors?: string[]; data?: CodeGenerationPayload } {
+  if (!isPlainObject(parsed)) return { valid: false, errors: ["response must be an object"] };
+
+  const errors: string[] = [];
+  const extraKeys = unexpectedKeys(parsed, ["explanation", "changes", "commitMessage"]);
+  if (extraKeys.length > 0) errors.push(`unexpected top-level fields: ${extraKeys.join(", ")}`);
+  if (typeof parsed.explanation !== "string" || parsed.explanation.length === 0) {
+    errors.push("explanation must be a non-empty string");
+  }
+  if (typeof parsed.commitMessage !== "string" || parsed.commitMessage.length === 0) {
+    errors.push("commitMessage must be a non-empty string");
+  }
+  if (!Array.isArray(parsed.changes) || parsed.changes.length === 0) {
+    errors.push("changes must be a non-empty array");
+  } else {
+    parsed.changes.forEach((change: unknown, index: number) => {
+      for (const error of validateModelGeneratedChange(change, requireExplicitAction)) {
+        errors.push(`changes[${index}]: ${error}`);
+      }
+    });
+  }
+
+  return errors.length > 0
+    ? { valid: false, errors }
+    : { valid: true, data: parsed as unknown as CodeGenerationPayload };
+}
+
+function validateExecuteChangesPayload(
+  parsed: unknown,
+): { valid: boolean; errors?: string[]; data?: ExecuteChangesPayload } {
+  if (isPlainObject(parsed) && parsed.needsClarification === true) {
+    const validKeys = unexpectedKeys(parsed, ["needsClarification", "question", "options"]).length === 0;
+    const validQuestion = typeof parsed.question === "string" && parsed.question.length > 0;
+    const validOptions = parsed.options === undefined || (
+      Array.isArray(parsed.options) && parsed.options.every((option: unknown) => typeof option === "string" && option.length > 0)
+    );
+    return validKeys && validQuestion && validOptions
+      ? { valid: true, data: parsed as unknown as ClarificationPayload }
+      : { valid: false, errors: ["clarification requires a non-empty question and optional non-empty string options"] };
+  }
+  const generationResult = validateCodeGenerationPayload(parsed, false);
+  if (!generationResult.valid || !isPlainObject(parsed) || !Array.isArray(parsed.changes)) {
+    return { valid: false, errors: generationResult.errors || ["invalid executeChanges generation payload"] };
+  }
+  if (!parsed.changes.every((change: unknown) => isPlainObject(change) && typeof change.content === "string")) {
+    return { valid: false, errors: ["executeChanges requires complete string content for every change"] };
+  }
+  return { valid: true, data: parsed as unknown as ExecuteGenerationPayload };
+}
+
+function validateContentRepairPayload(
+  parsed: unknown,
+): { valid: boolean; errors?: string[]; data?: ContentRepairPayload } {
+  if (
+    !isPlainObject(parsed) ||
+    unexpectedKeys(parsed, ["content"]).length > 0 ||
+    typeof parsed.content !== "string" ||
+    parsed.content.length === 0
+  ) {
+    return { valid: false, errors: ["repair response must contain non-empty string content"] };
+  }
+  return { valid: true, data: { content: parsed.content } };
+}
+
+function codeGenerationSchema(name: string, requireExplicitAction: boolean) {
+  return {
+    name,
+    strict: false,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        explanation: { type: "string", minLength: 1 },
+        changes: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: MODEL_CHANGE_PROPERTIES,
+            required: requireExplicitAction
+              ? ["path", "action", "description"]
+              : ["path", "description"],
+          },
+        },
+        commitMessage: { type: "string", minLength: 1 },
+      },
+      required: ["explanation", "changes", "commitMessage"],
+    },
+    validate: (parsed: unknown) => validateCodeGenerationPayload(parsed, requireExplicitAction),
+  };
+}
+
+const CONTENT_REPAIR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: { content: { type: "string", minLength: 1 } },
+  required: ["content"],
+} as const;
 
 /**
  * Builds a deterministic, concise prompt section instructing the LLM to stay strictly within the approved FileManifest.
@@ -146,23 +398,37 @@ Respond ONLY with valid JSON:
       ? `${message}\n\nAPPROACH: ${approach}\n\nRELEVANT FILES:\n${fileContents}\n\nPREVIOUS ATTEMPT ERRORS:\n${previousErrors}`
       : `${message}\n\nAPPROACH: ${approach}\n\nRELEVANT FILES:\n${fileContents}`;
 
-    const openai = getOpenAI();
-    const completion = await openai.chat.completions.create({
+    const completion = await LLMGateway.getInstance().callStructured<ExecuteChangesPayload>({
+      stage: PipelineStages.CODE_GENERATION,
       model: "gpt-4o",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
       ],
       temperature: 0.2,
-      max_tokens: 8000,
-      response_format: { type: "json_object" },
+      maxTokens: 8000,
+      schema: {
+        name: "ExecuteChangesSchema",
+        strict: false,
+        schema: {
+          oneOf: [
+            codeGenerationSchema("ExecuteChangesGeneration", false).schema,
+            {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                needsClarification: { const: true },
+                question: { type: "string", minLength: 1 },
+                options: { type: "array", items: { type: "string", minLength: 1 } },
+              },
+              required: ["needsClarification", "question"],
+            },
+          ],
+        },
+        validate: validateExecuteChangesPayload,
+      },
     });
-
-    try {
-      return JSON.parse(completion.choices[0]?.message?.content || "{}");
-    } catch {
-      return { explanation: "Failed to parse response", changes: [], commitMessage: "chore: agent changes" };
-    }
+    return completion.content;
   }
 
   static async generateRoadmapAndDiffs(
@@ -182,6 +448,7 @@ Respond ONLY with valid JSON:
     validationCommands: string[];
     expectedSourceHashes?: Record<string, string>;
   }> {
+    const gateway = LLMGateway.getInstance();
     const isStandaloneWeb = contract?.pipeline === "STANDALONE" || contract?.environment === "HTML_CSS_JS";
     const isDeleteTask = contract?.taskType === "DELETE_FILE" || contract?.taskType === "DELETE_FOLDER";
 
@@ -212,21 +479,69 @@ Respond ONLY with valid JSON:
 
     if ((!isDeleteTask || manifestHasCreateOrModify) && !isStandaloneWeb) {
       try {
-        const openai = getOpenAI();
-        const roadmapCompletion = await openai.chat.completions.create({
+        const roadmapRes = await gateway.callStructured<{ roadmap: RoadmapStep[] }>({
+          stage: PipelineStages.ROADMAP_PLANNING,
           model: "gpt-4o",
           messages: [
             { role: "system", content: IMPLEMENTATION_PLANNER_PROMPT },
             { role: "user", content: `REQUEST: ${message}\nINTENT: ${intentResult.intent}` },
           ],
           temperature: 0.2,
-          response_format: { type: "json_object" },
+          schema: {
+            name: "ImplementationRoadmapSchema",
+            strict: false,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                roadmap: {
+                  type: "array",
+                  minItems: 1,
+                  maxItems: 5,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      phase: { type: "number" },
+                      title: { type: "string" },
+                      layer: { type: "string", enum: ["Controller", "Service", "Repository", "Schema", "UI"] },
+                      targetFiles: { type: "array", items: { type: "string" } },
+                      description: { type: "string" },
+                    },
+                    required: ["phase", "title", "targetFiles", "description"],
+                  },
+                },
+              },
+              required: ["roadmap"],
+            },
+            validate: (parsed) => {
+              const allowedPaths = new Set(Array.from(manifestFileMap.keys()));
+              const safePath = (value: unknown) => {
+                if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\0")) return false;
+                const normalized = normalizeRepoPath(value);
+                return !normalized.startsWith("/") && !/^[A-Za-z]:\//.test(normalized) && normalized.split("/").every((part) => part && part !== "." && part !== "..") && (allowedPaths.size === 0 || allowedPaths.has(normalized));
+              };
+              const valid = Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                && Object.keys(parsed).length === 1 && Array.isArray(parsed.roadmap)
+                && parsed.roadmap.length > 0 && parsed.roadmap.length <= 5
+                && parsed.roadmap.every((step: any, index: number) => step && typeof step === "object" && !Array.isArray(step)
+                  && Object.keys(step).every((key) => ["phase", "title", "layer", "targetFiles", "description"].includes(key))
+                  && Number.isInteger(step.phase) && step.phase === index + 1
+                  && typeof step.title === "string" && step.title.trim()
+                  && (step.layer === undefined || ["Controller", "Service", "Repository", "Schema", "UI"].includes(step.layer))
+                  && Array.isArray(step.targetFiles) && step.targetFiles.length > 0 && new Set(step.targetFiles).size === step.targetFiles.length && step.targetFiles.every(safePath)
+                  && typeof step.description === "string" && step.description.trim()));
+              return { valid, errors: valid ? undefined : ["Roadmap must contain ordered, bounded phases targeting authorized manifest paths"], data: parsed };
+            },
+          },
         });
-        const parsedRoadmap = JSON.parse(roadmapCompletion.choices[0]?.message?.content || "{}");
-        if (Array.isArray(parsedRoadmap.roadmap) && parsedRoadmap.roadmap.length > 0) {
-          roadmap = parsedRoadmap.roadmap;
+
+        if (Array.isArray(roadmapRes.content?.roadmap) && roadmapRes.content.roadmap.length > 0) {
+          roadmap = roadmapRes.content.roadmap;
         }
-      } catch {}
+      } catch (err: any) {
+        console.warn("[CodeGenerator] Roadmap planning LLM call failed, falling back to default roadmap:", err?.message || err);
+      }
     }
 
     const modifySourceBlocks = Object.entries(authoritativeModifySources || {}).map(([p, s]) => {
@@ -368,24 +683,22 @@ When using an existing local component, conform to its authoritative exported pr
 
     const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextContent || "(Standalone Application - No repository context required)"}${multiFileInstruction}${jsonFormatReminder}`;
 
-    const openai = getOpenAI();
-    const completion = await openai.chat.completions.create({
+    const completion = await gateway.callStructured<CodeGenerationPayload>({
+      stage: PipelineStages.CODE_GENERATION,
       model: "gpt-4o",
       messages: [
         { role: "system", content: effectiveCodingPrompt },
         { role: "user", content: userPrompt },
       ],
       temperature: 0.2,
-      max_tokens: 16000,
-      response_format: { type: "json_object" },
+      maxTokens: 16000,
+      schema: codeGenerationSchema("PrimaryCodeGenerationSchema", Boolean(hasManifest || isDeleteTask)),
     });
 
-    let parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
-    let rawChanges: any[] = Array.isArray(parsed.changes) ? parsed.changes : [];
-    let explanation = parsed.explanation || "Agent generated code diffs.";
-    let commitMessage =
-      parsed.commitMessage ||
-      `feat(${(intentResult?.intent || "build").toLowerCase()}): implementation updates`;
+    let parsed = completion.content;
+    let rawChanges: ModelGeneratedChange[] = parsed.changes;
+    let explanation = parsed.explanation;
+    let commitMessage = parsed.commitMessage;
 
     // ── Deterministic Manifest Contract Enforcement ──
     if (approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0) {
@@ -428,8 +741,7 @@ When using an existing local component, conform to its authoritative exported pr
         );
 
         let retrySucceeded = false;
-        try {
-          const approvedSpecs = Array.from(manifestActionMap.entries()).map(([p, a]) => `${p} (action: ${a})`).join(", ");
+        const approvedSpecs = Array.from(manifestActionMap.entries()).map(([p, a]) => `${p} (action: ${a})`).join(", ");
           let correctiveUserMessage = `[CODEGEN_MANIFEST_VIOLATION] Your generated output violated the approved manifest contract.\n`;
           if (undeclared.length > 0) {
             correctiveUserMessage += `- Undeclared files: [${undeclared.join(", ")}]. You are strictly forbidden from generating undeclared files.\n`;
@@ -439,21 +751,22 @@ When using an existing local component, conform to its authoritative exported pr
           }
           correctiveUserMessage += `Generate changes ONLY for these approved paths with their EXACT actions: [${approvedSpecs}].\nRespond ONLY with valid JSON matching the required format.`;
 
-          const retryCompletion = await openai.chat.completions.create({
+          const retryCompletion = await gateway.callStructured<CodeGenerationPayload>({
+            stage: PipelineStages.CODE_CORRECTION,
             model: "gpt-4o",
             messages: [
               { role: "system", content: effectiveCodingPrompt },
               { role: "user", content: userPrompt },
-              { role: "assistant", content: completion.choices[0]?.message?.content || "{}" },
+              { role: "assistant", content: completion.rawResponse.choices[0]?.message?.content || JSON.stringify(completion.content) },
               { role: "user", content: correctiveUserMessage },
             ],
             temperature: 0.1,
-            max_tokens: 16000,
-            response_format: { type: "json_object" },
+            maxTokens: 16000,
+            schema: codeGenerationSchema("ManifestCodeCorrectionSchema", true),
           });
 
-          const retryParsed = JSON.parse(retryCompletion.choices[0]?.message?.content || "{}");
-          const retryChanges: any[] = Array.isArray(retryParsed.changes) ? retryParsed.changes : [];
+          const retryParsed = retryCompletion.content;
+          const retryChanges: ModelGeneratedChange[] = retryParsed.changes;
           const retryUndeclared = findUndeclaredPaths(retryChanges);
           const retryActionMismatches = findActionMismatches(retryChanges);
 
@@ -470,12 +783,6 @@ When using an existing local component, conform to its authoritative exported pr
             undeclared = retryUndeclared;
             actionMismatches = retryActionMismatches;
           }
-        } catch (retryErr: any) {
-          console.warn(
-            `[CodeGenerator] Bounded corrective regeneration encountered error: ${retryErr?.message || retryErr}`
-          );
-        }
-
         if (!retrySucceeded) {
           if (actionMismatches.length > 0) {
             const violationErr: any = new Error(
@@ -776,8 +1083,8 @@ When using an existing local component, conform to its authoritative exported pr
 
         console.warn(`[CodeGenerator] Detected unsafe dynamic execution in "${change.path}". Triggering bounded secure correction...`);
 
-        try {
-          const secCorrection = await openai.chat.completions.create({
+        const secCorrection = await gateway.callStructured<ContentRepairPayload>({
+            stage: PipelineStages.CODE_CORRECTION,
             model: "gpt-4o",
             messages: [
               {
@@ -790,10 +1097,15 @@ When using an existing local component, conform to its authoritative exported pr
               },
             ],
             temperature: 0.0,
-            response_format: { type: "json_object" },
+            schema: {
+              name: "SecurityCodeCorrectionSchema",
+              strict: true,
+              schema: CONTENT_REPAIR_SCHEMA,
+              validate: validateContentRepairPayload,
+            },
           });
 
-          const parsedSec = JSON.parse(secCorrection.choices[0]?.message?.content || "{}");
+          const parsedSec = secCorrection.content;
           if (typeof parsedSec.content === "string" && parsedSec.content.length > 0) {
             const recheck = SecurityPolicy.checkCode(parsedSec.content, change.path);
             if (recheck.safe) {
@@ -804,9 +1116,6 @@ When using an existing local component, conform to its authoritative exported pr
           } else {
             throw new Error(`[UNSAFE_DYNAMIC_CODE_EXECUTION] Generated code in "${change.path}" violated security policy: ${violation.message}`);
           }
-        } catch (secErr: any) {
-          throw new Error(secErr.message || `[UNSAFE_DYNAMIC_CODE_EXECUTION] Generated code in "${change.path}" violated security policy.`);
-        }
       }
     }
 
@@ -839,8 +1148,8 @@ When using an existing local component, conform to its authoritative exported pr
 
           console.warn(`[CodeGenerator] Detected undeclared external dependency in "${change.path}". Triggering bounded dependency correction...`);
 
-          try {
-            const depCorrection = await openai.chat.completions.create({
+          const depCorrection = await gateway.callStructured<ContentRepairPayload>({
+              stage: PipelineStages.CODE_CORRECTION,
               model: "gpt-4o",
               messages: [
                 {
@@ -853,10 +1162,15 @@ When using an existing local component, conform to its authoritative exported pr
                 },
               ],
               temperature: 0.0,
-              response_format: { type: "json_object" },
+              schema: {
+                name: "DependencyCodeCorrectionSchema",
+                strict: true,
+                schema: CONTENT_REPAIR_SCHEMA,
+                validate: validateContentRepairPayload,
+              },
             });
 
-            const parsedDep = JSON.parse(depCorrection.choices[0]?.message?.content || "{}");
+            const parsedDep = depCorrection.content;
             if (typeof parsedDep.content === "string" && parsedDep.content.length > 0) {
               const recheck = ImportValidator.validateCodeImports(parsedDep.content, change.path, installedPackages);
               if (recheck.valid) {
@@ -867,9 +1181,6 @@ When using an existing local component, conform to its authoritative exported pr
             } else {
               throw new Error(`[UNDECLARED_EXTERNAL_DEPENDENCY] Generated code in "${change.path}" imported uninstalled package: ${violation.message}`);
             }
-          } catch (depErr: any) {
-            throw new Error(depErr.message || `[UNDECLARED_EXTERNAL_DEPENDENCY] Generated code in "${change.path}" imported uninstalled package "${violation.packageRoot}".`);
-          }
         }
       }
     }

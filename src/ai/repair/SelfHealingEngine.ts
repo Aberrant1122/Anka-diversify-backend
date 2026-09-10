@@ -1,7 +1,6 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import { getOpenAI } from "../shared/utils";
 import { AgentFileChange, AgentProgressEvent, ExecutionContract } from "../shared/types";
 import { FileManifest, RootBuildFailure, ValidationDetails, BaselineDiagnostic } from "../../types";
 import { ValidationRunner } from "../validation/ValidationRunner";
@@ -13,6 +12,77 @@ import { ErrorClassifier } from "../validation/ErrorClassifier";
 import { ErrorDiagnosticsParser, DiagnosticError, PublicContractGuard, DeterministicTs6133Repair } from "../../services/surgical-repair.engine";
 import { SurgicalPatchEngine, SurgicalPatchChunk } from "./SurgicalPatchEngine";
 import { applyPatchToFile } from "../patch/PatchApplicator";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
+
+interface DependencyRepairPayload {
+  changes: Array<{ path: string; content: string }>;
+}
+
+interface ModelRepairPayload {
+  repaired?: boolean;
+  patchExplanation?: string;
+  changes: RepairChangeProposal[];
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizedSafeRepairPath(value: unknown): string | null {
+  if (typeof value !== "string" || !value || value !== value.trim() || value.includes("\0")) return null;
+  const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return null;
+  if (!normalized.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..")) return null;
+  return normalized;
+}
+
+function validateDependencyRepairPayload(value: unknown, allowedPaths: Set<string>) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== "changes") || !Array.isArray(value.changes) || value.changes.length === 0) {
+    return { valid: false, errors: ["Dependency repair must contain only a non-empty changes array"] };
+  }
+  for (const item of value.changes) {
+    if (!isPlainRecord(item) || Object.keys(item).some((key) => key !== "path" && key !== "content")) {
+      return { valid: false, errors: ["Dependency repair change contains unknown fields"] };
+    }
+    const normalizedPath = normalizedSafeRepairPath(item.path);
+    if (!normalizedPath || !allowedPaths.has(normalizedPath) || typeof item.content !== "string" || item.content.length === 0) {
+      return { valid: false, errors: ["Dependency repair change has an unauthorized path or invalid content"] };
+    }
+  }
+  return { valid: true, data: value as unknown as DependencyRepairPayload };
+}
+
+function validateModelRepairPayload(value: unknown, allowedPaths: Set<string>) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => !["repaired", "patchExplanation", "changes"].includes(key)) || !Array.isArray(value.changes) || value.changes.length === 0) {
+    return { valid: false, errors: ["Repair payload must contain a non-empty changes array"] };
+  }
+  if (value.repaired !== undefined && typeof value.repaired !== "boolean") return { valid: false, errors: ["repaired must be boolean when supplied"] };
+  if (value.patchExplanation !== undefined && typeof value.patchExplanation !== "string") return { valid: false, errors: ["patchExplanation must be a string when supplied"] };
+
+  for (const item of value.changes) {
+    if (!isPlainRecord(item)) return { valid: false, errors: ["Repair change must be an object"] };
+    const allowedKeys = new Set(["path", "action", "description", "content", "edits", "isDeleted"]);
+    if (Object.keys(item).some((key) => !allowedKeys.has(key))) return { valid: false, errors: ["Repair change contains unknown fields"] };
+    const normalizedPath = normalizedSafeRepairPath(item.path);
+    if (!normalizedPath || !allowedPaths.has(normalizedPath) || typeof item.description !== "string" || item.description.trim().length === 0 || !["create", "modify", "delete"].includes(String(item.action))) {
+      return { valid: false, errors: ["Repair change has an unauthorized path or invalid core fields"] };
+    }
+    if (item.action === "create") {
+      if (typeof item.content !== "string" || item.content.length === 0 || item.edits !== undefined || item.isDeleted !== undefined) return { valid: false, errors: ["Create repair shape is invalid"] };
+    } else if (item.action === "delete") {
+      if (item.content !== "" || item.isDeleted !== true || item.edits !== undefined) return { valid: false, errors: ["Delete repair shape is invalid"] };
+    } else {
+      if (!Array.isArray(item.edits) || item.edits.length === 0 || item.content !== undefined || item.isDeleted !== undefined) return { valid: false, errors: ["Modify repair requires edits only"] };
+      for (const edit of item.edits) {
+        if (!isPlainRecord(edit) || Object.keys(edit).some((key) => key !== "oldText" && key !== "newText") || typeof edit.oldText !== "string" || edit.oldText.length === 0 || typeof edit.newText !== "string" || edit.oldText === edit.newText) {
+          return { valid: false, errors: ["Modify repair edit is invalid"] };
+        }
+      }
+    }
+  }
+  return { valid: true, data: value as unknown as ModelRepairPayload };
+}
 
 function extractMissingDepKeys(diags: DiagnosticError[], rawErrors?: string): Set<string> {
   const keys = new Set<string>();
@@ -203,6 +273,28 @@ export class SelfHealingEngine {
       };
     }
 
+    const executableValidationCommands = commands
+      .slice(0, 2)
+      .filter((command) => typeof command === "string" && command.trim().length > 0);
+    if (!localPath || executableValidationCommands.length === 0) {
+      const reason = !localPath
+        ? "Self-healing remains unverified: a local repository path is required for deterministic validation."
+        : "Self-healing remains unverified: no deterministic validation commands were executed.";
+      return {
+        finalChanges: initialChanges,
+        attempts: 0,
+        success: false,
+        errorLog: reason,
+        errorType: "VALIDATION_UNVERIFIED",
+        repairTrigger: "NONE",
+        repairApplied: false,
+        repaired: false,
+        buildAttemptsCount: 0,
+        modelRepairAttempts: 0,
+        patchesAppliedCount: 0,
+      };
+    }
+
     const repairLoopStartTime = performance.now();
     let currentChanges = [...initialChanges];
     let previousErrors = "";
@@ -347,19 +439,6 @@ export class SelfHealingEngine {
             patchesAppliedCount,
           };
         }
-      } else if (!currentChanges.length) {
-        return {
-          finalChanges: [],
-          attempts: attempt,
-          success: true,
-          errorType: classification.type,
-          repairTrigger: "NONE",
-          repairApplied: false,
-          repaired: false,
-          buildAttemptsCount: buildAttempts,
-          modelRepairAttempts,
-          patchesAppliedCount,
-        };
       } else {
         if (fsManager && localPath) {
           try {
@@ -401,10 +480,7 @@ export class SelfHealingEngine {
           buildAttempts++;
         }
 
-        const validation =
-          localPath && commands.length > 0
-            ? await ValidationRunner.validateWithShell(currentChanges, localPath, commands)
-            : await ValidationRunner.selfReviewChanges(currentChanges);
+        const validation = await ValidationRunner.validateWithShell(currentChanges, localPath, executableValidationCommands);
 
         validationSuccess = validation.success;
         if (validationSuccess) {
@@ -769,8 +845,13 @@ export class SelfHealingEngine {
           let depChanges: AgentFileChange[] = [...currentChanges];
 
           try {
-            const openai = getOpenAI();
-            const depCompletion = await openai.chat.completions.create({
+            const allowedDependencyPaths = new Set(
+              effectiveRepairContextChanges
+                .map((change) => normalizedSafeRepairPath(change.path))
+                .filter((value): value is string => Boolean(value)),
+            );
+            const depResult = await LLMGateway.getInstance().callStructured<DependencyRepairPayload>({
+              stage: PipelineStages.REPAIR,
               model: "gpt-4o",
               messages: [
                 {
@@ -783,22 +864,44 @@ export class SelfHealingEngine {
                 },
               ],
               temperature: 0.0,
-              response_format: { type: "json_object" },
+              schema: {
+                name: "MissingDependencyRepairSchema",
+                strict: true,
+                schema: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["changes"],
+                  properties: {
+                    changes: {
+                      type: "array",
+                      minItems: 1,
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        required: ["path", "content"],
+                        properties: {
+                          path: { type: "string", minLength: 1 },
+                          content: { type: "string", minLength: 1 },
+                        },
+                      },
+                    },
+                  },
+                },
+                validate: (value) => validateDependencyRepairPayload(value, allowedDependencyPaths),
+              },
             });
 
-            const parsed = JSON.parse(depCompletion.choices[0]?.message?.content || "{}");
-            if (Array.isArray(parsed.changes) && parsed.changes.length > 0) {
-              const importCheck = ImportValidator.validateChangesImports(parsed.changes, installedPackages);
-              const secCheck = SecurityPolicy.checkChanges(parsed.changes);
+            if (depResult.content.changes.length > 0) {
+              const appliedDepChanges: AgentFileChange[] = depResult.content.changes.map((change) => ({
+                path: change.path,
+                content: change.content,
+                action: "modify",
+                description: "Fix missing dependency",
+              }));
+              const importCheck = ImportValidator.validateChangesImports(appliedDepChanges, installedPackages);
+              const secCheck = SecurityPolicy.checkChanges(appliedDepChanges);
 
               if (importCheck.valid && secCheck.safe) {
-                const appliedDepChanges: AgentFileChange[] = parsed.changes.map((c: any) => ({
-                  path: c.path,
-                  content: c.content || "",
-                  action: "modify" as const,
-                  description: "Fix missing dependency",
-                }));
-
                 const merged = [...currentChanges];
                 for (const change of appliedDepChanges) {
                   const norm = normalizeRepoPath(change.path);
@@ -818,7 +921,7 @@ export class SelfHealingEngine {
               }
             }
           } catch (e: any) {
-            console.warn("[SelfHealingEngine] Bounded missing dependency correction error:", e?.message);
+            throw e;
           }
 
           if (depCorrectionSucceeded && localPath && commands.length > 0) {
@@ -1224,7 +1327,6 @@ export class SelfHealingEngine {
         }
 
         modelRepairAttempts++;
-        const openai = getOpenAI();
         const prompt = buildSelfHealingRepairPrompt({
           errorLog: previousErrors,
           diagnostics,
@@ -1238,22 +1340,67 @@ export class SelfHealingEngine {
           localPath,
         });
 
-        const repairCompletion = await openai.chat.completions.create({
+        const allowedRepairPaths = new Set(
+          (approvedManifest?.files.map((file) => file.path) || Object.keys(currentFileContext))
+            .map((repairPath) => normalizedSafeRepairPath(repairPath))
+            .filter((value): value is string => Boolean(value)),
+        );
+        const repairResult = await LLMGateway.getInstance().callStructured<ModelRepairPayload>({
+          stage: PipelineStages.REPAIR,
           model: "gpt-4o",
           messages: [
             { role: "system", content: prompt.system },
             { role: "user", content: prompt.user },
           ],
           temperature: 0.1,
-          max_tokens: 8000,
-          response_format: { type: "json_object" },
+          maxTokens: 8000,
+          schema: {
+            name: "SelfHealingRepairProposalSchema",
+            strict: false,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["changes"],
+              properties: {
+                repaired: { type: "boolean" },
+                patchExplanation: { type: "string" },
+                changes: {
+                  type: "array",
+                  minItems: 1,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["path", "action", "description"],
+                    properties: {
+                      path: { type: "string", minLength: 1 },
+                      action: { type: "string", enum: ["create", "modify", "delete"] },
+                      description: { type: "string", minLength: 1 },
+                      content: { type: "string" },
+                      isDeleted: { type: "boolean" },
+                      edits: {
+                        type: "array",
+                        minItems: 1,
+                        items: {
+                          type: "object",
+                          additionalProperties: false,
+                          required: ["oldText", "newText"],
+                          properties: {
+                            oldText: { type: "string", minLength: 1 },
+                            newText: { type: "string" },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            validate: (value) => validateModelRepairPayload(value, allowedRepairPaths),
+          },
         });
 
         try {
-          const repairParsed = JSON.parse(repairCompletion.choices[0]?.message?.content || "{}");
-          const proposals: RepairChangeProposal[] = Array.isArray(repairParsed.changes)
-            ? repairParsed.changes
-            : [];
+          const proposals = repairResult.content.changes;
 
           if (proposals.length > 0) {
             // Emergency Breaker 4: Proposal fingerprint check (Part H)

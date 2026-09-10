@@ -20,6 +20,7 @@ describe("Phase 1B — Authoritative Semantic Keyword Control Removal Verificati
         // When LLM returns a structured classification for an unseen prompt
         const mockLlmResponse = {
           taskType: "NEW_FEATURE",
+          intent: "NEW_FEATURE",
           risk: "LOW",
           estimatedComplexity: "MEDIUM",
           reasoning: `Structured LLM assessment for "${prompt}"`,
@@ -31,7 +32,7 @@ describe("Phase 1B — Authoritative Semantic Keyword Control Removal Verificati
           chat: {
             completions: {
               create: jest.fn().mockResolvedValue({
-                choices: [{ message: { content: JSON.stringify(mockLlmResponse) } }],
+                choices: [{ message: { content: JSON.stringify(mockLlmResponse) }, finish_reason: "stop" }],
               }),
             },
           },
@@ -97,7 +98,9 @@ describe("Phase 1B — Authoritative Semantic Keyword Control Removal Verificati
       // MUST NOT guess DELETE_FOLDER or NEW_FEATURE from prompt words
       expect(result.taskType).toBe("UNKNOWN");
       expect(result.intent).toBe("CLASSIFICATION_FAILED");
-      expect(result.requiresClarification).toBe(true);
+      // Checkpoint 1B: Technical failures MUST NOT become user clarification
+      expect(result.requiresClarification).toBe(false);
+      expect(result.outcome).toBe("TECHNICAL_FAILURE");
       expect(result.confidence).toBe(0);
     });
 
@@ -121,7 +124,9 @@ describe("Phase 1B — Authoritative Semantic Keyword Control Removal Verificati
 
       expect(result.taskType).toBe("UNKNOWN");
       expect(result.intent).toBe("CLASSIFICATION_FAILED");
-      expect(result.requiresClarification).toBe(true);
+      // Checkpoint 1B: Technical failures MUST NOT become user clarification
+      expect(result.requiresClarification).toBe(false);
+      expect(result.outcome).toBe("TECHNICAL_FAILURE");
     });
   });
 

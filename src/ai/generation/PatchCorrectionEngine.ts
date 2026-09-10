@@ -1,6 +1,12 @@
 import crypto from "crypto";
-import { getOpenAI } from "../shared/utils";
 import { FilePatchEdit, applyPatchToFile } from "../patch/PatchApplicator";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
+import { isLLMError } from "../gateway/LLMError";
+
+interface PatchCorrectionPayload {
+  edits: FilePatchEdit[];
+}
 
 export interface PatchCorrectionInput {
   filePath: string;
@@ -103,33 +109,57 @@ CURRENT EXACT FULL SOURCE CONTENT:
 ${currentContent}`;
 
     try {
-      const openai = getOpenAI();
-      const completion = await openai.chat.completions.create({
+      const result = await LLMGateway.getInstance().callStructured<PatchCorrectionPayload>({
+        stage: PipelineStages.CODE_CORRECTION,
         model: "gpt-4o",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
         temperature: 0.0,
-        max_tokens: 4000,
-        response_format: { type: "json_object" },
+        maxTokens: 4000,
+        schema: {
+          name: "ExactPatchCorrectionSchema",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["edits"],
+            properties: {
+              edits: {
+                type: "array",
+                minItems: 1,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["oldText", "newText"],
+                  properties: {
+                    oldText: { type: "string", minLength: 1 },
+                    newText: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          validate: (value: unknown) => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Patch correction must be an object"] };
+            const payload = value as Record<string, unknown>;
+            if (Object.keys(payload).some((key) => key !== "edits") || !Array.isArray(payload.edits) || payload.edits.length === 0) {
+              return { valid: false, errors: ["Patch correction must contain only a non-empty edits array"] };
+            }
+            for (const item of payload.edits) {
+              if (!item || typeof item !== "object" || Array.isArray(item)) return { valid: false, errors: ["Patch edit must be an object"] };
+              const edit = item as Record<string, unknown>;
+              if (Object.keys(edit).some((key) => key !== "oldText" && key !== "newText") || typeof edit.oldText !== "string" || edit.oldText.length === 0 || typeof edit.newText !== "string" || edit.oldText === edit.newText) {
+                return { valid: false, errors: ["Patch edit fields are invalid"] };
+              }
+            }
+            return { valid: true, data: payload as unknown as PatchCorrectionPayload };
+          },
+        },
       });
 
-      const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
-      const rawEdits = Array.isArray(parsed.edits) ? parsed.edits : [];
-
-      if (rawEdits.length === 0) {
-        return {
-          attempted: true,
-          succeeded: false,
-          error: "Correction model returned empty edits[] array.",
-        };
-      }
-
-      const correctedEdits: FilePatchEdit[] = rawEdits.map((e: any) => ({
-        oldText: typeof e.oldText === "string" ? e.oldText : "",
-        newText: typeof e.newText === "string" ? e.newText : "",
-      }));
+      const correctedEdits = result.content.edits;
 
       // Verify the corrected edits against exact PatchApplicator
       const verifyResult = applyPatchToFile(currentContent, correctedEdits);
@@ -148,6 +178,7 @@ ${currentContent}`;
         correctedEdits,
       };
     } catch (err: any) {
+      if (isLLMError(err)) throw err;
       return {
         attempted: true,
         succeeded: false,

@@ -1,12 +1,82 @@
-import { getOpenAI } from "../shared/utils";
 import { AgentFileChange, ExecutionContract, FeatureValidationResult } from "../shared/types";
 import { StaticValidationEngine } from "../../services/static-validator.engine";
-import { FEATURE_VALIDATOR_PROMPT } from "../prompts/validation";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
 import {
   detectPrimaryActiveEntryPoint,
   detectAllActiveEntryRoots,
   detectRepositoryArchitecture,
 } from "../planning/RepositoryArchitectureDetector";
+
+interface FeatureValidationAdvisory {
+  findings: Array<{
+    id: string;
+    label: string;
+    assessment: "PASS" | "FAIL" | "WARN";
+    details: string;
+  }>;
+  analysis: string;
+  recommendations: string[];
+}
+
+const featureValidationAdvisorySchema = {
+  name: "FeatureValidationAdvisorySchema",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["findings", "analysis", "recommendations"],
+    properties: {
+      findings: {
+        type: "array",
+        maxItems: 50,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "label", "assessment", "details"],
+          properties: {
+            id: { type: "string", minLength: 1 },
+            label: { type: "string", minLength: 1 },
+            assessment: { type: "string", enum: ["PASS", "FAIL", "WARN"] },
+            details: { type: "string", minLength: 1 },
+          },
+        },
+      },
+      analysis: { type: "string", minLength: 1 },
+      recommendations: { type: "array", maxItems: 50, items: { type: "string", minLength: 1 } },
+    },
+  },
+  validate: (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { valid: false, errors: ["Feature validation advisory must be an object"] };
+    }
+    const advisory = value as Record<string, unknown>;
+    if (
+      Object.keys(advisory).some((key) => !["findings", "analysis", "recommendations"].includes(key)) ||
+      !Array.isArray(advisory.findings) ||
+      advisory.findings.length > 50 ||
+      typeof advisory.analysis !== "string" || !advisory.analysis.trim() ||
+      !Array.isArray(advisory.recommendations) ||
+      advisory.recommendations.length > 50
+    ) {
+      return { valid: false, errors: ["Feature validation advisory fields are invalid"] };
+    }
+    if (advisory.findings.some((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return true;
+      const finding = item as Record<string, unknown>;
+      return (
+        Object.keys(finding).some((key) => !["id", "label", "assessment", "details"].includes(key)) ||
+        typeof finding.id !== "string" || !finding.id.trim() ||
+        typeof finding.label !== "string" || !finding.label.trim() ||
+        !["PASS", "FAIL", "WARN"].includes(String(finding.assessment)) ||
+        typeof finding.details !== "string" || !finding.details.trim()
+      );
+    }) || advisory.recommendations.some((item) => typeof item !== "string" || !item.trim())) {
+      return { valid: false, errors: ["Feature validation advisory entries are invalid"] };
+    }
+    return { valid: true, data: advisory as unknown as FeatureValidationAdvisory };
+  },
+};
 
 export class ValidationDetector {
   static async runFeatureValidation(
@@ -301,45 +371,68 @@ export class ValidationDetector {
     const snapshotFilesFallback = ((snapshot?.keyFiles || snapshot?.repoSnapshot || []) as Array<{ path: string; content?: string }>);
     const existingFiles = snapshotFilesFallback.map((f) => `${f.path}`).join("\n");
 
-    const defaultResult: FeatureValidationResult = {
-      overallPassed: true,
+    const unverifiedResult: FeatureValidationResult = {
+      overallPassed: false,
       checks: [
         { id: "route_reachability", label: "Route Reachability", status: "WARN", checked: false, details: "Not verified" },
         { id: "component_rendering", label: "Component Rendering", status: "WARN", checked: false, details: "Not verified" },
         { id: "nav_integration", label: "Navigation Integration", status: "WARN", checked: false, details: "Not verified" },
-        { id: "import_export", label: "Import/Export Completeness", status: "PASS", checked: true, details: "Assumed complete" },
+        { id: "import_export", label: "Import/Export Completeness", status: "WARN", checked: false, details: "Not verified" },
         { id: "api_connection", label: "API & Service Connection", status: "WARN", checked: false, details: "Not verified" },
         { id: "middleware", label: "Middleware & Permissions", status: "WARN", checked: false, details: "Not verified" },
         { id: "db_wiring", label: "Database Schema Wiring", status: "WARN", checked: false, details: "Not verified" },
-        { id: "orphan_audit", label: "Orphan Component Audit", status: "PASS", checked: true, details: "Assumed none" },
-        { id: "intent_satisfaction", label: "Intent Satisfaction", status: "PASS", checked: true, details: "Assumed satisfied" },
+        { id: "orphan_audit", label: "Orphan Component Audit", status: "WARN", checked: false, details: "Not verified" },
+        { id: "intent_satisfaction", label: "Intent Satisfaction", status: "WARN", checked: false, details: "Not verified" },
       ],
-      failedChecks: [],
+      failedChecks: ["Deterministic feature validation was unavailable."],
       repairActions: [],
     };
 
     try {
-      const openai = getOpenAI();
-      const validationCompletion = await openai.chat.completions.create({
+      const advisory = await LLMGateway.getInstance().callStructured<FeatureValidationAdvisory>({
+        stage: PipelineStages.FEATURE_VALIDATION,
         model: "gpt-4o",
         messages: [
-          { role: "system", content: FEATURE_VALIDATOR_PROMPT },
+          {
+            role: "system",
+            content: `You are an advisory feature and integration reviewer.
+Analyze the supplied repository context and proposed changes for suspected integration problems.
+Your response is advisory only and does not establish validation success or failure.
+Return findings with an advisory assessment, analysis, and recommendations.`,
+          },
           {
             role: "user",
             content: `ORIGINAL USER REQUEST: ${originalMessage}\n\nEXISTING REPOSITORY FILES:\n${existingFiles.slice(0, 2000)}\n\nNEW/MODIFIED FILES:\n${changesText.slice(0, 6000)}`,
           },
         ],
         temperature: 0.1,
-        max_tokens: 2000,
-        response_format: { type: "json_object" },
+        maxTokens: 2000,
+        schema: featureValidationAdvisorySchema,
       });
 
-      const parsed = JSON.parse(validationCompletion.choices[0]?.message?.content || "{}");
-      if (typeof parsed.overallPassed === "boolean" && Array.isArray(parsed.checks)) {
-        return parsed as FeatureValidationResult;
-      }
+      const advisoryChecks = advisory.content.findings.map((finding, index) => ({
+        id: `model_advisory_${index + 1}_${finding.id}`,
+        label: finding.label,
+        status: "WARN" as const,
+        checked: false,
+        details: `[MODEL_ADVISORY:${finding.assessment}] ${finding.details}`,
+      }));
+      const advisorySummary = [
+        advisory.content.analysis.trim(),
+        ...advisory.content.recommendations.map((item) => `Recommendation: ${item}`),
+      ].filter(Boolean).join(" ");
+      return {
+        ...unverifiedResult,
+        checks: advisoryChecks.length > 0
+          ? advisoryChecks
+          : unverifiedResult.checks,
+        failedChecks: [
+          ...unverifiedResult.failedChecks,
+          ...(advisorySummary ? [`Model advisory: ${advisorySummary}`] : []),
+        ],
+      };
     } catch {}
 
-    return defaultResult;
+    return unverifiedResult;
   }
 }
