@@ -15,6 +15,7 @@ import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { SecurityAuditor } from "../review/SecurityAuditor";
 import { ValidationDetector } from "../validation/ValidationDetector";
 import { ChatRequest } from "../shared/types";
+import { BaselineDiagnosticVerifier } from "../runtime/BaselineDiagnosticVerifier";
 
 // Mock PrismaClient to prevent DB connection attempts
 jest.mock("@prisma/client", () => {
@@ -133,6 +134,16 @@ describe("Pipeline Patch Resolution Integration Tests", () => {
 
   // ── CHANGE 10: Clean repair baseline returns a deterministic no-op ──
   test("CHANGE 10: Clean repair baseline returns ALREADY_SATISFIED before proposed mutation", async () => {
+    jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+      taskType: "BUG_FIX",
+      risk: "LOW",
+      estimatedComplexity: "SMALL",
+      intent: "BUG_FIX",
+      confidence: 0.95,
+      requiresClarification: false,
+      reasoning: "Resolve source diagnostics",
+      successCondition: "SOURCE_DIAGNOSTICS",
+    } as any);
     const approvedManifest = {
       files: [{ path: "src/auth.ts", action: "modify" as const, dependencies: [], description: "update config" }],
       totalFiles: 1,
@@ -168,7 +179,22 @@ describe("Pipeline Patch Resolution Integration Tests", () => {
       validationCommands: [],
     });
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", {
+      ...sampleRequest,
+      message: "Fix all TypeScript errors.",
+    }, undefined, {
+      baselineBuildPassed: true,
+      baselineCommands: ["toolchain typecheck"],
+      dependenciesReady: true,
+      baselineDiagnostics: [],
+      trustedEarlyNoOpProof: (() => {
+        const baseline = BaselineDiagnosticVerifier.capture({ phase: "BASELINE", passed: true, commands: ["trusted diagnostic verifier"], diagnostics: [], validationChannel: "SOURCE_DIAGNOSTICS", source: "DETERMINISTIC_TOOL" });
+        const current = BaselineDiagnosticVerifier.capture({ phase: "CURRENT", passed: true, commands: ["trusted diagnostic verifier"], diagnostics: [], validationChannel: "SOURCE_DIAGNOSTICS", source: "DETERMINISTIC_TOOL" });
+        const proof = BaselineDiagnosticVerifier.proveAlreadySatisfied({ obligation: { id: "backend-contract:diagnostics", condition: "SOURCE_DIAGNOSTICS", source: "BACKEND_TASK_CONTRACT", request: "Fix all TypeScript errors." }, comparison: BaselineDiagnosticVerifier.compare(baseline, current), repositoryRevision: "hash-1", diagnosticRepositoryRevision: "hash-1" });
+        if (!proof) throw new Error("Expected trusted diagnostic proof");
+        return proof;
+      })(),
+    });
 
     expect(response.changes).toHaveLength(0);
     expect(response.explanation).toContain("ALREADY_SATISFIED");

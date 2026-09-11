@@ -27,6 +27,14 @@ ESTIMATED COMPLEXITY (estimatedComplexity):
 INTENT (intent):
 - "BUG_FIX" | "FEATURE_ADD" | "REFACTOR" | "DOCS" | "OPTIMIZATION" | "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE"
 
+SUCCESS CONDITION (successCondition):
+- SOURCE_DIAGNOSTICS: the requested outcome is specifically absence/resolution of compiler, type, syntax, or source diagnostics.
+- BUILD: the requested outcome is specifically that the repository build succeeds.
+- TEST_FAILURE: the request identifies failing tests or asks for a test failure to be repaired.
+- BEHAVIORAL_VALIDATION: the request concerns runtime, API, UI, data-flow, or other semantic behavior.
+- DETERMINISTIC_STATE: the request asks for another objectively inspectable repository state.
+Classify the condition the user actually requested. A BUG_FIX is not implicitly diagnostic-driven.
+
 EXAMPLES:
 1. User Request: "Remove lib folder"
 Output JSON:
@@ -38,6 +46,7 @@ Output JSON:
   "targetPath": "lib",
   "confidence": 0.98,
   "requiresClarification": false,
+  "successCondition": "DETERMINISTIC_STATE",
   "reasoning": "Simple directory removal request for 'lib' folder."
 }
 
@@ -51,6 +60,7 @@ Output JSON:
   "targetPath": "src/auth",
   "confidence": 0.95,
   "requiresClarification": false,
+  "successCondition": "DETERMINISTIC_STATE",
   "reasoning": "End-to-end authentication system implementation requiring routes, controllers, and services."
 }
 
@@ -77,6 +87,7 @@ Respond ONLY with valid JSON matching this schema:
   "confidence": number,
   "requiresClarification": boolean,
   "reasoning": "brief explanation",
+  "successCondition": "SOURCE_DIAGNOSTICS" | "BUILD" | "TEST_FAILURE" | "BEHAVIORAL_VALIDATION" | "DETERMINISTIC_STATE",
   "targetPath"?: "extracted file or folder target if applicable",
   "question"?: "specific question to clarify",
   "options"?: ["Option A", "Option B"],
@@ -85,6 +96,7 @@ Respond ONLY with valid JSON matching this schema:
       "id": "stage-1",
       "taskType": "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE" | "BUG_FIX" | "REFACTOR" | "FILE_CREATION" | "CONFIG_CHANGE" | "DOCS" | "OPTIMIZATION",
       "goal": "Description of this specific stage's goal",
+      "successCondition"?: "SOURCE_DIAGNOSTICS" | "BUILD" | "TEST_FAILURE" | "BEHAVIORAL_VALIDATION" | "DETERMINISTIC_STATE",
       "targetPath"?: "target path for this stage if applicable",
       "dependsOn": []
     }

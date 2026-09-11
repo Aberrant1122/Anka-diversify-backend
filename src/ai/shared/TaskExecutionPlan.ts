@@ -1,5 +1,6 @@
 import { TaskIntentSpec } from "./TaskIntentSpec";
 import { TaskClassificationResult, TaskType } from "../classification/TaskTypes";
+import { TaskSuccessCondition } from "../../types";
 
 export type StageExecutionStatus = "PENDING" | "RUNNING" | "VERIFIED" | "FAILED";
 export type PlanExecutionStatus = "PENDING" | "RUNNING" | "FAILED" | "COMPLETED";
@@ -9,6 +10,7 @@ export interface TaskExecutionStageSpec {
   name?: string;
   taskType: TaskType;
   goal: string;
+  successCondition?: TaskSuccessCondition;
   targetPath?: string;
   dependsOn?: string[];
 }

@@ -10,6 +10,7 @@ import { RepositoryKnowledgeGraph } from "../repository/RepositoryKnowledgeGraph
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { TaskExecutionPlan } from "../shared/TaskExecutionPlan";
 import { ValidationRunner } from "../validation/ValidationRunner";
+import { BaselineDiagnosticVerifier, TrustedDiagnosticNoOpProof } from "../runtime/BaselineDiagnosticVerifier";
 
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder";
@@ -51,6 +52,19 @@ jest.mock("@prisma/client", () => {
 
 let testTempDir: string;
 
+function trustedDiagnosticProof(request: string, repositoryRevision = "hash-1"): TrustedDiagnosticNoOpProof {
+  const baseline = BaselineDiagnosticVerifier.capture({ phase: "BASELINE", passed: true, commands: ["trusted diagnostic verifier"], diagnostics: [], validationChannel: "SOURCE_DIAGNOSTICS", source: "DETERMINISTIC_TOOL" });
+  const current = BaselineDiagnosticVerifier.capture({ phase: "CURRENT", passed: true, commands: ["trusted diagnostic verifier"], diagnostics: [], validationChannel: "SOURCE_DIAGNOSTICS", source: "DETERMINISTIC_TOOL" });
+  const proof = BaselineDiagnosticVerifier.proveAlreadySatisfied({
+    obligation: { id: "backend-contract:diagnostics", condition: "SOURCE_DIAGNOSTICS", source: "BACKEND_TASK_CONTRACT", request },
+    comparison: BaselineDiagnosticVerifier.compare(baseline, current),
+    repositoryRevision,
+    diagnosticRepositoryRevision: repositoryRevision,
+  });
+  if (!proof) throw new Error("Expected trusted diagnostic proof");
+  return proof;
+}
+
 describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
   beforeEach(() => {
     process.env.OPENAI_API_KEY = "test-mock-key";
@@ -72,6 +86,7 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
       requiresClarification: false,
       confidence: 0.95,
       reasoning: "Fix bug",
+      successCondition: "BEHAVIORAL_VALIDATION",
     } as any);
 
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockResolvedValue({
@@ -138,14 +153,24 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
     jest.restoreAllMocks();
   });
 
-  test("10. Exact live test: clean baseline build with 0 diagnostics yields ALREADY_SATISFIED with 0 investigation/manifest/codegen calls", async () => {
+  test("10. Diagnostic repair with 0 diagnostics yields ALREADY_SATISFIED with 0 investigation/manifest/codegen calls", async () => {
+    jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+      intent: "BUG_FIX",
+      taskType: "BUG_FIX",
+      risk: "LOW",
+      estimatedComplexity: "SMALL",
+      requiresClarification: false,
+      confidence: 0.95,
+      reasoning: "Resolve TypeScript diagnostics",
+      successCondition: "SOURCE_DIAGNOSTICS",
+    } as any);
     const kgSpy = jest.spyOn(RepositoryKnowledgeGraph, "buildKnowledgeGraph");
     const searchSpy = jest.spyOn(RepositorySearch, "runIterativeRepositorySearch");
     const manifestSpy = jest.spyOn(ManifestGenerator.prototype, "generateManifest");
     const codegenSpy = jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs");
 
     const sampleRequest = {
-      message: "resolve all the build errors",
+      message: "Fix all TypeScript errors.",
       context: {},
       sessionId: "session-clean-baseline-test",
     };
@@ -157,6 +182,8 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
         { path: "src/app.ts", content: "export const x = 1;" },
       ],
       baselineBuildPassed: true,
+      baselineCommands: ["toolchain typecheck"],
+      trustedEarlyNoOpProof: trustedDiagnosticProof("Fix all TypeScript errors."),
       dependenciesReady: true,
       baselineDiagnostics: [],
       targetedBaselineDiagnostics: [],
@@ -294,15 +321,16 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
       estimatedComplexity: "SMALL",
       requiresClarification: false,
       confidence: 0.95,
-      reasoning: "Fix build errors then create calculator",
+      reasoning: "Fix TypeScript errors then create calculator",
+      successCondition: "SOURCE_DIAGNOSTICS",
       stages: [
-        { id: "stage-1", name: "Fix build errors", taskType: "BUG_FIX", goal: "Fix build errors" },
+        { id: "stage-1", name: "Fix TypeScript errors", taskType: "BUG_FIX", goal: "Fix TypeScript errors", successCondition: "SOURCE_DIAGNOSTICS" },
         { id: "stage-2", name: "Create calculator", taskType: "NEW_FEATURE", goal: "Create calculator", dependsOn: ["stage-1"] },
       ],
     } as any);
 
     const sampleRequest = {
-      message: "fix the build errors and create a calculator",
+      message: "fix the TypeScript errors and create a calculator",
       context: {},
       sessionId: "session-compound-test",
     };
@@ -320,6 +348,8 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
           { path: "src/app.ts", content: "export const x = 1;" },
         ],
         baselineBuildPassed: true,
+        baselineCommands: ["toolchain build"],
+        trustedEarlyNoOpProof: trustedDiagnosticProof("Fix TypeScript errors"),
         dependenciesReady: true,
         baselineDiagnostics: [],
       }
@@ -406,14 +436,31 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
     expect(searchSpy).toHaveBeenCalled();
   });
 
-  test("15. Deterministic check: no keyword dependency; structured BUG_FIX triggers ALREADY_SATISFIED", async () => {
+  test("15. Generic structured BUG_FIX is not implicitly diagnostic-grounded", async () => {
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+      files: [{ path: "src/app.ts", action: "modify", dependencies: [], description: "Investigate behavior" }],
+      totalFiles: 1,
+    } as any);
+    jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+      roadmap: [],
+      explanation: "Investigated behavioral repair",
+      changes: [{ path: "src/app.ts", action: "modify", description: "Behavioral repair", content: "export const x = 2;" }],
+      commitMessage: "fix: behavior",
+      riskAnalysis: { breakingChanges: false, performanceImpact: "none", securityRisks: "none", dependencyRisk: "none" },
+    } as any);
     const sampleRequest = {
       message: "fix the issue with calculations",
       context: {},
       sessionId: "session-keyword-free-test",
     };
 
+    const searchSpy = jest.spyOn(RepositorySearch, "runIterativeRepositorySearch");
     const response = await AgentPipeline.runCodingAgent("user-noop", "proj-noop-6", sampleRequest as any, undefined, {
+      authorizedCapabilityScope: AuthorizedCapabilityScope.fromBackendConfiguration({
+        workspaceRoot: testTempDir,
+        authorityId: "pass4-test-15",
+        grants: [{ path: "src/app.ts", action: "FILE_MODIFY" }],
+      })!,
       canonicalExistingFiles: ["package.json", "src/app.ts"],
       effectiveSnapshot: [
         { path: "package.json", content: '{"name":"test-app"}' },
@@ -424,9 +471,97 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
       baselineDiagnostics: [],
     });
 
-    expect(response.successfulNoOp).toBe(true);
-    expect(response.reason).toBe("ALREADY_SATISFIED");
-    expect(response.status).toBe("ALREADY_SATISFIED");
-    expect(response.changes).toEqual([]);
+    expect(response.successfulNoOp).toBeFalsy();
+    expect(response.reason).not.toBe("ALREADY_SATISFIED");
+    expect(searchSpy).toHaveBeenCalled();
+  });
+
+  test("16. Production acceptance behavioral task bypasses no-op and enters repository investigation", async () => {
+    jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+      intent: "BUG_FIX",
+      taskType: "BUG_FIX",
+      risk: "LOW",
+      estimatedComplexity: "SMALL",
+      requiresClarification: false,
+      confidence: 0.95,
+      reasoning: "Deliberately incorrect diagnostic classification",
+      successCondition: "SOURCE_DIAGNOSTICS",
+    } as any);
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+      files: [{ path: "src/app.ts", action: "modify", dependencies: [], description: "Investigate associated tasks" }],
+      totalFiles: 1,
+    } as any);
+    jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+      roadmap: [],
+      explanation: "Investigated associated-task behavior",
+      changes: [{ path: "src/app.ts", action: "modify", description: "Behavioral repair", content: "export const x = 2;" }],
+      commitMessage: "fix: associated tasks",
+      riskAnalysis: { breakingChanges: false, performanceImpact: "none", securityRisks: "none", dependencyRisk: "none" },
+    } as any);
+    const searchSpy = jest.spyOn(RepositorySearch, "runIterativeRepositorySearch");
+    const response = await AgentPipeline.runCodingAgent("user-noop", "proj-noop-7", {
+      message: "Project detail view is not displaying associated backlog tasks. Projects show zero associated tasks even though tasks are assigned. Investigate why assigned tasks are not appearing and fix the behavior.",
+      context: {},
+      sessionId: "session-production-behavioral-regression",
+    } as any, undefined, {
+      canonicalExistingFiles: ["package.json", "src/app.ts"],
+      effectiveSnapshot: [
+        { path: "package.json", content: '{"name":"test-app","scripts":{"build":"echo build"}}' },
+        { path: "src/app.ts", content: "export const x = 1;" },
+      ],
+      baselineBuildPassed: true,
+      baselineCommands: ["toolchain build", "toolchain test"],
+      dependenciesReady: true,
+      baselineDiagnostics: [],
+      targetedBaselineDiagnostics: [],
+    });
+
+    expect(response.successfulNoOp).toBeFalsy();
+    expect(response.reason).not.toBe("ALREADY_SATISFIED");
+    expect(searchSpy).toHaveBeenCalled();
+  });
+
+  test("17. Passing build plus incorrect BUILD classification cannot bypass Save-behavior investigation", async () => {
+    jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
+      intent: "BUG_FIX",
+      taskType: "BUG_FIX",
+      risk: "LOW",
+      estimatedComplexity: "SMALL",
+      requiresClarification: false,
+      confidence: 0.95,
+      reasoning: "Deliberately incorrect build classification",
+      successCondition: "BUILD",
+    } as any);
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+      files: [{ path: "src/app.ts", action: "modify", dependencies: [], description: "Investigate Save behavior" }],
+      totalFiles: 1,
+    } as any);
+    jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+      roadmap: [],
+      explanation: "Investigated Save behavior",
+      changes: [{ path: "src/app.ts", action: "modify", description: "Behavioral repair", content: "export const x = 2;" }],
+      commitMessage: "fix: save behavior",
+      riskAnalysis: { breakingChanges: false, performanceImpact: "none", securityRisks: "none", dependencyRisk: "none" },
+    } as any);
+    const searchSpy = jest.spyOn(RepositorySearch, "runIterativeRepositorySearch");
+    const response = await AgentPipeline.runCodingAgent("user-noop", "proj-noop-8", {
+      message: "The app builds successfully but clicking Save does nothing.",
+      context: {},
+      sessionId: "session-misclassified-build-regression",
+    } as any, undefined, {
+      canonicalExistingFiles: ["package.json", "src/app.ts"],
+      effectiveSnapshot: [
+        { path: "package.json", content: '{"name":"test-app","scripts":{"build":"echo build"}}' },
+        { path: "src/app.ts", content: "export const x = 1;" },
+      ],
+      baselineBuildPassed: true,
+      baselineCommands: ["toolchain build"],
+      dependenciesReady: true,
+      baselineDiagnostics: [],
+    });
+
+    expect(response.successfulNoOp).toBeFalsy();
+    expect(response.reason).not.toBe("ALREADY_SATISFIED");
+    expect(searchSpy).toHaveBeenCalled();
   });
 });

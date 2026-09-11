@@ -400,6 +400,13 @@ export type TaskRisk = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
 export type TaskComplexity = "SMALL" | "MEDIUM" | "LARGE" | "COMPLEX";
 
+export type TaskSuccessCondition =
+  | "SOURCE_DIAGNOSTICS"
+  | "BUILD"
+  | "TEST_FAILURE"
+  | "BEHAVIORAL_VALIDATION"
+  | "DETERMINISTIC_STATE";
+
 export interface TaskClassificationResult {
   taskType: TaskType;
   risk: TaskRisk;
@@ -408,6 +415,7 @@ export interface TaskClassificationResult {
   confidence: number;
   requiresClarification: boolean;
   reasoning: string;
+  successCondition?: TaskSuccessCondition;
   targetPath?: string;
   question?: string;
   options?: string[];
@@ -416,6 +424,7 @@ export interface TaskClassificationResult {
     name?: string;
     taskType: TaskType;
     goal: string;
+    successCondition?: TaskSuccessCondition;
     targetPath?: string;
     dependsOn?: string[];
   }>;

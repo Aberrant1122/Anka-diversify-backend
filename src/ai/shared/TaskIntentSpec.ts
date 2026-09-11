@@ -1,4 +1,5 @@
 import { TaskClassificationResult, TaskType, TaskRisk, TaskComplexity } from "../classification/TaskTypes";
+import { TaskSuccessCondition } from "../../types";
 import { ResolvedTaskTarget } from "./TaskExecutionPlan";
 
 export type TaskOperationKind = "CREATE" | "MODIFY" | "DELETE" | "REPAIR" | "REFACTOR";
@@ -14,6 +15,7 @@ export interface TaskIntentSpec {
   operations: TaskIntentOperation[];
   constraints: string[];
   acceptanceCriteria: string[];
+  successCondition?: TaskSuccessCondition;
   destructive: boolean;
   requiresClarification: boolean;
   taskType: TaskType;
@@ -101,6 +103,9 @@ export function createTaskIntentSpec(
     operations,
     constraints,
     acceptanceCriteria,
+    // Missing semantic detail fails closed: a generic repair is behavioral until
+    // the structured classifier explicitly identifies an aligned deterministic condition.
+    successCondition: classification.successCondition ?? "BEHAVIORAL_VALIDATION",
     destructive: isDestructive,
     requiresClarification: Boolean(classification.requiresClarification),
     taskType: classification.taskType,

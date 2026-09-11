@@ -1,6 +1,7 @@
 import { getOpenAI } from "../shared/utils";
 import { INTENT_CLASSIFIER_PROMPT } from "../prompts/classification";
 import { TaskType, TaskRisk, TaskComplexity, TaskClassificationResult } from "./TaskTypes";
+import { TaskSuccessCondition } from "../../types";
 import { DestructiveSafetyEvaluator } from "./DestructiveSafetyEvaluator";
 import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
 import { LLMGateway } from "../gateway/LLMGateway";
@@ -25,6 +26,9 @@ const VALID_COMPLEXITIES = new Set<TaskComplexity>(["SMALL", "MEDIUM", "LARGE", 
 const VALID_INTENTS = new Set<TaskClassificationResult["intent"]>([
   "BUG_FIX", "FEATURE_ADD", "REFACTOR", "DOCS", "OPTIMIZATION", "DELETE_FOLDER",
   "DELETE_FILE", "NEW_FEATURE", "UNKNOWN", "CLASSIFICATION_FAILED",
+]);
+const VALID_SUCCESS_CONDITIONS = new Set<TaskSuccessCondition>([
+  "SOURCE_DIAGNOSTICS", "BUILD", "TEST_FAILURE", "BEHAVIORAL_VALIDATION", "DETERMINISTIC_STATE",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -83,6 +87,7 @@ export class IntentClassifier {
         question?: string;
         options?: string[];
         reasoning: string;
+        successCondition?: TaskSuccessCondition;
         stages?: any[];
       }>({
         stage: PipelineStages.INTENT_CLASSIFICATION,
@@ -125,6 +130,10 @@ export class IntentClassifier {
               question: { type: "string" },
               options: { type: "array", items: { type: "string" } },
               reasoning: { type: "string" },
+              successCondition: {
+                type: "string",
+                enum: Array.from(VALID_SUCCESS_CONDITIONS),
+              },
               stages: {
                 type: "array",
                 items: {
@@ -134,6 +143,10 @@ export class IntentClassifier {
                     id: { type: "string" },
                     taskType: { type: "string" },
                     goal: { type: "string" },
+                    successCondition: {
+                      type: "string",
+                      enum: Array.from(VALID_SUCCESS_CONDITIONS),
+                    },
                     targetPath: { type: "string" },
                     dependsOn: { type: "array", items: { type: "string" } },
                   },
@@ -145,7 +158,7 @@ export class IntentClassifier {
             additionalProperties: false,
           },
           validate: (parsed) => {
-            if (!isRecord(parsed) || !onlyKeys(parsed, ["taskType", "risk", "estimatedComplexity", "intent", "targetPath", "confidence", "requiresClarification", "question", "options", "reasoning", "stages"])) return { valid: false, errors: ["Parsed intent output contains invalid fields"] };
+            if (!isRecord(parsed) || !onlyKeys(parsed, ["taskType", "risk", "estimatedComplexity", "intent", "targetPath", "confidence", "requiresClarification", "question", "options", "reasoning", "successCondition", "stages"])) return { valid: false, errors: ["Parsed intent output contains invalid fields"] };
             if (!VALID_TASK_TYPES.has(parsed.taskType as TaskType)) return { valid: false, errors: [`Invalid or missing taskType: ${parsed.taskType}`] };
             if (!VALID_RISKS.has(parsed.risk as TaskRisk)) return { valid: false, errors: ["Invalid or missing risk"] };
             if (!VALID_COMPLEXITIES.has(parsed.estimatedComplexity as TaskComplexity)) return { valid: false, errors: ["Invalid or missing estimatedComplexity"] };
@@ -153,6 +166,7 @@ export class IntentClassifier {
             if (typeof parsed.confidence !== "number" || !Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1) return { valid: false, errors: ["Invalid or missing confidence"] };
             if (typeof parsed.requiresClarification !== "boolean") return { valid: false, errors: ["Invalid or missing clarification flag"] };
             if (typeof parsed.reasoning !== "string" || !parsed.reasoning.trim() || (parsed.question !== undefined && (typeof parsed.question !== "string" || !parsed.question.trim()))) return { valid: false, errors: ["Invalid narrative field"] };
+            if (parsed.successCondition !== undefined && !VALID_SUCCESS_CONDITIONS.has(parsed.successCondition as TaskSuccessCondition)) return { valid: false, errors: ["Invalid successCondition"] };
             if (parsed.options !== undefined && (!Array.isArray(parsed.options) || parsed.options.some((item) => typeof item !== "string" || !item.trim()))) return { valid: false, errors: ["Invalid clarification options"] };
             const paths = Array.isArray(parsed.targetPath) ? parsed.targetPath : parsed.targetPath === undefined ? [] : [parsed.targetPath];
             if (paths.some((item) => !isSafeRelativePath(item))) return { valid: false, errors: ["Invalid targetPath"] };
@@ -160,7 +174,7 @@ export class IntentClassifier {
               if (!Array.isArray(parsed.stages) || parsed.stages.length === 0) return { valid: false, errors: ["Invalid stages"] };
               const ids = new Set<string>();
               for (const stage of parsed.stages) {
-                if (!isRecord(stage) || !onlyKeys(stage, ["id", "taskType", "goal", "targetPath", "dependsOn"]) || typeof stage.id !== "string" || !stage.id.trim() || ids.has(stage.id) || !VALID_TASK_TYPES.has(stage.taskType as TaskType) || typeof stage.goal !== "string" || !stage.goal.trim() || (stage.targetPath !== undefined && !isSafeRelativePath(stage.targetPath)) || !Array.isArray(stage.dependsOn) || stage.dependsOn.some((id) => typeof id !== "string" || !id.trim() || id === stage.id)) return { valid: false, errors: ["Invalid stage decomposition"] };
+                if (!isRecord(stage) || !onlyKeys(stage, ["id", "taskType", "goal", "successCondition", "targetPath", "dependsOn"]) || typeof stage.id !== "string" || !stage.id.trim() || ids.has(stage.id) || !VALID_TASK_TYPES.has(stage.taskType as TaskType) || typeof stage.goal !== "string" || !stage.goal.trim() || (stage.successCondition !== undefined && !VALID_SUCCESS_CONDITIONS.has(stage.successCondition as TaskSuccessCondition)) || (stage.targetPath !== undefined && !isSafeRelativePath(stage.targetPath)) || !Array.isArray(stage.dependsOn) || stage.dependsOn.some((id) => typeof id !== "string" || !id.trim() || id === stage.id)) return { valid: false, errors: ["Invalid stage decomposition"] };
                 ids.add(stage.id);
               }
               if (parsed.stages.some((stage: any) => stage.dependsOn.some((id: string) => !ids.has(id)))) return { valid: false, errors: ["Stage dependency references an unknown ID"] };
@@ -262,6 +276,7 @@ export class IntentClassifier {
               name: s.goal.trim(),
               taskType: s.taskType as TaskType,
               goal: s.goal.trim(),
+              successCondition: s.successCondition as TaskSuccessCondition | undefined,
               targetPath: typeof s.targetPath === "string" && s.targetPath.trim() ? s.targetPath.trim() : undefined,
               dependsOn: s.dependsOn,
             });
@@ -280,6 +295,9 @@ export class IntentClassifier {
         confidence,
         requiresClarification,
         reasoning,
+        successCondition: parsed.successCondition && VALID_SUCCESS_CONDITIONS.has(parsed.successCondition)
+          ? parsed.successCondition
+          : "BEHAVIORAL_VALIDATION",
         targetPath,
         question: requiresClarification ? clarificationQuestion : undefined,
         options: requiresClarification ? clarificationOptions : undefined,
