@@ -65,15 +65,20 @@ describe("mergeFilesWithDiskPriority – core precedence", () => {
     expect(foo!.content).toBe("NEW");
   });
 
-  // B. Only in snapshot
-  test("B: file only in snapshot is still returned", () => {
+  // B. Snapshot cannot resurrect a path absent from a materialized repository.
+  test("B: file absent on authoritative disk is not resurrected from snapshot", () => {
     dir = makeTmpDir({}); // empty dir
     const snapshot = [{ path: "remote/only.ts", content: "REMOTE" }];
     const result = mergeFilesWithDiskPriority([dir], snapshot);
 
     const remote = result.find((f) => f.path === "remote/only.ts");
-    expect(remote).toBeDefined();
-    expect(remote!.content).toBe("REMOTE");
+    expect(remote).toBeUndefined();
+  });
+
+  test("B2: snapshot remains the fallback when no local repository is materialized", () => {
+    dir = makeTmpDir({});
+    const result = mergeFilesWithDiskPriority([], [{ path: "remote/only.ts", content: "REMOTE" }]);
+    expect(result).toEqual([{ path: "remote/only.ts", content: "REMOTE" }]);
   });
 
   // C. Only on disk

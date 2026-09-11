@@ -97,6 +97,7 @@ export class RepositoryStateRefresher {
     projectId: string;
     localPath: string;
     customBaseDir?: string;
+    persist?: boolean;
   }): Promise<RefreshedRepositoryState> {
     const { projectId, localPath, customBaseDir } = params;
 
@@ -113,7 +114,9 @@ export class RepositoryStateRefresher {
     const knowledgeGraph = await RepositoryKnowledgeGraph.buildKnowledgeGraph(snapshot);
 
     // Save persisted graph keyed by the new revisionHash
-    savePersistedKnowledgeGraph(projectId, revisionHash, knowledgeGraph, customBaseDir);
+    if (params.persist !== false) {
+      savePersistedKnowledgeGraph(projectId, revisionHash, knowledgeGraph, customBaseDir);
+    }
 
     return {
       revisionHash,
@@ -140,6 +143,7 @@ export class RepositoryStateRefresher {
     projectId: string;
     localPath: string;
     customBaseDir?: string;
+    persist?: boolean;
   }): Promise<RefreshedRepositoryState> {
     return this.refreshRepositoryState(params);
   }

@@ -201,6 +201,7 @@ export class ActionGroupExecutor {
           captureFingerprints(root, attemptedActions), "VALIDATION_FAILED", receipt);
         return { group: input.group.snapshot(), value, journalEntry: entry };
       }
+      await input.transaction.commit();
       input.group.transition("VALIDATING", "VERIFIED");
       const entry = input.journal.appendVerified(input.group.snapshot(), attemptedActions, before, attemptedAfter,
         captureFingerprints(root, attemptedActions), receipt);

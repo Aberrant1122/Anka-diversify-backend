@@ -7,7 +7,7 @@ import { GitWorktreeService, RepositoryRunSummary } from "../../services/git-wor
 import { RepositoryMaterializationService } from "../../services/repository-materialization.service";
 import { prisma } from "../../services/database";
 import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
-import { TaskRuntime, VerifiedCompletionReceipt } from "../runtime/TaskRuntime";
+import { TaskRuntime } from "../runtime/TaskRuntime";
 import { runWithTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
 import { AuthorizedCapabilityScope, CapabilityGrant } from "../runtime/CapabilityGuard";
 
@@ -184,19 +184,25 @@ export class CodingAgent {
           runId,
           request,
           authorizedCapabilities: internalOptions?.authorizedCapabilities,
+          taskRuntime: runtime,
           onProgress,
         })
       );
     } catch (error) {
-      runtime.fail({
-        failureType: "TECHNICAL_FAILURE",
-        code: "ISOLATED_EXECUTION_FAILED",
-        message: error instanceof Error ? error.message : "Unknown isolated execution failure",
-      });
+      if (runtime.snapshot().status !== "FAILED" && runtime.snapshot().status !== "COMPLETED") {
+        runtime.fail({
+          failureType: "TECHNICAL_FAILURE",
+          code: "ISOLATED_EXECUTION_FAILED",
+          message: error instanceof Error ? error.message : "Unknown isolated execution failure",
+        });
+      }
       throw error;
     }
 
-    let finalWorkspace = initialWorkspace.withRelevantPaths(summary.changedFiles);
+    let finalWorkspace = runtime.workspaceState().withRelevantPaths([
+      ...runtime.workspaceState().snapshot().relevantPaths,
+      ...summary.changedFiles,
+    ]);
     if (summary.validationCommands.length > 0) {
       finalWorkspace = finalWorkspace.withValidationFact({
         id: "isolated-run-validation",
@@ -208,19 +214,14 @@ export class CodingAgent {
     if (summary.diagnosticComparison) {
       finalWorkspace = finalWorkspace.withDiagnosticComparison(summary.diagnosticComparison);
     }
-    runtime.updateWorkspace(finalWorkspace);
+    if (runtime.snapshot().status === "RUNNING") runtime.updateWorkspace(finalWorkspace);
 
-    if (summary.agentResponse.needsClarification) {
+    if (summary.agentResponse.needsClarification && runtime.snapshot().status === "RUNNING") {
       runtime.requestClarification({
         question: summary.agentResponse.question || "Additional user input is required.",
         reason: summary.agentResponse.reason || "The task cannot proceed deterministically without clarification.",
       });
-    } else if (summary.validationPassed) {
-      runtime.complete(VerifiedCompletionReceipt.fromDeterministicValidation({
-        validationPassed: summary.validationPassed,
-        source: "GIT_WORKTREE_VALIDATION",
-      }));
-    } else {
+    } else if (!summary.validationPassed && runtime.snapshot().status === "RUNNING") {
       runtime.fail({
         failureType: "VALIDATION_FAILURE",
         code: summary.agentResponse.errorCode || "DETERMINISTIC_VALIDATION_FAILED",

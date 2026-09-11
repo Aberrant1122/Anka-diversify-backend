@@ -552,6 +552,14 @@ export interface AgentResponse {
   buildAttemptsCount?: number;
   visualVerification?: VisualVerificationResult;
   taskRuntime?: TaskRuntimeSnapshot;
+  agentLoop?: {
+    outcome: "AWAITING_COMPLETION_EVALUATION" | "CLARIFICATION_REQUIRED" | "TECHNICAL_FAILURE" | "AUTHORIZATION_DENIED" | "VALIDATION_FAILURE" | "BUDGET_EXHAUSTED" | "MAX_ITERATIONS_REACHED";
+    iterations: number;
+    workingPlanId: string;
+    workingPlanRevision: number;
+    verifiedCheckpointIds: readonly string[];
+    failureCode?: string;
+  };
 }
 
 export interface BaselineDiagnostic {

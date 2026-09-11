@@ -224,9 +224,10 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
     expect(response.securityPass).toBe(false);
     expect(response.lifecycleStage).toBe("BuildFailed");
     expect(response.changes).toEqual([]);
-    expect(response.checkpointJournal).toEqual([
+    expect(response.checkpointJournal).toHaveLength(2);
+    expect(response.checkpointJournal).toEqual(expect.arrayContaining([
       expect.objectContaining({ actionGroupId: response.actionGroupId, status: "ROLLED_BACK" }),
-    ]);
+    ]));
 
     // Verify ACTUAL disk state: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");

@@ -25,7 +25,23 @@ export interface WorkspaceValidationFact {
 
 export interface WorkingPlanReference {
   id: string;
-  status: "NOT_STARTED" | "ACTIVE" | "BLOCKED" | "FINISHED";
+  revision?: number;
+  status: "NOT_STARTED" | "ACTIVE" | "REVISION_REQUIRED" | "AWAITING_COMPLETION_EVALUATION" | "BLOCKED" | "FINISHED";
+}
+
+export interface WorkspaceCheckpointReference {
+  id: string;
+  sequence: number;
+  actionGroupId: string;
+  status: "VERIFIED" | "ROLLED_BACK";
+  source: "VERIFIED_CHECKPOINT_JOURNAL";
+}
+
+export interface WorkspaceFailureFact {
+  id: string;
+  code: string;
+  category: "TECHNICAL_FAILURE" | "AUTHORIZATION_DENIAL" | "VALIDATION_FAILURE" | "BUDGET_EXHAUSTED";
+  source: "DETERMINISTIC_RUNTIME";
 }
 
 export interface AgentWorkspaceSnapshot {
@@ -40,6 +56,8 @@ export interface AgentWorkspaceSnapshot {
   constraints: readonly WorkspaceConstraint[];
   validationFacts: readonly WorkspaceValidationFact[];
   diagnosticComparisons: readonly DiagnosticBaselineComparison[];
+  checkpointReferences: readonly WorkspaceCheckpointReference[];
+  failureFacts: readonly WorkspaceFailureFact[];
   workingPlan?: WorkingPlanReference;
   authority: "KNOWLEDGE_ONLY_NO_MUTATION_AUTHORITY";
 }
@@ -75,12 +93,16 @@ function freezeSnapshot(snapshot: AgentWorkspaceSnapshot): AgentWorkspaceSnapsho
   snapshot.constraints.forEach(Object.freeze);
   snapshot.validationFacts.forEach(Object.freeze);
   snapshot.diagnosticComparisons.forEach(Object.freeze);
+  snapshot.checkpointReferences.forEach(Object.freeze);
+  snapshot.failureFacts.forEach(Object.freeze);
   if (snapshot.workingPlan) Object.freeze(snapshot.workingPlan);
   Object.freeze(snapshot.evidence);
   Object.freeze(snapshot.relevantPaths);
   Object.freeze(snapshot.constraints);
   Object.freeze(snapshot.validationFacts);
   Object.freeze(snapshot.diagnosticComparisons);
+  Object.freeze(snapshot.checkpointReferences);
+  Object.freeze(snapshot.failureFacts);
   return Object.freeze(snapshot);
 }
 
@@ -106,6 +128,8 @@ export class AgentWorkspaceState {
       constraints,
       validationFacts: [],
       diagnosticComparisons: [],
+      checkpointReferences: [],
+      failureFacts: [],
       authority: "KNOWLEDGE_ONLY_NO_MUTATION_AUTHORITY",
     }));
   }
@@ -159,9 +183,50 @@ export class AgentWorkspaceState {
   }
 
   public withWorkingPlan(reference: WorkingPlanReference): AgentWorkspaceState {
-    const statuses: WorkingPlanReference["status"][] = ["NOT_STARTED", "ACTIVE", "BLOCKED", "FINISHED"];
+    const statuses: WorkingPlanReference["status"][] = [
+      "NOT_STARTED", "ACTIVE", "REVISION_REQUIRED", "AWAITING_COMPLETION_EVALUATION", "BLOCKED", "FINISHED",
+    ];
     if (!statuses.includes(reference.status)) throw new Error(`Invalid working plan status: ${reference.status}`);
-    return this.copy({ workingPlan: { id: requireText(reference.id, "working plan id"), status: reference.status } });
+    if (reference.revision !== undefined && (!Number.isInteger(reference.revision) || reference.revision < 1)) {
+      throw new Error("Working plan revision must be a positive integer");
+    }
+    return this.copy({ workingPlan: {
+      id: requireText(reference.id, "working plan id"),
+      status: reference.status,
+      ...(reference.revision !== undefined ? { revision: reference.revision } : {}),
+    } });
+  }
+
+  public withCheckpointReference(reference: WorkspaceCheckpointReference): AgentWorkspaceState {
+    if (reference.source !== "VERIFIED_CHECKPOINT_JOURNAL") {
+      throw new Error("Checkpoint references require verified journal provenance");
+    }
+    if (!Number.isInteger(reference.sequence) || reference.sequence < 1) {
+      throw new Error("Checkpoint sequence must be a positive integer");
+    }
+    const normalized: WorkspaceCheckpointReference = {
+      id: requireText(reference.id, "checkpoint reference id"),
+      sequence: reference.sequence,
+      actionGroupId: requireText(reference.actionGroupId, "action group id"),
+      status: reference.status,
+      source: "VERIFIED_CHECKPOINT_JOURNAL",
+    };
+    if (this.value.checkpointReferences.some((item) => item.id === normalized.id)) return this;
+    return this.copy({ checkpointReferences: [...this.value.checkpointReferences, normalized] });
+  }
+
+  public withFailureFact(failure: WorkspaceFailureFact): AgentWorkspaceState {
+    if (failure.source !== "DETERMINISTIC_RUNTIME") {
+      throw new Error("Failure facts require deterministic runtime provenance");
+    }
+    const normalized: WorkspaceFailureFact = {
+      id: requireText(failure.id, "failure fact id"),
+      code: requireText(failure.code, "failure code"),
+      category: failure.category,
+      source: "DETERMINISTIC_RUNTIME",
+    };
+    if (this.value.failureFacts.some((item) => item.id === normalized.id)) return this;
+    return this.copy({ failureFacts: [...this.value.failureFacts, normalized] });
   }
 
   public snapshot(): AgentWorkspaceSnapshot {
@@ -178,6 +243,8 @@ export class AgentWorkspaceState {
       constraints: [...this.value.constraints],
       validationFacts: [...(changes.validationFacts ?? this.value.validationFacts)],
       diagnosticComparisons: [...(changes.diagnosticComparisons ?? this.value.diagnosticComparisons)],
+      checkpointReferences: [...(changes.checkpointReferences ?? this.value.checkpointReferences)],
+      failureFacts: [...(changes.failureFacts ?? this.value.failureFacts)],
       ...(changes.workingPlan || this.value.workingPlan
         ? { workingPlan: { ...(changes.workingPlan ?? this.value.workingPlan!) } }
         : {}),

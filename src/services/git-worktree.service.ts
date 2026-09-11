@@ -23,6 +23,7 @@ import {
   DiagnosticValidationSnapshot,
 } from "../ai/runtime/BaselineDiagnosticVerifier";
 import { AuthorizedCapabilityScope, CapabilityGrant } from "../ai/runtime/CapabilityGuard";
+import type { TaskRuntime } from "../ai/runtime/TaskRuntime";
 
 const execAsync = promisify(exec);
 
@@ -67,6 +68,7 @@ export interface RunIsolatedAgentOptions {
   runId: string;
   request: ChatRequest;
   authorizedCapabilities?: readonly CapabilityGrant[];
+  taskRuntime?: TaskRuntime;
   onProgress?: (event: AgentProgressEvent) => void;
 }
 
@@ -693,6 +695,7 @@ export class GitWorktreeService {
             dependenciesReady: depPrep.success,
             baselineCommands,
             baselineBuildErrors,
+            taskRuntime: options.taskRuntime,
           }
         );
       } catch (err: any) {

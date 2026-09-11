@@ -127,6 +127,11 @@ export class TaskRuntime {
     this.workspace = workspace;
   }
 
+  /** Read-only state object for loop coordination; AgentWorkspaceState exposes no mutation authority. */
+  public workspaceState(): AgentWorkspaceState {
+    return this.workspace;
+  }
+
   public complete(receipt: VerifiedCompletionReceipt): void {
     this.requireStatus("RUNNING", "complete");
     if (!(receipt instanceof VerifiedCompletionReceipt) || !receipt.isAuthentic()) {

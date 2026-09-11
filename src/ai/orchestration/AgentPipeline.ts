@@ -23,11 +23,15 @@ import { decrypt } from "../../utils/encryption";
 import { AuthoritativeSourceHydrator } from "../manifest/AuthoritativeSourceHydrator";
 import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
 import { DiagnosticNormalizer, NormalizedDiagnostic } from "../validation/DiagnosticNormalizer";
-import { RepositoryObserver } from "./RepositoryObserver";
+import { RepositoryObserver, RepositoryObservation, RepositoryProjectFacts } from "./RepositoryObserver";
 import { AgentPlanner } from "./AgentPlanner";
 import { ValidationCoordinator } from "./ValidationCoordinator";
 import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
 import { VerifiedCheckpointJournal } from "../runtime/VerifiedCheckpointJournal";
+import { AgentLoopCoordinator } from "./AgentLoopCoordinator";
+import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
+import { TaskRuntime } from "../runtime/TaskRuntime";
+import { WorkingPlan } from "../runtime/WorkingPlan";
 
 export class AgentPipeline {
   static async runCodingAgent(
@@ -44,14 +48,147 @@ export class AgentPipeline {
       baselineBuildPassed?: boolean;
       authorizedCapabilityScope?: AuthorizedCapabilityScope;
       checkpointJournal?: VerifiedCheckpointJournal;
+      taskRuntime?: TaskRuntime;
+      maxAgentIterations?: number;
+      repositoryObservation?: RepositoryObservation;
+      repositoryFacts?: RepositoryProjectFacts;
+      persistConversation?: boolean;
+      persistenceSession?: { id: string; title?: string | null };
       [key: string]: any;
     },
   ): Promise<AgentResponse> {
-    const session = await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
-    const repositoryFacts = await RepositoryObserver.loadProjectFacts(projectId);
-    await MemoryPersistence.saveMessage(session.id, "user", request.message);
+    const persistenceSession = await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
+    await MemoryPersistence.saveMessage(persistenceSession.id, "user", request.message);
+    const ownsRuntime = !options?.taskRuntime;
+    const runtime = options?.taskRuntime ?? TaskRuntime.create({
+      taskId: `pipeline-${Date.now()}`,
+      originalGoal: request.message,
+      workspace: AgentWorkspaceState.create({
+        projectId,
+        ...(request.repositoryId ? { repositoryId: request.repositoryId } : {}),
+        root: options?.effectiveLocalPath ?? process.cwd(),
+      }),
+      metadata: { projectId, executionBoundary: "AgentPipeline.runCodingAgent" },
+    });
+    if (ownsRuntime) runtime.start();
+    const journal = options?.checkpointJournal ?? new VerifiedCheckpointJournal();
+    const configuredMax = options?.maxAgentIterations ?? Number(process.env.ANKA_AGENT_MAX_ITERATIONS ?? 8);
+    const maxIterations = Number.isInteger(configuredMax) && configuredMax >= 1 && configuredMax <= 20 ? configuredMax : 8;
+    let iterationRequest = request;
+    let preparedObservation: RepositoryObservation | undefined;
+    let preparedFacts: RepositoryProjectFacts | undefined;
+    const workingPlan = WorkingPlan.create({ id: `working-plan:${runtime.snapshot().taskId}` });
+    const result = await AgentLoopCoordinator.runPipeline({
+      runtime,
+      workingPlan,
+      maxIterations,
+      observe: async (iteration) => {
+        const facts = await RepositoryObserver.loadProjectFacts(projectId);
+        const observation = await RepositoryObserver.observe(projectId, iterationRequest, facts, options);
+        preparedFacts = facts;
+        preparedObservation = observation;
+        const revision = observation.currentRevisionHash ?? `unversioned-iteration-${iteration}`;
+        const workspace = runtime.workspaceState().withEvidence({
+          id: `loop-observation:${iteration}:${revision}`,
+          kind: "MATERIALIZED_REPOSITORY",
+          description: `RepositoryObserver captured current repository bytes for agent-loop iteration ${iteration}.`,
+          revision,
+        });
+        return { workspace, revision };
+      },
+      executeIteration: async () => {
+        const before = journal.snapshot().length;
+        const response = await this.runSingleIteration(userId, projectId, iterationRequest, onProgress, {
+          ...options,
+          taskRuntime: runtime,
+          checkpointJournal: journal,
+          repositoryFacts: preparedFacts,
+          repositoryObservation: preparedObservation,
+          persistConversation: false,
+          persistenceSession,
+        });
+        if (response.taskExecutionPlan) {
+          iterationRequest = {
+            ...iterationRequest,
+            context: { ...(iterationRequest.context ?? {}), taskExecutionPlan: response.taskExecutionPlan },
+          };
+        }
+        return { response, journalEntry: journal.snapshot()[before] };
+      },
+      onRevisionRequired: (response) => {
+        const failedPlan = response.taskExecutionPlan;
+        if (!failedPlan) return;
+        const retryStages = failedPlan.stages.map((stage, index) =>
+          index === failedPlan.currentStageIndex && stage.status === "FAILED"
+            ? { ...stage, status: "PENDING" as const }
+            : stage,
+        );
+        iterationRequest = {
+          ...iterationRequest,
+          context: {
+            ...(iterationRequest.context ?? {}),
+            taskExecutionPlan: { ...failedPlan, stages: retryStages, status: "RUNNING" },
+          },
+        };
+      },
+    });
+    await MemoryPersistence.saveMessage(persistenceSession.id, "assistant", result.response.explanation);
+    const reachedUserFacingSuccess = result.response.lifecycleStage === "Done"
+      || result.response.successfulNoOp === true
+      || result.response.compoundTaskStatus === "RUNNING"
+      || result.response.compoundTaskStatus === "COMPLETED";
+    if (reachedUserFacingSuccess && !persistenceSession.title) {
+      await MemoryPersistence.updateSessionTitle(persistenceSession.id, request.message);
+    }
+    return {
+      ...result.response,
+      agentLoop: {
+        outcome: result.loop.outcome,
+        iterations: result.loop.iterations,
+        workingPlanId: result.loop.workingPlan.snapshot().id,
+        workingPlanRevision: result.loop.workingPlan.snapshot().revision,
+        verifiedCheckpointIds: result.loop.verifiedCheckpointIds,
+        ...(result.loop.failureCode ? { failureCode: result.loop.failureCode } : {}),
+      },
+      taskRuntime: runtime.snapshot(),
+    };
+  }
 
-    const observation = await RepositoryObserver.observe(projectId, request, repositoryFacts, options);
+  private static async runSingleIteration(
+    userId: string,
+    projectId: string,
+    request: ChatRequest,
+    onProgress?: (event: AgentProgressEvent) => void,
+    options?: {
+      effectiveLocalPath?: string;
+      baselineDiagnostics?: BaselineDiagnostic[];
+      targetedBaselineDiagnostics?: BaselineDiagnostic[];
+      isBaselineDeltaTask?: boolean;
+      baseCommitSha?: string;
+      baselineBuildPassed?: boolean;
+      authorizedCapabilityScope?: AuthorizedCapabilityScope;
+      checkpointJournal?: VerifiedCheckpointJournal;
+      taskRuntime?: TaskRuntime;
+      maxAgentIterations?: number;
+      repositoryObservation?: RepositoryObservation;
+      repositoryFacts?: RepositoryProjectFacts;
+      persistConversation?: boolean;
+      persistenceSession?: { id: string; title?: string | null };
+      [key: string]: any;
+    },
+  ): Promise<AgentResponse> {
+    const session = options?.persistenceSession
+      ?? await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
+    const repositoryFacts = options?.repositoryFacts ?? await RepositoryObserver.loadProjectFacts(projectId);
+    const saveConversationMessage = options?.persistConversation === false
+      ? async (_role: "user" | "assistant", _content: string): Promise<void> => undefined
+      : async (role: "user" | "assistant", content: string): Promise<void> => {
+          await MemoryPersistence.saveMessage(session.id, role, content);
+        };
+    await saveConversationMessage("user", request.message);
+
+    const observation = options?.repositoryObservation
+      ?? await RepositoryObserver.observe(projectId, request, repositoryFacts, options);
     const pipelineStart = performance.now();
     onProgress?.({
       step: 1,
@@ -89,7 +226,7 @@ export class AgentPipeline {
 
     if (planning.status === "FAILED") {
       const failureExplanation = `[Technical Failure] Intent classification failed: ${intentResult.reasoning}`;
-      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+      await saveConversationMessage("assistant", failureExplanation);
       return {
         explanation: failureExplanation,
         changes: [],
@@ -115,7 +252,7 @@ export class AgentPipeline {
     // Enforce Stage Dependency Eligibility (Pass 3A)
     if (stageDependencyViolation) {
       const failureExplanation = `[Stage Dependency Violation] Stage "${activeStage.id}" cannot execute because its dependencies are not VERIFIED: ${failedOrPendingDependencies.join(", ")}`;
-      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+      await saveConversationMessage("assistant", failureExplanation);
 
       return {
         explanation: failureExplanation,
@@ -268,7 +405,7 @@ export class AgentPipeline {
     });
 
     if (intentResult.requiresClarification && (!clarificationData || clarificationData.clarificationQas.length === 0)) {
-      await MemoryPersistence.saveMessage(session.id, "assistant", `[Agent] ❓ ${intentResult.question || "Please clarify your request."}`);
+      await saveConversationMessage("assistant", `[Agent] ❓ ${intentResult.question || "Please clarify your request."}`);
       return {
         explanation: intentResult.reasoning,
         changes: [],
@@ -385,8 +522,8 @@ export class AgentPipeline {
         durationMs: 0,
       });
 
-      await MemoryPersistence.saveMessage(session.id, "assistant", explanation);
-      if (!session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
+      await saveConversationMessage("assistant", explanation);
+      if (options?.persistConversation !== false && !session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
 
       return {
         explanation,
@@ -496,7 +633,7 @@ export class AgentPipeline {
       const failureExplanation =
         hydrationResult.error ||
         `[MANIFEST_SOURCE_HYDRATION_FAILED] Failed to hydrate source for approved modify targets.`;
-      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+      await saveConversationMessage("assistant", failureExplanation);
 
       return {
         explanation: failureExplanation,
@@ -543,7 +680,7 @@ export class AgentPipeline {
         (genErr?.message && genErr.message.includes("[CODEGEN_MANIFEST_ACTION_VIOLATION]"))
       ) {
         const failureExplanation = `[Execution Scope Violation] [CODEGEN_MANIFEST_ACTION_VIOLATION] Generated file changes attempted action violating approved manifest contract:\n• ${genErr.message}`;
-        await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+        await saveConversationMessage("assistant", failureExplanation);
 
         return {
           explanation: failureExplanation,
@@ -567,7 +704,7 @@ export class AgentPipeline {
         (genErr?.message && genErr.message.includes("[CODEGEN_MANIFEST_VIOLATION]"))
       ) {
         const failureExplanation = `[Execution Scope Violation] Generated file changes failed deterministic scope validation:\n• [UNDECLARED_FILE] ${genErr.message}`;
-        await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+        await saveConversationMessage("assistant", failureExplanation);
 
         return {
           explanation: failureExplanation,
@@ -617,7 +754,7 @@ export class AgentPipeline {
         .map((e) => `• [${e.reason}] ${e.path}: ${e.message}`)
         .join("\n");
       const failureExplanation = `[Execution Scope Violation] Generated file changes failed deterministic scope validation:\n${errorDetails}`;
-      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+      await saveConversationMessage("assistant", failureExplanation);
 
       return {
         explanation: failureExplanation,
@@ -652,7 +789,7 @@ export class AgentPipeline {
 
       if (!versionCheck.valid) {
         const failureExplanation = `[${versionCheck.error.code}] File version mismatch on "${versionCheck.error.path}": ${versionCheck.error.message}`;
-        await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+        await saveConversationMessage("assistant", failureExplanation);
 
         return {
           explanation: failureExplanation,
@@ -798,9 +935,9 @@ export class AgentPipeline {
     }
 
     const summary = `[TaskType: ${intentResult.taskType} | Risk: ${intentResult.risk} | Complexity: ${intentResult.estimatedComplexity}] ${combinedExplanation}\n\n${auditResult.summary}${checklistMarkdown}\n\nFiles Modified / Deleted:\n${fileChangeLines}`;
-    await MemoryPersistence.saveMessage(session.id, "assistant", summary);
+    await saveConversationMessage("assistant", summary);
 
-    if (!session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
+    if (options?.persistConversation !== false && !session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
 
     return {
       explanation: combinedExplanation + "\n\n" + auditResult.summary + checklistMarkdown,

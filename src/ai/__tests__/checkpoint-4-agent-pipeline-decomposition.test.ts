@@ -197,6 +197,12 @@ describe("Checkpoint 4 AgentPipeline decomposition", () => {
     const transaction = {
       checkpointId: "checkpoint-1",
       fsManager,
+      localPath: "C:\\fixture",
+      snapshot: jest.fn().mockResolvedValue(undefined),
+      apply: jest.fn().mockResolvedValue(undefined),
+      getExecutedMutations: jest.fn().mockReturnValue([
+        { path: "src/index.ts", action: "FILE_MODIFY", content: "export const value = 2;" },
+      ]),
       commit: jest.fn().mockResolvedValue(undefined),
       rollback: jest.fn().mockResolvedValue(undefined),
     } as unknown as StageExecutionTransaction;
@@ -265,7 +271,7 @@ describe("Checkpoint 4 AgentPipeline decomposition", () => {
   test("production AgentPipeline delegates observation and planning without changing technical-failure behavior", async () => {
     const snapshot = repositorySnapshot();
     jest.spyOn(MemoryPersistence, "getOrCreateSession").mockResolvedValue({ id: "session-1" } as never);
-    jest.spyOn(MemoryPersistence, "saveMessage").mockResolvedValue(undefined);
+    const saveMessage = jest.spyOn(MemoryPersistence, "saveMessage").mockResolvedValue(undefined);
     jest.spyOn(RepositoryObserver, "loadProjectFacts").mockResolvedValue({
       projectContext: projectContext(snapshot),
       project: { localPath: "C:\\fixture", githubUrl: null, githubToken: null },
@@ -294,6 +300,7 @@ describe("Checkpoint 4 AgentPipeline decomposition", () => {
     const result = await AgentPipeline.runCodingAgent("user-1", "project-1", { message: "fix it" });
 
     expect(observeSpy).toHaveBeenCalledTimes(1);
+    expect(saveMessage.mock.calls.map((call) => call[1])).toEqual(["user", "assistant"]);
     expect(result.errorCode).toBe("TECHNICAL_FAILURE");
     expect(result.changes).toEqual([]);
   });

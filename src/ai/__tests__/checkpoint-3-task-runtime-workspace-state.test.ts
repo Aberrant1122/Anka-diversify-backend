@@ -145,7 +145,7 @@ describe("Checkpoint 3 deterministic runtime and workspace state", () => {
     })).toThrow(/must be boolean/);
   });
 
-  test("the user-facing production flow uses both states and completes only from worktree validation", async () => {
+  test("the user-facing production flow preserves deterministic state for CP8 completion evaluation", async () => {
     (prisma.project.findUnique as jest.Mock).mockResolvedValue({
       id: "project-1",
       localPath: path.resolve("production-repository"),
@@ -171,8 +171,7 @@ describe("Checkpoint 3 deterministic runtime and workspace state", () => {
     expect(isolated).toHaveBeenCalledTimes(1);
     expect(response.taskRuntime).toMatchObject({
       originalGoal: "Implement feature",
-      status: "COMPLETED",
-      terminalOutcome: { type: "COMPLETED", validationSource: "DETERMINISTIC_VALIDATION" },
+      status: "RUNNING",
       runtimeScope: { budgetScopeId: response.taskRuntime?.taskId, contextScopeId: response.taskRuntime?.taskId },
       workspace: {
         repository: { projectId: "project-1", revision: "deterministic-head" },

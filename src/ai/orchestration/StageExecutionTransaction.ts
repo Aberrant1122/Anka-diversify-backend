@@ -167,6 +167,7 @@ export class StageExecutionTransaction {
         await RepositoryStateRefresher.refreshRepositoryState({
           projectId: this.checkpoint.stageId,
           localPath: this.checkpoint.localPath,
+          persist: false,
         });
       } catch (err) {
         console.warn("[StageTransaction] RepositoryStateRefresher.refreshRepositoryState error:", err);
@@ -202,6 +203,7 @@ export class StageExecutionTransaction {
         await RepositoryStateRefresher.onRollback({
           projectId: this.checkpoint.stageId,
           localPath,
+          persist: false,
         });
       } catch (err) {
         console.warn("[StageTransaction] RepositoryStateRefresher.onRollback error:", err);

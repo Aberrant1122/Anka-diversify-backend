@@ -646,11 +646,10 @@ export function scanDirectoryFiles(dirPath: string, rootDir = dirPath): Snapshot
  *
  * Algorithm:
  *   1. Scan all candidateDirs (local workspace) and insert every file unconditionally.
- *   2. Walk snapshot entries; only insert when the normalised path is NOT already
- *      present (i.e. snapshot is a fallback for files unavailable locally).
+ *   2. Use snapshot entries only when no materialized local repository exists.
  *
  * This ensures the local workspace is always authoritative. A stale DB snapshot
- * can never silently override an on-disk edit.
+ * can never silently override an on-disk edit or resurrect a verified deletion.
  */
 export function mergeFilesWithDiskPriority(
   candidateDirs: string[],
@@ -667,12 +666,16 @@ export function mergeFilesWithDiskPriority(
     }
   }
 
-  // ── 2. Snapshot fallback (only for paths not on disk) ─────────────────────
-  for (const f of snapshotList) {
-    if (f && f.path && typeof f.content === "string") {
-      const norm = f.path.replace(/\\/g, "/");
-      if (!fileMap.has(norm)) {
-        fileMap.set(norm, { path: norm, content: f.content });
+  // ── 2. Snapshot fallback (remote/unmaterialized repositories only) ─────────
+  // Once a local repository is present it is a complete authority boundary:
+  // absence on disk is a fact (including a verified deletion), not a cache miss.
+  if (candidateDirs.length === 0) {
+    for (const f of snapshotList) {
+      if (f && f.path && typeof f.content === "string") {
+        const norm = f.path.replace(/\\/g, "/");
+        if (!fileMap.has(norm)) {
+          fileMap.set(norm, { path: norm, content: f.content });
+        }
       }
     }
   }
