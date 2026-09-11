@@ -141,56 +141,108 @@ export class TargetPathExtractor {
   }
 
   /**
-   * Distinguishes HTTP/API route identifiers from filesystem path candidates.
-   * Route identifiers (e.g. "/health/details", "GET /health/details", "/api/users", "/users/:id")
+   * Deterministically determines if a candidate string represents an HTTP route, API endpoint,
+   * URL, or runtime route parameter rather than a concrete repository filesystem path.
+   * Route identifiers (e.g. "/health/details", "GET /health/details", "/api/users", "/users/:id",
+   * "/items/item-1", "/users/123", "/settings/profile", "https://example.com/items/item-1")
    * must NEVER become filesystem target paths.
    */
-  public static isHttpRouteIdentifier(candidate: string, fullMessage?: string): boolean {
+  public static isHttpRouteIdentifier(
+    candidate: string,
+    fullMessage?: string,
+    repoFiles: string[] = []
+  ): boolean {
     if (!candidate || candidate.trim().length === 0) return false;
-    const clean = candidate.trim();
+    const clean = candidate.trim().replace(/[.,;:!?]+$/, "");
     const cleanLower = clean.toLowerCase();
 
-    // 1. If candidate has a recognized code/file extension, it is a file path, NOT an HTTP route
-    if (/\.(?:ts|tsx|js|jsx|json|css|scss|sass|less|html|py|go|rs|md|sql|yaml|yml|mjs|cjs)$/i.test(clean)) {
+    // 1. URLs and Protocol strings are always runtime routes/URLs (e.g. "https://example.com/items/item-1")
+    if (/^(?:https?:\/\/|\/\/)/i.test(clean)) {
+      return true;
+    }
+
+    // 2. File extension check:
+    // Genuine code / config / markup files have a recognized extension (e.g. "src/services/user.ts", "app/items/[id]/page.tsx")
+    const hasCodeExtension = /\.(?:ts|tsx|js|jsx|json|css|scss|sass|less|html|py|go|rs|md|sql|yaml|yml|mjs|cjs|env|toml|xml|sh|bash)$/i.test(clean);
+    if (hasCodeExtension) {
       return false;
     }
 
-    // 2. Starts with an explicit HTTP verb (e.g. "GET /health/details", "POST /users")
+    // 3. Starts with an explicit HTTP verb (e.g. "GET /health/details", "POST /users")
     if (/^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/i.test(clean)) {
       return true;
     }
 
-    // 3. Contains HTTP route parameter syntax: e.g. "/:id", ":userId", "{id}", "<id>"
+    // 4. Preceded by an HTTP verb or inside a URL in fullMessage
+    if (fullMessage) {
+      const stripped = clean.replace(/^[\\/]/, "");
+      const escaped = stripped.replace(/([.*+?^=!:${}()|\[\]\/\\])/g, "\\$1");
+
+      // Check if candidate is part of a URL in the message
+      const urlMatch = new RegExp(`https?:\\/\\/[^\\s/]+(?:\\/[^\\s]*)*${escaped}`, "i");
+      if (urlMatch.test(fullMessage)) {
+        return true;
+      }
+
+      // Check if preceded by an HTTP verb in fullMessage (e.g. "GET /users/123", "POST /api/tasks")
+      const verbBeforeRegex = new RegExp(`\\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+[/]?${escaped}\\b`, "i");
+      if (verbBeforeRegex.test(fullMessage)) {
+        return true;
+      }
+    }
+
+    const normalizedRepoFiles = (repoFiles || []).map((f) => f.replace(/\\/g, "/").replace(/^\//, ""));
+    const cleanWithoutSlash = clean.replace(/\\/g, "/").replace(/^\//, "");
+    const existsInRepo = normalizedRepoFiles.includes(cleanWithoutSlash) || normalizedRepoFiles.some((rf) => rf.startsWith(cleanWithoutSlash + "/"));
+
+    // If it exists in repoFiles as a real file/dir and does not contain route parameter syntax
+    if (existsInRepo && !/[:{}<>]/.test(clean)) {
+      return false;
+    }
+
+    // 5. Contains HTTP route parameter syntax: e.g. "/:id", ":userId", "{id}", "<id>"
     if (/[:{}<>]/.test(clean) || /\/:[a-zA-Z0-9_]+/.test(clean)) {
       return true;
     }
 
-    // 4. Starts with a leading slash in user message or candidate: e.g. "/health/details", "/api/users"
+    // 6. Starts with a leading slash in user message or candidate: e.g. "/items/item-1", "/users/123", "/settings/profile", "/api/orders/17"
     if (clean.startsWith("/")) {
       return true;
     }
 
-    // 5. Preceded by an HTTP verb in the user message (e.g. "GET /health/details" or "POST health/details")
+    // 7. Preceded by a leading slash in fullMessage (e.g. "at /items/item-1", "opening /settings/profile")
     if (fullMessage) {
-      const stripped = cleanLower.replace(/^[\\/]/, "");
-      const verbBeforeRegex = new RegExp(`\\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+[/]?${stripped.replace(/([.*+?^=!:${}()|\[\]\/\\])/g, "\\$1")}\\b`, "i");
-      if (verbBeforeRegex.test(fullMessage)) {
+      const stripped = clean.replace(/^[\\/]/, "");
+      const escaped = stripped.replace(/([.*+?^=!:${}()|\[\]\/\\])/g, "\\$1");
+      const leadingSlashInMsg = new RegExp(`(?:^|[\\s"'\`(\\[])\\/${escaped}\\b`, "i");
+      if (leadingSlashInMsg.test(fullMessage)) {
         return true;
-      }
-
-      // Check if preceded or followed by route/endpoint keywords with leading slash in message
-      const hasLeadingSlashInMsg = new RegExp(`(?:^|\\s)["'\`]?(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)?\\s*\\/${stripped.replace(/([.*+?^=!:${}()|\[\]\/\\])/g, "\\$1")}\\b`, "i").test(fullMessage);
-      const routeKeywords = /\b(?:endpoint|route|api|rest|handler|uri|url)\b/i;
-      if (routeKeywords.test(fullMessage)) {
-        if (hasLeadingSlashInMsg || /^(?:api|v[0-9]+|health|users|auth|items|tasks|projects|webhooks|payments|admin)\//i.test(clean)) {
-          return true;
-        }
       }
     }
 
-    // 6. Generic API route prefix syntax without file extension (e.g. "api/v1/...", "api/users")
+    // 8. REST / route slug or ID patterns without file extension (e.g. "items/item-1", "users/123", "orders/42")
+    if (clean.includes("/")) {
+      const segments = clean.split("/").filter(Boolean);
+      const lastSegment = segments[segments.length - 1];
+      const hasIdSlug = /^[0-9]+$/.test(lastSegment) || /^[a-zA-Z]+-[0-9]+$/i.test(lastSegment) || /^:[a-zA-Z_]+/.test(lastSegment);
+      if (hasIdSlug) {
+        return true;
+      }
+    }
+
+    // 9. Generic API route prefix syntax without file extension (e.g. "api/v1/...", "api/users")
     if (/^(?:api\/|v[0-9]+\/)/i.test(clean)) {
       return true;
+    }
+
+    // 10. Route/endpoint context words in message combined with leading slash or known route roots
+    if (fullMessage) {
+      const routeKeywords = /\b(?:endpoint|route|api|rest|handler|uri|url)\b/i;
+      if (routeKeywords.test(fullMessage)) {
+        if (/^(?:api|v[0-9]+|health|users|auth|items|tasks|projects|webhooks|payments|admin|settings|dashboard)\//i.test(clean)) {
+          return true;
+        }
+      }
     }
 
     return false;
@@ -204,9 +256,24 @@ export class TargetPathExtractor {
     options: PathExtractionOptions = {}
   ): string[] {
     const infos = this.extractWithProvenance(message, options);
-    // Hard targets: only EXPLICIT_USER_PATH, UNIQUE_NAMED_ENTITY, and REPOSITORY_GROUNDED
+    // Hard targets: only EXPLICIT_USER_PATH and UNIQUE_NAMED_ENTITY
+    // CLASSIFIER_HINT carries ZERO write authority
     return infos
-      .filter((i) => i.provenance === "EXPLICIT_USER_PATH" || i.provenance === "UNIQUE_NAMED_ENTITY" || i.provenance === "REPOSITORY_GROUNDED")
+      .filter((i) => i.provenance === "EXPLICIT_USER_PATH" || i.provenance === "UNIQUE_NAMED_ENTITY")
+      .map((i) => i.path);
+  }
+
+  /**
+   * Deterministically extracts ONLY explicit paths from user prompt.
+   * Model outputs or hints are strictly excluded.
+   */
+  public static extractExplicitUserPaths(
+    message: string,
+    repoFiles: string[] = []
+  ): string[] {
+    const infos = this.extractWithProvenance(message, { repoFiles });
+    return infos
+      .filter((i) => i.provenance === "EXPLICIT_USER_PATH")
       .map((i) => i.path);
   }
 
@@ -222,11 +289,11 @@ export class TargetPathExtractor {
     const repoFiles = (options.repoFiles || []).map((f) => f.replace(/\\/g, "/").replace(/^\//, ""));
 
     const addPath = (p: string, provenance: PathProvenance) => {
-      const clean = p.replace(/\\/g, "/").replace(/^\//, "").replace(/\/$/, "");
+      const clean = p.replace(/\\/g, "/").replace(/^\//, "").replace(/[.,;:!?]+$/, "").replace(/\/$/, "");
       if (
         clean.length > 0 &&
         !this.NON_PATH_TECHNOLOGIES.has(clean.toLowerCase()) &&
-        !this.isHttpRouteIdentifier(clean, message) &&
+        !this.isHttpRouteIdentifier(clean, message, repoFiles) &&
         !seenPaths.has(clean)
       ) {
         seenPaths.add(clean);
@@ -234,67 +301,74 @@ export class TargetPathExtractor {
       }
     };
 
-    // 1. Classifier Target Handling with Strict Provenance Rules
-    if (options.classifierTarget && options.classifierTarget.trim()) {
-      const ct = options.classifierTarget.trim().replace(/\\/g, "/").replace(/^\//, "").replace(/\/$/, "");
-      if (!this.isHttpRouteIdentifier(ct, message)) {
-        const isExistingInRepo = repoFiles.includes(ct) || repoFiles.some((rf) => rf.startsWith(ct + "/"));
-        const isExplicitInMessage = message.toLowerCase().includes(ct.toLowerCase());
-        const isBroad = this.BROAD_GENERIC_DIRS.has(ct.toLowerCase());
-
-        if (isExplicitInMessage && this.isValidPathCandidate(ct, repoFiles, message)) {
-          addPath(ct, "EXPLICIT_USER_PATH");
-        } else if (isExistingInRepo && !isBroad && this.isValidPathCandidate(ct, repoFiles, message)) {
-          addPath(ct, "REPOSITORY_GROUNDED");
-        }
-      }
-    }
-
-    // 2. Explicit Quoted/Backticked targets: 'app/page.tsx', "src/auth.ts", `components/Button.tsx`
+    // 1. Explicit Quoted/Backticked targets: 'app/page.tsx', "src/auth.ts", `components/Button.tsx`
     const quotedMatches = message.matchAll(/[`"']([\w\-./\\]+)[`"']/g);
     for (const m of quotedMatches) {
-      const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").trim();
+      const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").replace(/[.,;:!?]+$/, "").trim();
       if (this.isValidPathCandidate(candidate, repoFiles, message)) {
         addPath(candidate, "EXPLICIT_USER_PATH");
       }
     }
 
-    // 3. Unquoted candidates with directory separators (e.g. app/page.tsx, src/components/Button.tsx, src/auth/)
-    const dirSeparatedMatches = message.matchAll(/\b([\w\-.]+(?:\/[\w\-.]+)+)\b/g);
+    // 2. Unquoted candidates with directory separators (e.g. app/page.tsx, src/components/Button.tsx, src/auth/)
+    const dirSeparatedMatches = message.matchAll(/\b([\w\-.]+(?:[\/\\][\w\-.]+)+)\b/g);
     for (const m of dirSeparatedMatches) {
-      const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").trim();
+      if (m.index !== undefined && m.index > 0) {
+        const prefix = message.slice(0, m.index);
+        if (/https?:\/\/[^\s]*$/i.test(prefix) || /:\/\/[^\s]*$/i.test(prefix)) {
+          continue;
+        }
+      }
+      const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").replace(/[.,;:!?]+$/, "").trim();
       if (this.isValidPathCandidate(candidate, repoFiles, message)) {
         addPath(candidate, "EXPLICIT_USER_PATH");
       }
     }
 
-    // 4. Bare filenames with explicit action phrasing: "create utils.ts", "edit config.ts", "in file Button.tsx"
+    // 3. Bare filenames with explicit action phrasing: "create utils.ts", "edit config.ts", "in file Button.tsx"
     const actionPhraseMatches = message.matchAll(
-      /\b(?:create|add|in|inside|modify|update|fix|edit|delete|remove|file)\s+([a-zA-Z0-9_\-]+\.(?:html|css|js|ts|tsx|jsx|json|py|md|rs|go|sql))\b/gi
+      /\b(?:create|add|in|inside|modify|update|fix|edit|delete|remove|file)\s+([a-zA-Z0-9_\-]+(?:\.[a-zA-Z0-9_\-]+)*\.(?:html|css|js|ts|tsx|jsx|json|py|md|rs|go|sql|yaml|yml|mjs|cjs))\b/gi
     );
     for (const m of actionPhraseMatches) {
-      const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").trim();
-      if (!this.NON_PATH_TECHNOLOGIES.has(candidate.toLowerCase()) && !this.isHttpRouteIdentifier(candidate, message)) {
+      const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").replace(/[.,;:!?]+$/, "").trim();
+      if (!this.NON_PATH_TECHNOLOGIES.has(candidate.toLowerCase()) && !this.isHttpRouteIdentifier(candidate, message, repoFiles)) {
         const resolved = this.resolveAgainstRepo(candidate, repoFiles);
         addPath(resolved || candidate, "EXPLICIT_USER_PATH");
       }
     }
 
-    // 5. Bare filenames that uniquely match an existing canonical repository file
+    // 4. Bare filenames that uniquely match an existing canonical repository file
     const bareExtensionMatches = message.matchAll(
-      /\b([a-zA-Z0-9_\-]+\.(?:html|css|js|ts|tsx|jsx|json|py|md|rs|go|sql))\b/gi
+      /\b([a-zA-Z0-9_\-]+(?:\.[a-zA-Z0-9_\-]+)*\.(?:html|css|js|ts|tsx|jsx|json|py|md|rs|go|sql|yaml|yml|mjs|cjs))\b/gi
     );
     for (const m of bareExtensionMatches) {
-      const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").trim();
-      if (this.NON_PATH_TECHNOLOGIES.has(candidate.toLowerCase()) || this.isHttpRouteIdentifier(candidate, message)) {
+      const candidate = m[1].replace(/\\/g, "/").replace(/^\//, "").replace(/[.,;:!?]+$/, "").trim();
+      if (this.NON_PATH_TECHNOLOGIES.has(candidate.toLowerCase()) || this.isHttpRouteIdentifier(candidate, message, repoFiles)) {
         continue;
       }
       // If this bare filename exists uniquely in repo (e.g. "page.tsx" matching "app/page.tsx")
       const matchedRepoPath = this.resolveAgainstRepo(candidate, repoFiles);
       if (matchedRepoPath) {
-        const wordRegex = new RegExp(`\\b(?:fix|edit|update|modify|change|in|file|inside)\\s+${candidate}`, "i");
+        const escaped = candidate.replace(/([.*+?^=!:${}()|\[\]\/\\])/g, "\\$1");
+        const wordRegex = new RegExp(`\\b(?:fix|edit|update|modify|change|in|file|inside)\\s+${escaped}`, "i");
         if (wordRegex.test(message) || seenPaths.size === 0) {
           addPath(matchedRepoPath, "EXPLICIT_USER_PATH");
+        }
+      }
+    }
+
+    // 5. Classifier Target Handling with Strict Provenance Rules:
+    // Classifier outputs are strictly advisory hints; NEVER granted EXPLICIT_USER_PATH or REPOSITORY_GROUNDED write authority.
+    if (options.classifierTarget && options.classifierTarget.trim()) {
+      const ct = options.classifierTarget
+        .trim()
+        .replace(/\\/g, "/")
+        .replace(/^\//, "")
+        .replace(/[.,;:!?]+$/, "")
+        .replace(/\/$/, "");
+      if (!this.isHttpRouteIdentifier(ct, message, repoFiles)) {
+        if (!seenPaths.has(ct) && this.isValidPathCandidate(ct, repoFiles, message)) {
+          addPath(ct, "CLASSIFIER_HINT");
         }
       }
     }
@@ -508,32 +582,47 @@ export class TargetPathExtractor {
   /**
    * Validates whether a candidate string is a plausible filesystem path.
    */
-  private static isValidPathCandidate(candidate: string, repoFiles: string[], fullMessage?: string): boolean {
+  public static isValidPathCandidate(candidate: string, repoFiles: string[] = [], fullMessage?: string): boolean {
     if (!candidate || candidate.length < 2) return false;
+
+    // Reject OS absolute paths (e.g. "C:\Users\...", "C:/...") from becoming repo-relative targets
+    if (/^[a-zA-Z]:/i.test(candidate)) return false;
 
     const lower = candidate.toLowerCase();
     if (this.NON_PATH_TECHNOLOGIES.has(lower)) return false;
 
-    // Reject HTTP / API route identifiers (e.g. "GET /health/details", "/health/details")
-    if (this.isHttpRouteIdentifier(candidate, fullMessage)) {
+    // Reject HTTP / API route identifiers (e.g. "GET /health/details", "/health/details", "/items/item-1")
+    if (this.isHttpRouteIdentifier(candidate, fullMessage, repoFiles)) {
       return false;
     }
 
+    const normCandidate = candidate.replace(/\\/g, "/").replace(/^\//, "").replace(/\/$/, "");
+    const normalizedRepoFiles = (repoFiles || []).map((f) => f.replace(/\\/g, "/").replace(/^\//, ""));
+
     // Direct match against repo files or directory prefixes
-    if (repoFiles.includes(candidate) || repoFiles.some((rf) => rf.startsWith(candidate + "/"))) {
+    if (normalizedRepoFiles.includes(normCandidate) || normalizedRepoFiles.some((rf) => rf.startsWith(normCandidate + "/"))) {
       return true;
     }
 
-    // Contains directory separator and valid extension or folder pattern
-    const hasDirSep = candidate.includes("/");
+    // Check code/file extension
+    const hasExtension = /\.(?:html|css|js|ts|tsx|jsx|json|py|md|rs|go|sql|yaml|yml|mjs|cjs|env|toml|xml|sh|bash)$/i.test(normCandidate);
+
+    // If candidate has directory separators:
+    const hasDirSep = normCandidate.includes("/");
     if (hasDirSep) {
       // Must not look like a URL or protocol
-      if (candidate.startsWith("http:") || candidate.startsWith("https:")) return false;
+      if (normCandidate.startsWith("http:") || normCandidate.startsWith("https:")) return false;
+
+      // Deterministic requirement: an extensionless string with directory separators that does NOT exist
+      // in repoFiles cannot be assumed to be a repository path (it is a runtime route, slug, or identifier).
+      if (!hasExtension) {
+        return false;
+      }
+
       return true;
     }
 
     // Bare filename: must have known extension and not be a framework name
-    const hasExtension = /\.(?:html|css|js|ts|tsx|jsx|json|py|md|rs|go|sql)$/i.test(candidate);
     return hasExtension && !this.NON_PATH_TECHNOLOGIES.has(lower);
   }
 

@@ -29,7 +29,7 @@ export class TaskExecutionPlanManager {
               name: message,
               taskType: classification.taskType,
               goal: message,
-              targetPath: classification.targetPath || explicitUserPaths[0],
+              targetPath: explicitUserPaths[0] || undefined,
               dependsOn: [],
             },
           ];
@@ -55,7 +55,7 @@ export class TaskExecutionPlanManager {
         targetPath: s.targetPath || (idx === 0 ? explicitUserPaths[0] : undefined),
       };
 
-      const stageExplicitPaths = s.targetPath ? [s.targetPath] : idx === 0 ? explicitUserPaths : [];
+      const stageExplicitPaths = (s.targetPath && explicitUserPaths.includes(s.targetPath)) ? [s.targetPath] : idx === 0 ? explicitUserPaths : [];
       const stageIntent = createTaskIntentSpec(s.goal, stageClassification, stageExplicitPaths);
 
       return {

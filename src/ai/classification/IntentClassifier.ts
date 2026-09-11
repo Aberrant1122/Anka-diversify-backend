@@ -203,6 +203,18 @@ export class IntentClassifier {
         parsedTargetPath = String(parsed.targetPath[0]).trim() || undefined;
       }
 
+      if (parsedTargetPath) {
+        const cleanPt = parsedTargetPath.replace(/\\/g, "/").replace(/^\//, "").replace(/\/$/, "");
+        if (
+          TargetPathExtractor.isHttpRouteIdentifier(cleanPt, message, effectiveRepoFiles) ||
+          !TargetPathExtractor.isValidPathCandidate(cleanPt, effectiveRepoFiles, message)
+        ) {
+          parsedTargetPath = undefined;
+        } else {
+          parsedTargetPath = cleanPt;
+        }
+      }
+
       let targetPath = explicitUserPaths[0] || parsedTargetPath;
 
       let confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0.85;

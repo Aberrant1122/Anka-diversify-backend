@@ -8,6 +8,7 @@ import { RepositoryEvidenceStore } from "./RepositoryEvidenceStore";
 import { RepositoryInvestigationAgent } from "./RepositoryInvestigationAgent";
 import { PolicyContract } from "../contracts/PolicyContract";
 import { TaskIntentSpec } from "../shared/TaskIntentSpec";
+import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
 import { LLMGateway } from "../gateway/LLMGateway";
 import { PipelineStages } from "../gateway/PipelineStage";
 
@@ -217,7 +218,10 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
       taskType: intentResult?.taskType || "NEW_FEATURE",
       risk: intentResult?.risk || "MEDIUM",
       estimatedComplexity: intentResult?.estimatedComplexity || "MEDIUM",
-      explicitUserPaths: intentResult?.targetPath ? [intentResult.targetPath] : [],
+      explicitUserPaths: TargetPathExtractor.extractExplicitUserPaths(
+        message,
+        Array.isArray(effectiveSnap) ? effectiveSnap.map((f: any) => (typeof f === "string" ? f : f?.path || "")) : []
+      ),
     };
 
     // Run the dynamic Tool-Calling Repository Investigation Agent
