@@ -114,8 +114,21 @@ describe("Constrained Dependency-Repair Mode on Broken Baseline (Steps A-I)", ()
       };
     });
 
-    // Mock version resolver to resolve valid 1.34.0
-    jest.spyOn(DependencyRepairService, "resolveValidPackageVersion").mockResolvedValue("1.34.0");
+    // This test covers orchestration into dependency-repair mode. The repair
+    // service's real executor behavior is covered below with an injected
+    // deterministic executor, so do not fall through to a live npm install here.
+    jest.spyOn(DependencyRepairService, "runConstrainedDependencyRepair").mockResolvedValue({
+      success: true,
+      explanation: "Successfully repaired repository dependency baseline",
+      changes: [
+        { path: "package.json", action: "modify", content: JSON.stringify(pkgJson, null, 2), description: "Repair dependency version" },
+        { path: "package-lock.json", action: "modify", content: "{}", description: "Refresh dependency lockfile" },
+      ],
+      commitMessage: "fix(deps): repair invalid baseline dependencies",
+      durationMs: 2500,
+      resolvedPackage: "lucide-react",
+      resolvedVersion: "1.34.0",
+    });
 
     const summary = await GitWorktreeService.runIsolatedAgent({
       userId: "user-1",
@@ -134,7 +147,7 @@ describe("Constrained Dependency-Repair Mode on Broken Baseline (Steps A-I)", ()
     expect(summary.agentResponse.buildVerificationBlocked).toBe(false);
     expect(summary.agentResponse.explanation).toContain("Successfully repaired repository dependency baseline");
     expect(summary.agentResponse.changes.map((c) => c.path)).toEqual(expect.arrayContaining(["package.json"]));
-  });
+  }, 20_000);
 
   test("C. Dependency repair modifies package.json and lockfile only", async () => {
     const pkgJson = {

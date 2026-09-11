@@ -60,9 +60,11 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       explanation: "Modified foo and added bar",
+                      commitMessage: "test commit",
                       changes: [
                         {
                           path: "src/foo.ts",
@@ -87,43 +89,24 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
       },
     });
 
-    let error: any = null;
-    try {
-      await CodeGenerator.generateRoadmapAndDiffs(
-        "Update foo",
-        { intent: "BUG_FIX", taskType: "BUG_FIX" },
-        { fileContext: { "src/foo.ts": "const a = 1;" } },
-        "system prompt",
-        contract,
-        approvedManifest,
-        { "src/foo.ts": { path: "src/foo.ts", content: "const a = 1;", sha256: "sha-foo" } }
-      );
-    } catch (e: any) {
-      error = e;
-    }
-
-    // Must fail closed with CODEGEN_MANIFEST_VIOLATION
-    expect(error).not.toBeNull();
-    expect(error.code).toBe("CODEGEN_MANIFEST_VIOLATION");
-    expect(error.message).toContain("[CODEGEN_MANIFEST_VIOLATION]");
-    expect(error.undeclaredPaths).toContain("src/bar.ts");
-    expect(error.approvedPaths).toEqual(["src/foo.ts"]);
-
-    // 1 roadmap call + 1 initial codegen call + 1 bounded retry call = 3 total OpenAI calls
-    expect(callCount).toBe(3);
-
-    // Exactly 1 bounded regeneration attempt was made for codegen (1 initial + 1 retry)
-    const codeGenCalls = capturedMessages.filter((msgs) =>
-      msgs.some((m) => typeof m.content === "string" && (m.content.includes("APPROVED FILE PLAN") || m.content.includes("CODEGEN_MANIFEST_VIOLATION")))
+    const result = await CodeGenerator.generateRoadmapAndDiffs(
+      "Update foo",
+      { intent: "BUG_FIX", taskType: "BUG_FIX" },
+      { fileContext: { "src/foo.ts": "const a = 1;" } },
+      "system prompt",
+      contract,
+      approvedManifest,
+      { "src/foo.ts": { path: "src/foo.ts", content: "const a = 1;", sha256: "sha-foo" } }
     );
-    expect(codeGenCalls).toHaveLength(2);
 
-    // Bounded retry message must specifically instruct to restrict changes to approved paths
-    const retryMessages = capturedMessages[2];
-    const lastUserMsg = retryMessages[retryMessages.length - 1];
-    expect(lastUserMsg.content).toContain("[CODEGEN_MANIFEST_VIOLATION]");
-    expect(lastUserMsg.content).toContain("src/bar.ts");
-    expect(lastUserMsg.content).toContain("src/foo.ts");
+    // Post-CP9: manifest demoted; execution scope enforcement strictly fails closed
+    const scopeCheck = enforceExecutionScope({
+      proposedChanges: result.changes,
+      contract,
+      isRepair: false,
+    });
+    expect(scopeCheck.valid).toBe(false);
+    expect(scopeCheck.errors.some((e) => e.reason === "TARGET_PATH_VIOLATION" && e.path === "src/bar.ts")).toBe(true);
 
     // targetPaths remain untouched
     expect(contract.targetPaths).toEqual(["src/foo.ts"]);
@@ -172,9 +155,11 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
               return {
                 choices: [
                   {
-                    message: {
+                    finish_reason: "stop",
+                  message: {
                       content: JSON.stringify({
                         explanation: "Updated foo and bar",
+                      commitMessage: "test commit",
                         changes: [
                           {
                             path: "src/foo.ts",
@@ -199,9 +184,11 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
               return {
                 choices: [
                   {
-                    message: {
+                    finish_reason: "stop",
+                  message: {
                       content: JSON.stringify({
                         explanation: "Updated foo only",
+                      commitMessage: "test commit",
                         changes: [
                           {
                             path: "src/foo.ts",
@@ -281,9 +268,11 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
           create: async () => ({
             choices: [
               {
-                message: {
+                finish_reason: "stop",
+                  message: {
                   content: JSON.stringify({
                     explanation: "Tried to modify Calculator from context",
+                      commitMessage: "test commit",
                     changes: [
                       {
                         path: "src/app.ts",
@@ -307,6 +296,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
       },
     });
 
+    // Context visibility of Calculator.tsx does not confer write authority (fails closed with patch-resolution error)
     let error: any = null;
     try {
       await CodeGenerator.generateRoadmapAndDiffs(
@@ -323,8 +313,8 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
     }
 
     expect(error).not.toBeNull();
-    expect(error.code).toBe("CODEGEN_MANIFEST_VIOLATION");
-    expect(error.undeclaredPaths).toContain("src/components/calculator/Calculator.tsx");
+    expect(error.message).toMatch(/PATCH_RESOLUTION_FAILED|TARGET_PATH_VIOLATION/);
+    expect(error.message).toContain("src/components/calculator/Calculator.tsx");
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -370,9 +360,11 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
           create: async () => ({
             choices: [
               {
-                message: {
+                finish_reason: "stop",
+                  message: {
                   content: JSON.stringify({
                     explanation: "Modifying app and its caller index.ts",
+                      commitMessage: "test commit",
                     changes: [
                       {
                         path: "src/app.ts",
@@ -396,6 +388,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
       },
     });
 
+    // Unapproved related caller in context cannot be modified (fails closed with patch-resolution error)
     let error: any = null;
     try {
       await CodeGenerator.generateRoadmapAndDiffs(
@@ -412,8 +405,8 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
     }
 
     expect(error).not.toBeNull();
-    expect(error.code).toBe("CODEGEN_MANIFEST_VIOLATION");
-    expect(error.undeclaredPaths).toContain("src/index.ts");
+    expect(error.message).toMatch(/PATCH_RESOLUTION_FAILED|TARGET_PATH_VIOLATION/);
+    expect(error.message).toContain("src/index.ts");
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -454,9 +447,11 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
           create: async () => ({
             choices: [
               {
-                message: {
+                finish_reason: "stop",
+                  message: {
                   content: JSON.stringify({
                     explanation: "Modified app.ts",
+                      commitMessage: "test commit",
                     changes: [
                       {
                         path: "src/app.ts",
@@ -594,9 +589,11 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
           create: async () => ({
             choices: [
               {
-                message: {
+                finish_reason: "stop",
+                  message: {
                   content: JSON.stringify({
                     explanation: "Fixed syntax error in src/app.ts",
+                      commitMessage: "test commit",
                     changes: [
                       {
                         path: "src/app.ts",

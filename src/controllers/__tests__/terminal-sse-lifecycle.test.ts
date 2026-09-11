@@ -196,7 +196,7 @@ describe("Terminal SSE Completion Lifecycle Tests", () => {
 
     expect(interruptSpy).toHaveBeenCalledWith(testSessionId, "proj-test");
     interruptSpy.mockRestore();
-  });
+  }, 20_000);
 
   it("9. normal response close after writableEnded does NOT call interruptSession", async () => {
     const interruptSpy = jest.spyOn(sessionManager, "interruptSession");

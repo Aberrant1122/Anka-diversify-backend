@@ -261,7 +261,7 @@ export const DashboardPage: React.FC = () => {
     });
 
     expect(scopeRes.valid).toBe(false);
-    expect(scopeRes.errors[0].reason).toBe("UNDECLARED_FILE");
+    expect(scopeRes.errors[0].reason).toBe("TARGET_PATH_VIOLATION");
     expect(getOpenAI).not.toHaveBeenCalled();
   });
 

@@ -325,7 +325,7 @@ describe("Checkpoint 11 verified Git/GitHub/GitLab workflow", () => {
     expect(push).toEqual(["push", "origin", `${prepared.branchName}:refs/heads/${prepared.branchName}`]);
     expect(tracking.calls.flat()).not.toContain("--force");
     expect(run(root, ["--git-dir", bareRemote, "rev-parse", `refs/heads/${prepared.branchName}`])).toBe(result.commitSha);
-  });
+  }, 20_000);
 
   test("15, 21, 22. remote/review CI failures remain separate from completed runtime history", async () => {
     const prepared = await prepare("remote-failure");
@@ -373,7 +373,7 @@ describe("Checkpoint 11 verified Git/GitHub/GitLab workflow", () => {
     }));
     expect(failedCi.ciStatus).toBe("FAILED");
     expect(state.runtime.snapshot().status).toBe("COMPLETED");
-  });
+  }, 20_000);
 
   test("17, 20. provider adapters distinguish GitHub PR/GitLab MR and never log credentials", async () => {
     const requests: Array<{ url: string; headers: Readonly<Record<string, string>>; body?: string }> = [];

@@ -314,8 +314,8 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
     expect(authRes.approvedPaths).toContain("src/app.ts");
   });
 
-  // Test 8: CodeGenerator wrong action -> CODEGEN_MANIFEST_ACTION_VIOLATION
-  test("8. CodeGenerator wrong action -> CODEGEN_MANIFEST_ACTION_VIOLATION", async () => {
+  // Test 8: CodeGenerator output is advisory; downstream action authority remains deterministic.
+  test("8. CodeGenerator preserves explicit proposal action without treating manifest as authority", async () => {
     const utils = require("../shared/utils");
     utils.getOpenAI = () => ({
       chat: {
@@ -326,6 +326,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
                 message: {
                   content: JSON.stringify({
                     explanation: "Wrong action modification",
+                    commitMessage: "test: propose wrong action",
                     changes: [
                       {
                         path: "src/components/calculator/Calculator.tsx",
@@ -336,6 +337,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
                     ],
                   }),
                 },
+                finish_reason: "stop",
               },
             ],
           }),
@@ -362,29 +364,28 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       manifestVersion: "1.0.0",
     };
 
-    let caughtError: any = null;
-    try {
-      await CodeGenerator.generateRoadmapAndDiffs(
-        "Delete calculator",
-        { intent: "DELETE_FEATURE", taskType: "DELETE_FOLDER" },
-        { fileContext: { "src/components/calculator/Calculator.tsx": "const a = 1;" } },
-        "system prompt",
-        contract,
-        approvedManifest,
-        {
-          "src/components/calculator/Calculator.tsx": {
-            path: "src/components/calculator/Calculator.tsx",
-            content: "const a = 1;",
-            sha256: "sha-1",
-          },
-        }
-      );
-    } catch (err) {
-      caughtError = err;
-    }
+    const result = await CodeGenerator.generateRoadmapAndDiffs(
+      "Delete calculator",
+      { intent: "DELETE_FEATURE", taskType: "DELETE_FOLDER" },
+      { fileContext: { "src/components/calculator/Calculator.tsx": "const a = 1;" } },
+      "system prompt",
+      contract,
+      approvedManifest,
+      {
+        "src/components/calculator/Calculator.tsx": {
+          path: "src/components/calculator/Calculator.tsx",
+          content: "const a = 1;",
+          sha256: "sha-1",
+        },
+      }
+    );
 
-    expect(caughtError).not.toBeNull();
-    expect(caughtError.code).toBe("CODEGEN_MANIFEST_ACTION_VIOLATION");
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0]).toMatchObject({
+      path: "src/components/calculator/Calculator.tsx",
+      action: "modify",
+    });
+    expect(approvedManifest.files[0].action).toBe("delete");
   });
 
   // Test 9: action authority is (path, action), not path-only

@@ -244,6 +244,8 @@ describe("UI Feature Integration Quality: Stylesheet Wiring & Full-Page Dashboar
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
+                    index: 0,
                     message: {
                       content: JSON.stringify({
                         files: [
@@ -252,12 +254,14 @@ describe("UI Feature Integration Quality: Stylesheet Wiring & Full-Page Dashboar
                             action: "modify",
                             dependencies: ["./components/SupportDashboard", "./styles/support.css"],
                             description: "Render full-width support dashboard",
+                            evidenceIds: [],
                           },
                           {
                             path: "app/styles/support.css",
                             action: "create",
                             dependencies: [],
                             description: "Support styles",
+                            evidenceIds: [],
                           },
                         ],
                         totalFiles: 2,

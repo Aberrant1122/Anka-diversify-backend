@@ -10,6 +10,7 @@ import { ValidationRunner } from "../validation/ValidationRunner";
 import { GeneratedChangeProposal, resolveGenerationProposals, validateGenerationProposals } from "../generation/GenerationProposalResolver";
 import { FileManifest, ExecutionContract } from "../../types";
 import * as sharedUtils from "../shared/utils";
+import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 jest.mock("../shared/utils", () => {
   const original = jest.requireActual("../shared/utils");
@@ -18,6 +19,18 @@ jest.mock("../shared/utils", () => {
     getOpenAI: jest.fn(),
   };
 });
+
+function createTestFsManager(baseDir: string, pathGrants: Array<{ path: string; action: "FILE_MODIFY" | "FILE_CREATE" | "FILE_DELETE" }>): FileSystemStateManager {
+  const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+    workspaceRoot: baseDir,
+    authorityId: "cluster-d-test",
+    grants: pathGrants,
+  });
+  const guard = authorizedScope
+    ? CapabilityGuard.create({ workspaceRoot: baseDir, scopeId: "cluster-d-test", authorizedScope })
+    : CapabilityGuard.denyAll();
+  return new FileSystemStateManager(guard, "cluster-d-test");
+}
 
 function makeAuthSource(p: string, content: string) {
   const sha256 = crypto.createHash("sha256").update(content).digest("hex");
@@ -91,20 +104,20 @@ describe("Cluster D — Structured Patch Correction & Causal Self-Healing Progre
       diffCriticEnabled: true,
     };
 
-    // Proposal 0: malformed (empty edits)
-    // Proposal 1: malformed (empty edits)
+    // Proposal 0: malformed (mismatched oldText triggers patch correction)
+    // Proposal 1: malformed (mismatched oldText triggers patch correction)
     // Proposal 2: valid exact edits
     const initialProposals: GeneratedChangeProposal[] = [
       {
         path: "src/services/user.service.ts",
         action: "modify",
-        edits: [] as any,
+        edits: [{ oldText: "nonexistent service text", newText: "newText" }],
         description: "service change with missing edits",
       },
       {
         path: "src/controllers/user.controller.ts",
         action: "modify",
-        edits: [] as any,
+        edits: [{ oldText: "nonexistent controller text", newText: "newText" }],
         description: "controller change with missing edits",
       },
       {
@@ -126,9 +139,12 @@ describe("Cluster D — Structured Patch Correction & Causal Self-Healing Progre
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
+                index: 0,
                 message: {
                   content: JSON.stringify({
-                    roadmap: "Update service, controller, and routes",
+                    explanation: "Update service, controller, and routes",
+                    commitMessage: "feat: update user endpoints",
                     changes: initialProposals,
                   }),
                 },
@@ -186,14 +202,14 @@ describe("Cluster D — Structured Patch Correction & Causal Self-Healing Progre
       1,
       expect.objectContaining({
         filePath: "src/services/user.service.ts",
-        errorCode: "MODIFY_PATCH_REQUIRED",
+        errorCode: "PATCH_TARGET_NOT_FOUND",
       }),
     );
     expect(correctPatchSpy).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
         filePath: "src/controllers/user.controller.ts",
-        errorCode: "MODIFY_PATCH_REQUIRED",
+        errorCode: "PATCH_TARGET_NOT_FOUND",
       }),
     );
 
@@ -246,19 +262,19 @@ describe("Cluster D — Structured Patch Correction & Causal Self-Healing Progre
       diffCriticEnabled: true,
     };
 
-    // 4 malformed proposals
+    // 4 malformed proposals (mismatched oldText triggers patch correction)
     const proposals: GeneratedChangeProposal[] = [
-      { path: "src/f1.ts", action: "modify", edits: [], description: "bad 1" },
-      { path: "src/f2.ts", action: "modify", edits: [], description: "bad 2" },
-      { path: "src/f3.ts", action: "modify", edits: [], description: "bad 3" },
-      { path: "src/f4.ts", action: "modify", edits: [], description: "bad 4" },
+      { path: "src/f1.ts", action: "modify", edits: [{ oldText: "bad", newText: "good" }], description: "bad 1" },
+      { path: "src/f2.ts", action: "modify", edits: [{ oldText: "bad", newText: "good" }], description: "bad 2" },
+      { path: "src/f3.ts", action: "modify", edits: [{ oldText: "bad", newText: "good" }], description: "bad 3" },
+      { path: "src/f4.ts", action: "modify", edits: [{ oldText: "bad", newText: "good" }], description: "bad 4" },
     ];
 
     const mockOpenAI = {
       chat: {
         completions: {
           create: jest.fn().mockResolvedValue({
-            choices: [{ message: { content: JSON.stringify({ changes: proposals }) } }],
+            choices: [{ finish_reason: "stop", index: 0, message: { content: JSON.stringify({ explanation: "ex", commitMessage: "cm", changes: proposals }) } }],
           }),
         },
       },
@@ -316,14 +332,14 @@ describe("Cluster D — Structured Patch Correction & Causal Self-Healing Progre
     };
 
     const proposals: GeneratedChangeProposal[] = [
-      { path: "src/val.ts", action: "modify", edits: [], description: "empty edits" },
+      { path: "src/val.ts", action: "modify", edits: [{ oldText: "bad", newText: "good" }], description: "empty edits" },
     ];
 
     const mockOpenAI = {
       chat: {
         completions: {
           create: jest.fn().mockResolvedValue({
-            choices: [{ message: { content: JSON.stringify({ changes: proposals }) } }],
+            choices: [{ finish_reason: "stop", index: 0, message: { content: JSON.stringify({ explanation: "ex", commitMessage: "cm", changes: proposals }) } }],
           }),
         },
       },
@@ -430,7 +446,11 @@ export const DashboardOverview: React.FC = () => {
       chat: {
         completions: {
           create: jest.fn().mockResolvedValue({
-            choices: [{ message: { content: JSON.stringify({ changes: repairProposals }) } }],
+            choices: [
+              {
+                finish_reason: "stop",
+                index: 0,
+                message: { content: JSON.stringify({ changes: repairProposals }) } }],
           }),
         },
       },
@@ -516,7 +536,11 @@ export const App = () => <div>App</div>;
       chat: {
         completions: {
           create: jest.fn().mockResolvedValue({
-            choices: [{ message: { content: JSON.stringify({ changes: repairProposals }) } }],
+            choices: [
+              {
+                finish_reason: "stop",
+                index: 0,
+                message: { content: JSON.stringify({ changes: repairProposals }) } }],
           }),
         },
       },
@@ -619,10 +643,10 @@ export const App = () => <div>App</div>;
           create: jest
             .fn()
             .mockResolvedValueOnce({
-              choices: [{ message: { content: JSON.stringify({ changes: ineffectiveProposal }) } }],
+              choices: [{ finish_reason: "stop", index: 0, message: { content: JSON.stringify({ changes: ineffectiveProposal }) } }],
             })
             .mockResolvedValueOnce({
-              choices: [{ message: { content: JSON.stringify({ changes: effectiveProposal }) } }],
+              choices: [{ finish_reason: "stop", index: 0, message: { content: JSON.stringify({ changes: effectiveProposal }) } }],
             }),
         },
       },
@@ -635,7 +659,7 @@ export const App = () => <div>App</div>;
       ["npm run build"],
       "system prompt",
       "Fix widget",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/Widget.tsx", action: "FILE_MODIFY" }]),
       "test-widget",
       undefined,
       manifest,
@@ -698,8 +722,10 @@ export const App = () => <div>App</div>;
           create: jest.fn().mockImplementation(() => {
             return Promise.resolve({
               choices: [
-                {
-                  message: {
+              {
+                finish_reason: "stop",
+                index: 0,
+                message: {
                     content: JSON.stringify({
                       changes: [
                         {
@@ -885,7 +911,11 @@ src/App.tsx:1:40 - error TS2322: Type 'string' is not assignable to type 'number
       chat: {
         completions: {
           create: jest.fn().mockResolvedValue({
-            choices: [{ message: { content: JSON.stringify(mockRepairResponse) } }],
+            choices: [
+              {
+                finish_reason: "stop",
+                index: 0,
+                message: { content: JSON.stringify(mockRepairResponse) } }],
           }),
         },
       },
@@ -1086,7 +1116,11 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ activities
       chat: {
         completions: {
           create: jest.fn().mockResolvedValue({
-            choices: [{ message: { content: JSON.stringify(mockRepairResponse) } }],
+            choices: [
+              {
+                finish_reason: "stop",
+                index: 0,
+                message: { content: JSON.stringify(mockRepairResponse) } }],
           }),
         },
       },
@@ -1173,8 +1207,10 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ activities
             currentVal = proposalCount + 1;
             return {
               choices: [
-                {
-                  message: {
+              {
+                finish_reason: "stop",
+                index: 0,
+                message: {
                     content: JSON.stringify({
                       repaired: true,
                       patchExplanation: `Attempt ${proposalCount}`,
@@ -1276,8 +1312,10 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ activities
             step++;
             return {
               choices: [
-                {
-                  message: {
+              {
+                finish_reason: "stop",
+                index: 0,
+                message: {
                     content: JSON.stringify({
                       repaired: true,
                       patchExplanation: `Step ${step}`,
@@ -1379,8 +1417,11 @@ export const App = () => {
     fs.writeFileSync(authorizedPath, initialModifiedDashboardSource);
     fs.writeFileSync(callerPath, callerSource);
 
-    // Baseline git commit setup
-    const fsManager = new FileSystemStateManager();
+    // Baseline git commit setup with authorized capability scope
+    const fsManager = createTestFsManager(tempDir, [
+      { path: "src/components/dashboard/DashboardOverview.tsx", action: "FILE_MODIFY" },
+      { path: "src/App.tsx", action: "FILE_CREATE" },
+    ]);
     await fsManager.snapshot(
       [
         { path: "src/components/dashboard/DashboardOverview.tsx", content: baselineDashboardSource, action: "modify", description: "baseline" },

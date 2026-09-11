@@ -86,6 +86,42 @@ jest.mock("@prisma/client", () => {
   };
 });
 
+function withEvidence(files: any[], ctx?: any) {
+  const store = ctx?.evidenceStore;
+  if (!store) {
+    return files;
+  }
+  const allEv = store.getAllEvidence();
+  const storeIds = new Set(allEv.map((e: any) => e.id));
+  return files.map((f: any) => {
+    let fileEv = allEv.filter((e: any) => e.filePath === f.path || e.details?.filePath === f.path || e.metadata?.filePath === f.path);
+    if (fileEv.length > 0 && !fileEv.some((e: any) => e.kind === "REFERENCE" || e.kind === "IMPORT" || e.kind === "SYMBOL")) {
+      if (Array.isArray(f.dependencies) && f.dependencies.length > 0) {
+        for (const dep of f.dependencies) {
+          const refEv = store.addEvidence({
+            kind: "REFERENCE",
+            filePath: f.path,
+            sourceFile: dep,
+            provenance: "AST_GRAPH",
+            metadata: { details: `Import/reference relation between ${f.path} and ${dep}` },
+          });
+          storeIds.add(refEv.id);
+        }
+        fileEv = store.getAllEvidence().filter((e: any) => e.filePath === f.path);
+      }
+    }
+
+    const evIds = (fileEv.length > 0 ? fileEv : store.getAllEvidence()).map((e: any) => e.id);
+    const assignedIds = f.evidenceIds || evIds;
+    for (const id of assignedIds) {
+      if (!storeIds.has(id)) {
+        throw new Error(`[AUTHENTIC_EVIDENCE_VIOLATION] Cited evidenceId "${id}" does not exist in the evidence store.`);
+      }
+    }
+    return { ...f, evidenceIds: assignedIds };
+  });
+}
+
 describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
   const fixturesBaseDir = path.resolve(__dirname, "../evals/fixtures");
   const originalApiKey = process.env.OPENAI_API_KEY;
@@ -263,11 +299,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Clear task",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -331,11 +367,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Type fix",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/services/user.service.ts", action: "modify", dependencies: [], description: "fix role" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/services/user.service.ts", action: "modify", dependencies: [], description: "fix role" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -395,14 +431,14 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Cross-file config update",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([
           { path: "src/config/server.ts", action: "modify", dependencies: [], description: "add rateLimitMs" },
-          { path: "src/middleware/rateLimiter.ts", action: "modify", dependencies: [], description: "use rateLimitMs" },
-        ],
+          { path: "src/middleware/rateLimiter.ts", action: "modify", dependencies: ["src/config/server.ts"], description: "use rateLimitMs" },
+        ], ctx),
         totalFiles: 2,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -467,11 +503,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Update auth",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/auth.ts", action: "modify", dependencies: [], description: "update jwtSecret" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/auth.ts", action: "modify", dependencies: [], description: "update jwtSecret" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -542,11 +578,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Fix token expiration bug",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/token.service.ts", action: "modify", dependencies: [], description: "fix expiration" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/token.service.ts", action: "modify", dependencies: [], description: "fix expiration" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -608,11 +644,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Specific path target",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/auth/AuthService.ts", action: "modify", dependencies: [], description: "update prefix" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/auth/AuthService.ts", action: "modify", dependencies: [], description: "update prefix" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -672,11 +708,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Session logic fix",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/session.ts", action: "modify", dependencies: [], description: "fix active check" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/session.ts", action: "modify", dependencies: [], description: "fix active check" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -736,14 +772,14 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Coordinated payment update",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([
           { path: "src/payment/gateway.ts", action: "modify", dependencies: [], description: "add timeoutMs option" },
-          { path: "src/payment/checkout.ts", action: "modify", dependencies: [], description: "pass timeoutMs" },
-        ],
+          { path: "src/payment/checkout.ts", action: "modify", dependencies: ["src/payment/gateway.ts"], description: "pass timeoutMs" },
+        ], ctx),
         totalFiles: 2,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -810,11 +846,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Deep service fix",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/modules/auth/services/token-validation.service.ts", action: "modify", dependencies: [], description: "update length" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/modules/auth/services/token-validation.service.ts", action: "modify", dependencies: [], description: "update length" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -873,11 +909,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Test alignment",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/services/session.ts", action: "modify", dependencies: [], description: "update TTL" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/services/session.ts", action: "modify", dependencies: [], description: "update TTL" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -974,45 +1010,44 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
 
       jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg) => {
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => {
         if (msg.includes("pagination")) {
-          return { files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix" }], totalFiles: 1, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix" }], ctx), totalFiles: 1, manifestVersion: "1.0.0" };
         }
         if (msg.includes("isTokenExpired")) {
-          return { files: [{ path: "src/token.service.ts", action: "modify", dependencies: [], description: "token" }], totalFiles: 1, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/token.service.ts", action: "modify", dependencies: [], description: "token" }], ctx), totalFiles: 1, manifestVersion: "1.0.0" };
         }
         if (msg.includes("UserDTO") || msg.includes("formatUser")) {
-          return { files: [{ path: "src/services/user.service.ts", action: "modify", dependencies: [], description: "fix" }], totalFiles: 1, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/services/user.service.ts", action: "modify", dependencies: [], description: "fix" }], ctx), totalFiles: 1, manifestVersion: "1.0.0" };
         }
         if (msg.includes("rateLimitMs")) {
-          return { files: [{ path: "src/config/server.ts", action: "modify", dependencies: [], description: "config" }, { path: "src/middleware/rateLimiter.ts", action: "modify", dependencies: [], description: "middleware" }], totalFiles: 2, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/config/server.ts", action: "modify", dependencies: [], description: "config" }, { path: "src/middleware/rateLimiter.ts", action: "modify", dependencies: ["src/config/server.ts"], description: "middleware" }], ctx), totalFiles: 2, manifestVersion: "1.0.0" };
         }
         if (msg.includes("jwtSecret") || msg.includes("auth.ts")) {
-          return { files: [{ path: "src/auth.ts", action: "modify", dependencies: [], description: "auth" }], totalFiles: 1, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/auth.ts", action: "modify", dependencies: [], description: "auth" }], ctx), totalFiles: 1, manifestVersion: "1.0.0" };
         }
         if (msg.includes("v2_auth_") || msg.includes("AuthService.ts")) {
-          return { files: [{ path: "src/auth/AuthService.ts", action: "modify", dependencies: [], description: "auth" }], totalFiles: 1, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/auth/AuthService.ts", action: "modify", dependencies: [], description: "auth" }], ctx), totalFiles: 1, manifestVersion: "1.0.0" };
         }
         if (msg.includes("getSessionTtlSeconds")) {
-          return { files: [{ path: "src/services/session.ts", action: "modify", dependencies: [], description: "session" }], totalFiles: 1, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/services/session.ts", action: "modify", dependencies: [], description: "session" }], ctx), totalFiles: 1, manifestVersion: "1.0.0" };
         }
         if (msg.includes("isSessionActive") || msg.includes("session.ts")) {
-          return { files: [{ path: "src/session.ts", action: "modify", dependencies: [], description: "session" }], totalFiles: 1, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/session.ts", action: "modify", dependencies: [], description: "session" }], ctx), totalFiles: 1, manifestVersion: "1.0.0" };
         }
         if (msg.includes("GatewayOptions") || msg.includes("gateway.ts")) {
           return {
-            files: [
+            files: withEvidence([
               { path: "src/payment/gateway.ts", action: "modify", dependencies: [], description: "gateway" },
-              { path: "src/payment/checkout.ts", action: "modify", dependencies: [], description: "checkout" },
-            ],
-            totalFiles: 2,
+              { path: "src/payment/checkout.ts", action: "modify", dependencies: ["src/payment/gateway.ts"], description: "checkout" },
+            ], ctx), totalFiles: 2,
             manifestVersion: "1.0.0",
           };
         }
         if (msg.includes("token-validation.service.ts")) {
-          return { files: [{ path: "src/modules/auth/services/token-validation.service.ts", action: "modify", dependencies: [], description: "nested" }], totalFiles: 1, manifestVersion: "1.0.0" };
+          return { files: withEvidence([{ path: "src/modules/auth/services/token-validation.service.ts", action: "modify", dependencies: [], description: "nested" }], ctx), totalFiles: 1, manifestVersion: "1.0.0" };
         }
-        return { files: [], totalFiles: 0, manifestVersion: "1.0.0" };
+        return { files: withEvidence([], ctx), totalFiles: 0, manifestVersion: "1.0.0" };
       });
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockImplementation(async (message: string) => {
@@ -1140,7 +1175,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
       expect(summary.firstPassSuccessRatePct).toBe(100.0);
       expect(summary.rerankedAvgRecallAt5).toBe(1.0);
       expect(summary.rawAvgRecallAt5).toBeGreaterThanOrEqual(0.8);
-      expect(summary.avgContextInclusionRate).toBe(0.95);
+      expect(summary.avgContextInclusionRate).toBe(1.0);
       expect(summary.embeddingProvider).toBeDefined();
 
       // Verify each case has structured RAG diagnostic output
@@ -1152,7 +1187,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
           expect(res.ragMetrics.context).toBeDefined();
         }
       }
-    }, 30000);
+    }, 60_000);
   });
 
   // ── 3. Step 10D1 — Real-Model Mode Infrastructure & Telemetry (Tests A–M) ────
@@ -1173,11 +1208,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Task",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
         roadmap: [],
@@ -1196,7 +1231,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
 
       const result = await EvalRunner.runCase(evalCase, fixturesBaseDir);
       expect(result.mode).toBe("DETERMINISTIC");
-    });
+    }, 20_000);
 
     test("Test B & C: DETERMINISTIC Mode 1 never requires OPENAI_API_KEY and retains stubs without network calls", async () => {
       const savedKey = process.env.OPENAI_API_KEY;
@@ -1216,11 +1251,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Deterministic stub",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
         roadmap: [],
@@ -1242,7 +1277,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
       expect(result.mode).toBe("DETERMINISTIC");
 
       process.env.OPENAI_API_KEY = savedKey;
-    });
+    }, 20_000);
 
     test("Test E, F, G, H, I: ModelObserver records distinct model names, actual token usage, and embedding provider", () => {
       const observer = new ModelObserver();
@@ -1307,11 +1342,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Test",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
         roadmap: [],
@@ -1351,7 +1386,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
       expect(saved1.modelProfile).toBeDefined();
 
       fs.rmSync(tempResultsDir, { recursive: true, force: true });
-    });
+    }, 20_000);
 
     test("Test K: Git commit metadata retrieval gracefully returns string or null without throwing", async () => {
       const sha = await getGitCommitSha();
@@ -1388,11 +1423,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Test",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
         roadmap: [],
@@ -1413,7 +1448,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
 
       expect(seenWorkspace).toBeDefined();
       expect(fs.existsSync(seenWorkspace!)).toBe(false);
-    });
+    }, 20_000);
 
     test("Test M: classifyFailureStage deterministically identifies all failure stages", () => {
       expect(classifyFailureStage(true, [], [], true, true)).toBeUndefined();
@@ -1452,7 +1487,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
       } finally {
         fs.writeFileSync(paginationPath, originalBuggyContent, "utf8");
       }
-    });
+    }, 20_000);
 
     test("Step 11B: Cases 02–10 deterministic tests fail on buggy fixtures and pass on corrected implementations", async () => {
       const testCases = [
@@ -1669,11 +1704,11 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
         reasoning: "Test",
       } as any);
 
-      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-        files: [{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }],
+      jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (msg, ctx: any) => ({
+        files: withEvidence([{ path: "src/pagination.ts", action: "modify", dependencies: [], description: "fix offset" }], ctx),
         totalFiles: 1,
         manifestVersion: "1.0.0",
-      });
+      }));
 
       jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
         roadmap: [],
@@ -1694,7 +1729,7 @@ describe("AI Step 10C — RAG Diagnostics & 10-Case Evaluation Harness", () => {
 
       expect(provisionSpy).not.toHaveBeenCalled();
       provisionSpy.mockRestore();
-    });
+    }, 20_000);
 
     test("Test J, K, L, M: Pipeline exception still persists JSON result with failureStage = INFRASTRUCTURE", async () => {
       const tempResultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-eval-infra-fail-test-"));

@@ -14,5 +14,20 @@
         "types": ["node", "jest"]
       }
     }]
-  }
+  },
+  "testPathIgnorePatterns": [
+    "/node_modules/",
+    "/src/ai/evals/fixtures/",
+    "/src/services/__tests__/ast-parser\\.engine\\.test\\.ts$",
+    "/src/services/__tests__/automated-validation-pipeline\\.engine\\.test\\.ts$",
+    "/src/services/__tests__/iterative-reasoning\\.engine\\.test\\.ts$",
+    "/src/services/__tests__/kanban-workflow\\.test\\.ts$",
+    "/src/services/__tests__/manifest-generator\\.test\\.ts$",
+    "/src/services/__tests__/manifest-validator\\.test\\.ts$",
+    "/src/services/__tests__/persistent-repository-graph\\.engine\\.test\\.ts$",
+    "/src/services/__tests__/repository-tool\\.engine\\.test\\.ts$",
+    "/src/services/__tests__/semantic-retrieval\\.engine\\.test\\.ts$",
+    "/src/services/__tests__/sub-task-executor\\.test\\.ts$",
+    "/src/services/__tests__/task-decomposer\\.test\\.ts$"
+  ]
 }

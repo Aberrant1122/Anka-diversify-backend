@@ -60,6 +60,8 @@ describe("Cluster C: Ambiguous Destructive Request Safety & Delete Authority", (
       return {
         choices: [
           {
+            finish_reason: "stop",
+            index: 0,
             message: {
               content: JSON.stringify(result),
             },

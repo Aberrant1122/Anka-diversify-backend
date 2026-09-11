@@ -64,8 +64,8 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
     expect(evidenceStore.getAllEvidence().length).toBeGreaterThan(0);
   });
 
-  // 2. No fixed first-keyword / second-keyword mapping
-  test("2. Investigation loop is not bound to positional keyword extraction", async () => {
+  // 2. No grounded result means the investigation fails closed.
+  test("2. Investigation does not claim readiness when task terms produce no repository evidence", async () => {
     const fakeSnapshot = [
       { path: "src/services/auth.ts", content: "export class AuthService {}" },
       { path: "src/controllers/auth.controller.ts", content: "import { AuthService } from '../services/auth';" },
@@ -86,7 +86,9 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
     });
 
     const result = await agent.investigate();
-    expect(result.readyToPlan).toBe(true);
+    expect(result.readyToPlan).toBe(false);
+    expect(evidenceStore.getAllEvidence()).toHaveLength(0);
+    expect(result.roundsExecuted).toBeGreaterThanOrEqual(1);
   });
 
   // 3. Evidence IDs backend-generated

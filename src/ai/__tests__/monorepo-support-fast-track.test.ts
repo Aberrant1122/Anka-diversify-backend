@@ -352,7 +352,7 @@ describe("Monorepo Support Fast Track MVP Tests", () => {
     });
 
     expect(scopeResult.valid).toBe(false);
-    expect(scopeResult.errors.some((e) => e.reason === "UNDECLARED_FILE")).toBe(true);
+    expect(scopeResult.errors.some((e) => e.reason === "TARGET_PATH_VIOLATION")).toBe(true);
   });
 
   // 10. Package-aware npm validation
@@ -553,7 +553,7 @@ describe("Monorepo Support Fast Track MVP Tests", () => {
     });
 
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.reason === "UNDECLARED_FILE")).toBe(true);
+    expect(result.errors.some((e) => e.reason === "TARGET_PATH_VIOLATION")).toBe(true);
   });
 
   // 16. Nested app entry apps/web/src/App.tsx is recognized

@@ -1,3 +1,7 @@
+import os from "os";
+import fs from "fs";
+import path from "path";
+import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
 import { AgentPipeline } from "../orchestration/AgentPipeline";
 import { ManifestGenerator } from "../generation/ManifestGenerator";
 import { CodeGenerator } from "../generation/CodeGenerator";
@@ -20,11 +24,11 @@ jest.mock("@prisma/client", () => {
   return {
     PrismaClient: jest.fn().mockImplementation(() => ({
       project: {
-        findUnique: jest.fn().mockResolvedValue({
-          localPath: "/tmp/mock",
+        findUnique: jest.fn().mockImplementation(async () => ({
+          localPath: testTempDir,
           githubUrl: "https://github.com/mock/mock",
           githubToken: "mock-token",
-        }),
+        })),
       },
       phaseArtifact: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -45,9 +49,15 @@ jest.mock("@prisma/client", () => {
   };
 });
 
+let testTempDir: string;
+
 describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
   beforeEach(() => {
     process.env.OPENAI_API_KEY = "test-mock-key";
+    testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pass4-test-"));
+    fs.mkdirSync(path.join(testTempDir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(testTempDir, "src", "app.ts"), "export const x = 1;");
+    fs.writeFileSync(path.join(testTempDir, "package.json"), '{"name":"test-app"}');
     jest.clearAllMocks();
     jest.spyOn(MemoryPersistence, "getOrCreateSession").mockResolvedValue({ id: "sess-1", title: "test" } as any);
     jest.spyOn(MemoryPersistence, "saveMessage").mockResolvedValue(undefined as any);
@@ -111,7 +121,7 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
       },
     } as any);
 
-    jest.spyOn(RepositoryScanner, "ensureLocalWorkspace").mockResolvedValue("/tmp/mock");
+    jest.spyOn(RepositoryScanner, "ensureLocalWorkspace").mockImplementation(async () => testTempDir);
     jest.spyOn(RepositoryScanner, "getEffectiveSnapshot").mockReturnValue({
       keyFiles: [
         { path: "package.json", content: '{"name":"test-app"}' },
@@ -196,6 +206,11 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
     };
 
     const response = await AgentPipeline.runCodingAgent("user-noop", "proj-noop-2", sampleRequest as any, undefined, {
+      authorizedCapabilityScope: AuthorizedCapabilityScope.fromBackendConfiguration({
+        workspaceRoot: testTempDir,
+        authorityId: "pass4-test-11",
+        grants: [{ path: "src/app.ts", action: "FILE_MODIFY" }],
+      })!,
       canonicalExistingFiles: ["package.json", "src/app.ts"],
       effectiveSnapshot: [
         { path: "package.json", content: '{"name":"test-app","scripts":{"build":"echo build"}}' },
@@ -222,6 +237,26 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
   });
 
   test("12. Environment failure test: toolchain/environment failure (e.g. npm not found) does NOT trigger ALREADY_SATISFIED", async () => {
+    jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+      roadmap: [],
+      explanation: "Environment error handling",
+      changes: [
+        {
+          path: "src/app.ts",
+          action: "modify",
+          description: "Environment error handling",
+          content: "export const x = 1;",
+        },
+      ],
+      commitMessage: "fix: env",
+      riskAnalysis: {
+        breakingChanges: false,
+        performanceImpact: "none",
+        securityRisks: "none",
+        dependencyRisk: "none",
+      },
+    } as any);
+
     const sampleRequest = {
       message: "resolve all the build errors",
       context: {},
@@ -229,6 +264,11 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
     };
 
     const response = await AgentPipeline.runCodingAgent("user-noop", "proj-noop-3", sampleRequest as any, undefined, {
+      authorizedCapabilityScope: AuthorizedCapabilityScope.fromBackendConfiguration({
+        workspaceRoot: testTempDir,
+        authorityId: "pass4-test-12",
+        grants: [{ path: "src/app.ts", action: "FILE_MODIFY" }],
+      })!,
       canonicalExistingFiles: ["package.json", "src/app.ts"],
       effectiveSnapshot: [
         { path: "package.json", content: '{"name":"test-app"}' },

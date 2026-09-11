@@ -16,17 +16,19 @@ import { SecurityAuditor } from "../review/SecurityAuditor";
 import { ValidationDetector } from "../validation/ValidationDetector";
 import { ChatRequest } from "../shared/types";
 import { sha256 } from "../validation/FileVersionGuard";
+import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
+import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 
 // Mock PrismaClient to prevent DB connection attempts
 jest.mock("@prisma/client", () => {
   return {
     PrismaClient: jest.fn().mockImplementation(() => ({
       project: {
-        findUnique: jest.fn().mockResolvedValue({
-          localPath: "/tmp/mock",
+        findUnique: jest.fn().mockImplementation(() => ({
+          localPath: (global as any).__stalePipelineTempDir || "/tmp/mock",
           githubUrl: "https://github.com/mock/mock",
           githubToken: "mock-token",
-        }),
+        })),
       },
       phaseArtifact: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -52,6 +54,7 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
   beforeEach(() => {
     process.env.OPENAI_API_KEY = "test-mock-api-key";
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "stale-pipeline-test-"));
+    (global as any).__stalePipelineTempDir = tempDir;
     targetFilePath = path.join(tempDir, "src", "config.ts");
     fs.mkdirSync(path.dirname(targetFilePath), { recursive: true });
     fs.writeFileSync(targetFilePath, VERSION_A_CONTENT, "utf8");
@@ -80,7 +83,7 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
     jest.spyOn(RepositoryScanner, "getEffectiveSnapshot").mockReturnValue(snapshotMock as any);
 
     jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
-      taskType: "BUG_FIX",
+      taskType: "FEATURE",
       risk: "LOW",
       estimatedComplexity: "SMALL",
       intent: "Update timeout in config.ts",
@@ -90,23 +93,41 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
       reasoning: "Clear task",
     } as any);
 
-    jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockResolvedValue({
-      optimizedContext: {
-        fileContext: { "src/config.ts": VERSION_A_CONTENT },
-        skeletonContext: {},
-      },
-      executionMemory: {
-        searchPlanHistory: [],
-        discoveredRoutes: [],
-        discoveredServices: [],
-        discoveredModels: [],
-        discoveredSymbols: new Map([["config", { filePath: "src/config.ts", line: 1 }]]),
-        currentConfidence: 0.95,
-      },
-      finalConfidence: 0.95,
-      searchSummary: "Summary",
-      inspectedFiles: ["src/config.ts"],
-    } as any);
+    jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
+      const store: RepositoryEvidenceStore = args[7];
+      if (store) {
+        store.addEvidence({
+          kind: "FILE",
+          filePath: "src/config.ts",
+          provenance: "REPO_READ",
+          metadata: { details: "File exists" },
+        });
+        store.addEvidence({
+          kind: "REFERENCE",
+          filePath: "src/config.ts",
+          provenance: "AST_GRAPH",
+          metadata: { details: "Explicit target" },
+        });
+      }
+      return {
+        optimizedContext: {
+          fileContext: { "src/config.ts": VERSION_A_CONTENT },
+          skeletonContext: {},
+        },
+        executionMemory: {
+          searchPlanHistory: [],
+          discoveredRoutes: [],
+          discoveredServices: [],
+          discoveredModels: [],
+          discoveredSymbols: new Map([["config", { filePath: "src/config.ts", line: 1 }]]),
+          currentConfidence: 0.95,
+        },
+        finalConfidence: 0.95,
+        searchSummary: "Summary",
+        inspectedFiles: ["src/config.ts"],
+        evidenceStore: store,
+      } as any;
+    });
 
     jest.spyOn(SecurityAuditor, "runReflectionAndSecurityAudit").mockResolvedValue({
       securityPass: true,
@@ -135,13 +156,15 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
 
   // ── CHANGE 7: Matching version allows pipeline to proceed to apply ───────
   test("CHANGE 7: Matching disk content passes version guard and allows apply", async () => {
-    const approvedManifest = {
-      files: [{ path: "src/config.ts", action: "modify" as const, dependencies: [], description: "update config" }],
-      totalFiles: 1,
-      manifestVersion: "1.0.0",
-    };
-
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue(approvedManifest);
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (_msg: any, ctx: any) => {
+      const store = ctx?.evidenceStore;
+      const allEv = store ? store.getAllEvidence() : [];
+      return {
+        files: [{ path: "src/config.ts", action: "modify" as const, dependencies: [], description: "update config", evidenceIds: allEv.map((e: any) => e.id) }],
+        totalFiles: 1,
+        manifestVersion: "1.0.0",
+      };
+    });
     jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
     const resolvedContent = "const timeout = 10000;\nconst retries = 3;\n";
@@ -174,7 +197,13 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
     // Disk still contains VERSION_A_CONTENT matching expected hash
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe(VERSION_A_CONTENT);
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const authorizedCapabilityScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "pipeline-stale-source",
+      grants: [{ path: "src/config.ts", action: "FILE_MODIFY" }],
+    })!;
+
+    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, { authorizedCapabilityScope });
 
     expect(response.changes).toHaveLength(1);
     expect(response.changes[0].content).toBe(resolvedContent);
@@ -182,13 +211,15 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
 
   // ── CHANGE 8: Stale disk content halts pipeline BEFORE any disk mutation ─
   test("CHANGE 8: Stale source file (disk modified after generation context) halts pipeline and leaves disk untouched", async () => {
-    const approvedManifest = {
-      files: [{ path: "src/config.ts", action: "modify" as const, dependencies: [], description: "update config" }],
-      totalFiles: 1,
-      manifestVersion: "1.0.0",
-    };
-
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue(approvedManifest);
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (_msg: any, ctx: any) => {
+      const store = ctx?.evidenceStore;
+      const allEv = store ? store.getAllEvidence() : [];
+      return {
+        files: [{ path: "src/config.ts", action: "modify" as const, dependencies: [], description: "update config", evidenceIds: allEv.map((e: any) => e.id) }],
+        totalFiles: 1,
+        manifestVersion: "1.0.0",
+      };
+    });
     jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({ valid: true, errors: [] });
 
     // CodeGenerator reasoned over VERSION_A_CONTENT
@@ -219,7 +250,13 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
     const fsApplySpy = jest.spyOn(FileSystemStateManager.prototype, "apply");
     const selfHealSpy = jest.spyOn(SelfHealingEngine, "runSelfHealingLoop");
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const authorizedCapabilityScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "pipeline-stale-source",
+      grants: [{ path: "src/config.ts", action: "FILE_MODIFY" }],
+    })!;
+
+    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, { authorizedCapabilityScope });
 
     // Verification 1: response has 0 changes and contains STALE_SOURCE_FILE error
     expect(response.changes).toHaveLength(0);

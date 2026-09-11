@@ -20,6 +20,7 @@ import { sha256 } from "../validation/FileVersionGuard";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { ModelObserver } from "./ModelObserver";
 import { EvalDatabaseFixture, ProvisionedEvalContext } from "./EvalDatabaseFixture";
+import { AuthorizedCapabilityScope, CapabilityGrant } from "../runtime/CapabilityGuard";
 
 declare const jest: any;
 
@@ -331,6 +332,22 @@ export class EvalRunner {
         sessionId: `session-${evalProjectId}`,
       };
 
+      const grantPaths = Array.from(new Set([
+        ...(evalCase.expected.allowedChangedFiles || []),
+        ...(evalCase.expected.requiredChangedFiles || []),
+        ...(evalCase.ragGroundTruth?.expectedRelevantFiles || []),
+      ]));
+      const grants: CapabilityGrant[] = grantPaths.flatMap((p) => [
+        { path: p, action: "FILE_MODIFY" as const },
+        { path: p, action: "FILE_CREATE" as const },
+        { path: p, action: "FILE_DELETE" as const },
+      ]);
+      const authorizedCapabilityScope = grants.length > 0 ? AuthorizedCapabilityScope.fromBackendConfiguration({
+        workspaceRoot: tempWorkspace,
+        authorityId: `eval-runner:${evalCase.id}`,
+        grants,
+      }) : undefined;
+
       // 5. Run production AgentPipeline (catching any infrastructure or unhandled errors)
       try {
         agentResponse = await AgentPipeline.runCodingAgent(
@@ -338,6 +355,10 @@ export class EvalRunner {
           evalProjectId,
           request,
           onProgress,
+          {
+            effectiveLocalPath: tempWorkspace,
+            authorizedCapabilityScope: authorizedCapabilityScope ?? undefined,
+          },
         );
       } catch (err: any) {
         pipelineError = err;
