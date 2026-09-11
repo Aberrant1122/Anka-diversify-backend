@@ -560,6 +560,15 @@ export interface AgentResponse {
     verifiedCheckpointIds: readonly string[];
     failureCode?: string;
   };
+  completionEvaluation?: {
+    outcome: "COMPLETE" | "INCOMPLETE" | "BLOCKED" | "CLARIFICATION_REQUIRED" | "TECHNICAL_FAILURE";
+    code: string;
+    category?: string;
+    message?: string;
+    question?: string;
+    reason?: string;
+    satisfiedRequirementIds?: readonly string[];
+  };
 }
 
 export interface BaselineDiagnostic {

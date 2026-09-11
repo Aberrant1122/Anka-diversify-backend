@@ -17,6 +17,7 @@ import { ManifestGenerator } from "../../services/manifest-generator";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { ChatRequest } from "../shared/types";
 import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
+import { CompletionEvaluator } from "../runtime/CompletionEvaluator";
 
 // Mock PrismaClient to prevent DB connection attempts during integration testing
 jest.mock("@prisma/client", () => {
@@ -271,6 +272,15 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
   });
 
   it("6. All gates pass -> exactly one commit, changes remain on disk, response reflects success", async () => {
+    jest.spyOn(RepositoryScanner, "getEffectiveSnapshot").mockImplementation(() => {
+      const content = fs.readFileSync(targetFilePath, "utf8");
+      return {
+        keyFiles: [{ path: "src/index.ts", content }],
+        fileTree: ["src/index.ts"],
+        revision: { contentHash: `revision:${content}` },
+      } as unknown as ReturnType<typeof RepositoryScanner.getEffectiveSnapshot>;
+    });
+    const completionSpy = jest.spyOn(CompletionEvaluator, "evaluate");
     jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
       if (fsManager && localPath) {
         await fsManager.apply(changes, localPath);
@@ -306,6 +316,9 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       sequence: 1,
       status: "VERIFIED",
     });
+    expect(completionSpy).toHaveBeenCalledTimes(1);
+    expect(response.completionEvaluation).toMatchObject({ outcome: "COMPLETE" });
+    expect(response.taskRuntime).toMatchObject({ status: "COMPLETED" });
 
     // Verify ACTUAL disk state: changes REMAIN ON DISK!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('mutated');");

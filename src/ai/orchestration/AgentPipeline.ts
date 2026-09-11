@@ -32,6 +32,37 @@ import { AgentLoopCoordinator } from "./AgentLoopCoordinator";
 import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
 import { TaskRuntime } from "../runtime/TaskRuntime";
 import { WorkingPlan } from "../runtime/WorkingPlan";
+import { CompletionEvaluationResult, CompletionEvaluator } from "../runtime/CompletionEvaluator";
+
+function snapshotChanges(
+  before: RepositoryObservation | undefined,
+  after: RepositoryObservation,
+): string[] {
+  if (!before) return [];
+  const toMap = (observation: RepositoryObservation): Map<string, string> => new Map(
+    observation.snapshotFileList
+      .filter((file): file is typeof file & { path: string } => typeof file.path === "string" && file.path.length > 0)
+      .map((file) => [file.path.replace(/\\/g, "/").replace(/^\.\//, ""), file.content ?? ""]),
+  );
+  const baseline = toMap(before);
+  const current = toMap(after);
+  return Array.from(new Set([...baseline.keys(), ...current.keys()]))
+    .filter((file) => baseline.get(file) !== current.get(file))
+    .sort();
+}
+
+function publicCompletionResult(result: CompletionEvaluationResult): NonNullable<AgentResponse["completionEvaluation"]> {
+  if (result.outcome === "COMPLETE") {
+    return { outcome: result.outcome, code: result.code, satisfiedRequirementIds: result.satisfiedRequirementIds };
+  }
+  if (result.outcome === "CLARIFICATION_REQUIRED") {
+    return { outcome: result.outcome, code: result.code, question: result.question, reason: result.reason };
+  }
+  if (result.outcome === "BLOCKED" || result.outcome === "INCOMPLETE") {
+    return { outcome: result.outcome, code: result.code, category: result.category, message: result.message };
+  }
+  return { outcome: result.outcome, code: result.code, message: result.message };
+}
 
 export class AgentPipeline {
   static async runCodingAgent(
@@ -54,6 +85,7 @@ export class AgentPipeline {
       repositoryFacts?: RepositoryProjectFacts;
       persistConversation?: boolean;
       persistenceSession?: { id: string; title?: string | null };
+      deferCompletionToGitWorktree?: boolean;
       [key: string]: any;
     },
   ): Promise<AgentResponse> {
@@ -76,6 +108,7 @@ export class AgentPipeline {
     const maxIterations = Number.isInteger(configuredMax) && configuredMax >= 1 && configuredMax <= 20 ? configuredMax : 8;
     let iterationRequest = request;
     let preparedObservation: RepositoryObservation | undefined;
+    let initialObservation: RepositoryObservation | undefined;
     let preparedFacts: RepositoryProjectFacts | undefined;
     const workingPlan = WorkingPlan.create({ id: `working-plan:${runtime.snapshot().taskId}` });
     const result = await AgentLoopCoordinator.runPipeline({
@@ -87,6 +120,7 @@ export class AgentPipeline {
         const observation = await RepositoryObserver.observe(projectId, iterationRequest, facts, options);
         preparedFacts = facts;
         preparedObservation = observation;
+        initialObservation ??= observation;
         const revision = observation.currentRevisionHash ?? `unversioned-iteration-${iteration}`;
         const workspace = runtime.workspaceState().withEvidence({
           id: `loop-observation:${iteration}:${revision}`,
@@ -132,6 +166,67 @@ export class AgentPipeline {
         };
       },
     });
+    let completionEvaluation: CompletionEvaluationResult | undefined;
+    if (result.loop.outcome === "AWAITING_COMPLETION_EVALUATION") {
+      const facts = preparedFacts ?? await RepositoryObserver.loadProjectFacts(projectId);
+      const finalObservation = await RepositoryObserver.observe(projectId, iterationRequest, facts, options);
+      const repositoryRevision = finalObservation.currentRevisionHash ?? `unversioned-completion-${result.loop.iterations}`;
+      const finalWorkspace = runtime.workspaceState().withEvidence({
+        id: `completion-observation:${runtime.snapshot().workspace.evidence.length + 1}:${result.loop.iterations}:${repositoryRevision}`,
+        kind: "MATERIALIZED_REPOSITORY",
+        description: "RepositoryObserver captured fresh disk reality for deterministic completion evaluation.",
+        revision: repositoryRevision,
+      });
+      runtime.updateWorkspace(finalWorkspace);
+      const latestJournalEntry = journal.snapshot()[journal.snapshot().length - 1];
+      const deterministicNoOp = result.response.successfulNoOp === true
+        && result.response.reason === "ALREADY_SATISFIED"
+        && result.response.buildVerified === true;
+      const changedPaths = snapshotChanges(initialObservation, finalObservation);
+      completionEvaluation = CompletionEvaluator.evaluate({
+        runtime,
+        handoff: {
+          outcome: result.loop.outcome,
+          workingPlanId: result.loop.workingPlan.snapshot().id,
+          workingPlanRevision: result.loop.workingPlan.snapshot().revision,
+        },
+        journal,
+        repository: {
+          root: finalObservation.effectiveLocalPath ?? runtime.snapshot().workspace.repository.root,
+          revision: repositoryRevision,
+          changedPaths,
+          source: "MATERIALIZED_REPOSITORY",
+          coverage: "FULL_REPOSITORY_DELTA",
+        },
+        validation: {
+          passed: latestJournalEntry?.status === "VERIFIED" || deterministicNoOp,
+          repositoryRevision,
+          source: latestJournalEntry ? "VALIDATION_COORDINATOR" : "VALIDATION_RUNNER",
+        },
+        requirements: CompletionEvaluator.requirementsFromPlan(
+          result.response.taskExecutionPlan,
+          repositoryRevision,
+          journal,
+          deterministicNoOp,
+        ),
+        diagnosticComparison: runtime.snapshot().workspace.diagnosticComparisons[
+          runtime.snapshot().workspace.diagnosticComparisons.length - 1
+        ],
+        diagnosticRepositoryRevision: runtime.snapshot().workspace.diagnosticComparisons.length > 0
+          ? repositoryRevision
+          : undefined,
+        externalValidationPending: options?.deferCompletionToGitWorktree === true,
+      });
+      if (completionEvaluation.outcome === "COMPLETE") {
+        runtime.complete(completionEvaluation.receipt);
+      } else if (completionEvaluation.outcome === "CLARIFICATION_REQUIRED" && runtime.snapshot().status === "RUNNING") {
+        runtime.requestClarification({ question: completionEvaluation.question, reason: completionEvaluation.reason });
+      } else if (completionEvaluation.outcome === "BLOCKED" && runtime.snapshot().status === "RUNNING") {
+        runtime.fail({ failureType: "POLICY_BLOCKED", code: completionEvaluation.code, message: completionEvaluation.message });
+      } else if (completionEvaluation.outcome === "TECHNICAL_FAILURE" && runtime.snapshot().status === "RUNNING") {
+        runtime.fail({ failureType: "TECHNICAL_FAILURE", code: completionEvaluation.code, message: completionEvaluation.message });
+      }
+    }
     await MemoryPersistence.saveMessage(persistenceSession.id, "assistant", result.response.explanation);
     const reachedUserFacingSuccess = result.response.lifecycleStage === "Done"
       || result.response.successfulNoOp === true
@@ -151,6 +246,7 @@ export class AgentPipeline {
         ...(result.loop.failureCode ? { failureCode: result.loop.failureCode } : {}),
       },
       taskRuntime: runtime.snapshot(),
+      ...(completionEvaluation ? { completionEvaluation: publicCompletionResult(completionEvaluation) } : {}),
     };
   }
 
@@ -174,6 +270,7 @@ export class AgentPipeline {
       repositoryFacts?: RepositoryProjectFacts;
       persistConversation?: boolean;
       persistenceSession?: { id: string; title?: string | null };
+      deferCompletionToGitWorktree?: boolean;
       [key: string]: any;
     },
   ): Promise<AgentResponse> {

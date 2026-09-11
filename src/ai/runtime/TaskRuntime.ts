@@ -1,10 +1,13 @@
 import { AgentWorkspaceSnapshot, AgentWorkspaceState } from "./AgentWorkspaceState";
+import { isAuthenticCompletionReceiptFor, VerifiedCompletionReceipt } from "./CompletionEvaluator";
+
+export type { VerifiedCompletionReceipt } from "./CompletionEvaluator";
 
 export type TaskRuntimeStatus = "CREATED" | "RUNNING" | "AWAITING_CLARIFICATION" | "COMPLETED" | "FAILED";
 export type TaskFailureType = "TECHNICAL_FAILURE" | "VALIDATION_FAILURE" | "POLICY_BLOCKED" | "BUDGET_EXHAUSTED";
 
 export type TaskTerminalOutcome =
-  | { type: "COMPLETED"; validationSource: "DETERMINISTIC_VALIDATION" }
+  | { type: "COMPLETED"; validationSource: "COMPLETION_EVALUATOR" }
   | { type: "FAILED"; failureType: TaskFailureType; code: string; message: string };
 
 export interface TaskClarificationState {
@@ -24,35 +27,6 @@ export interface TaskRuntimeSnapshot {
   clarification?: TaskClarificationState;
   terminalOutcome?: TaskTerminalOutcome;
   metadata: Readonly<Record<string, string>>;
-}
-
-export interface DeterministicValidationFacts {
-  validationPassed: boolean;
-  source: "GIT_WORKTREE_VALIDATION" | "VALIDATION_RUNNER";
-}
-
-const COMPLETION_RECEIPT = Symbol("TaskRuntime deterministic completion receipt");
-
-/** Opaque receipt: JSON/model output cannot satisfy TaskRuntime's completion gate. */
-export class VerifiedCompletionReceipt {
-  private readonly marker = COMPLETION_RECEIPT;
-  private constructor(public readonly source: DeterministicValidationFacts["source"]) {
-    Object.freeze(this);
-  }
-
-  public static fromDeterministicValidation(facts: DeterministicValidationFacts): VerifiedCompletionReceipt {
-    if (facts.validationPassed !== true) {
-      throw new Error("Task completion requires passing deterministic validation");
-    }
-    if (facts.source !== "GIT_WORKTREE_VALIDATION" && facts.source !== "VALIDATION_RUNNER") {
-      throw new Error("Task completion requires a recognized deterministic validation source");
-    }
-    return new VerifiedCompletionReceipt(facts.source);
-  }
-
-  public isAuthentic(): boolean {
-    return this.marker === COMPLETION_RECEIPT;
-  }
 }
 
 export interface TaskRuntimeInput {
@@ -134,12 +108,12 @@ export class TaskRuntime {
 
   public complete(receipt: VerifiedCompletionReceipt): void {
     this.requireStatus("RUNNING", "complete");
-    if (!(receipt instanceof VerifiedCompletionReceipt) || !receipt.isAuthentic()) {
-      throw new Error("Task completion requires an authentic deterministic validation receipt");
+    if (!isAuthenticCompletionReceiptFor(receipt, this) || receipt.taskId !== this.taskId) {
+      throw new Error("Task completion requires an authentic CompletionEvaluator receipt");
     }
     this.status = "COMPLETED";
     this.endedAt = this.timestamp();
-    this.terminalOutcome = { type: "COMPLETED", validationSource: "DETERMINISTIC_VALIDATION" };
+    this.terminalOutcome = { type: "COMPLETED", validationSource: "COMPLETION_EVALUATOR" };
   }
 
   public fail(failure: { failureType: TaskFailureType; code: string; message: string }): void {

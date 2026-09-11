@@ -66,6 +66,12 @@ export interface CaptureDiagnosticSnapshotInput {
   source: "DETERMINISTIC_TOOL";
 }
 
+const authenticDiagnosticComparisons = new WeakSet<object>();
+
+export function isAuthenticDiagnosticBaselineComparison(value: unknown): value is DiagnosticBaselineComparison {
+  return typeof value === "object" && value !== null && authenticDiagnosticComparisons.has(value);
+}
+
 const ANSI_ESCAPE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 
 function normalizeOptionalToken(value: string | undefined): string | undefined {
@@ -209,7 +215,7 @@ export class BaselineDiagnosticVerifier {
     Object.freeze(baselineOutcomes);
     Object.freeze(currentOutcomes);
 
-    return Object.freeze({
+    const comparison = Object.freeze({
       baseline,
       current,
       baselineOutcomes,
@@ -218,6 +224,8 @@ export class BaselineDiagnosticVerifier {
       verifiedSuccess: introduced.length === 0,
       source: "DETERMINISTIC_COMPARISON",
     });
+    authenticDiagnosticComparisons.add(comparison);
+    return comparison;
   }
 
   private static canonicalize(

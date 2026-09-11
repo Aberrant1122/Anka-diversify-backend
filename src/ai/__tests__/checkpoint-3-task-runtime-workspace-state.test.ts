@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
 import { TaskRuntime, VerifiedCompletionReceipt } from "../runtime/TaskRuntime";
+import { CompletionEvaluator } from "../runtime/CompletionEvaluator";
+import { VerifiedCheckpointJournal } from "../runtime/VerifiedCheckpointJournal";
 import { CodingAgent } from "../application/CodingAgent";
 import { GitWorktreeService } from "../../services/git-worktree.service";
 import { prisma } from "../../services/database";
@@ -27,6 +29,26 @@ function workspace(): AgentWorkspaceState {
     revision: "abc123",
     constraints: [{ id: "bounded", description: "Stay within the task boundary." }],
   });
+}
+
+function evaluatorReceipt(runtime: TaskRuntime): VerifiedCompletionReceipt {
+  const revision = "completion-revision";
+  runtime.updateWorkspace(runtime.workspaceState().withEvidence({
+    id: `completion:${runtime.snapshot().taskId}`,
+    kind: "MATERIALIZED_REPOSITORY",
+    description: "Fresh deterministic test repository observation.",
+    revision,
+  }).withWorkingPlan({ id: "cp8-plan", revision: 1, status: "AWAITING_COMPLETION_EVALUATION" }));
+  const result = CompletionEvaluator.evaluate({
+    runtime,
+    handoff: { outcome: "AWAITING_COMPLETION_EVALUATION", workingPlanId: "cp8-plan", workingPlanRevision: 1 },
+    journal: new VerifiedCheckpointJournal(),
+    repository: { root: runtime.snapshot().workspace.repository.root, revision, changedPaths: [], source: "MATERIALIZED_REPOSITORY", coverage: "FULL_REPOSITORY_DELTA" },
+    validation: { passed: true, repositoryRevision: revision, source: "VALIDATION_RUNNER" },
+    requirements: [{ id: "runtime-test", description: "Lifecycle test criterion", required: true, status: "SATISFIED", repositoryRevision: revision }],
+  });
+  if (result.outcome !== "COMPLETE") throw new Error(`Fixture completion failed: ${result.code}`);
+  return result.receipt;
 }
 
 describe("Checkpoint 3 deterministic runtime and workspace state", () => {
@@ -62,13 +84,10 @@ describe("Checkpoint 3 deterministic runtime and workspace state", () => {
     expect(runtime.snapshot()).toMatchObject({ status: "AWAITING_CLARIFICATION" });
     expect(() => runtime.start()).toThrow(/AWAITING_CLARIFICATION/);
     runtime.resumeAfterClarification();
-    runtime.complete(VerifiedCompletionReceipt.fromDeterministicValidation({
-      validationPassed: true,
-      source: "VALIDATION_RUNNER",
-    }));
+    runtime.complete(evaluatorReceipt(runtime));
     expect(runtime.snapshot()).toMatchObject({
       status: "COMPLETED",
-      terminalOutcome: { type: "COMPLETED", validationSource: "DETERMINISTIC_VALIDATION" },
+      terminalOutcome: { type: "COMPLETED", validationSource: "COMPLETION_EVALUATOR" },
     });
     expect(() => runtime.start()).toThrow(/COMPLETED/);
     expect(() => runtime.fail({ failureType: "TECHNICAL_FAILURE", code: "LATE", message: "late" })).toThrow(/terminal/);
@@ -87,11 +106,7 @@ describe("Checkpoint 3 deterministic runtime and workspace state", () => {
     expect(() => failed.complete({
       source: "model",
       isAuthentic: () => true,
-    } as unknown as VerifiedCompletionReceipt)).toThrow(/authentic deterministic validation receipt/);
-    expect(() => VerifiedCompletionReceipt.fromDeterministicValidation({
-      validationPassed: false,
-      source: "VALIDATION_RUNNER",
-    })).toThrow(/passing deterministic validation/);
+    } as unknown as VerifiedCompletionReceipt)).toThrow(/authentic CompletionEvaluator receipt/);
     failed.fail({ failureType: "TECHNICAL_FAILURE", code: "PROVIDER_DOWN", message: "Provider unavailable" });
     expect(failed.snapshot()).toMatchObject({
       status: "FAILED",

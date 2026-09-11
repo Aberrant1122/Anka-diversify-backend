@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import crypto from "crypto";
 import { exec, execSync } from "child_process";
 import { promisify } from "util";
 import { AgentPipeline } from "../ai/orchestration/AgentPipeline";
@@ -24,8 +25,24 @@ import {
 } from "../ai/runtime/BaselineDiagnosticVerifier";
 import { AuthorizedCapabilityScope, CapabilityGrant } from "../ai/runtime/CapabilityGuard";
 import type { TaskRuntime } from "../ai/runtime/TaskRuntime";
+import { CompletionEvaluationResult, CompletionEvaluator } from "../ai/runtime/CompletionEvaluator";
+import { VerifiedCheckpointJournal } from "../ai/runtime/VerifiedCheckpointJournal";
+import { RepositoryObserver } from "../ai/orchestration/RepositoryObserver";
 
 const execAsync = promisify(exec);
+
+function publicCompletionResult(result: CompletionEvaluationResult): NonNullable<AgentResponse["completionEvaluation"]> {
+  if (result.outcome === "COMPLETE") {
+    return { outcome: result.outcome, code: result.code, satisfiedRequirementIds: result.satisfiedRequirementIds };
+  }
+  if (result.outcome === "CLARIFICATION_REQUIRED") {
+    return { outcome: result.outcome, code: result.code, question: result.question, reason: result.reason };
+  }
+  if (result.outcome === "BLOCKED" || result.outcome === "INCOMPLETE") {
+    return { outcome: result.outcome, code: result.code, category: result.category, message: result.message };
+  }
+  return { outcome: result.outcome, code: result.code, message: result.message };
+}
 
 export interface PrepareRepositoryRunOptions {
   repositoryPath: string;
@@ -672,6 +689,7 @@ export class GitWorktreeService {
       // 4. Run AgentPipeline strictly targeting the isolated worktree
       let agentResponse: AgentResponse;
       let executionError: Error | null = null;
+      const checkpointJournal = new VerifiedCheckpointJournal();
 
       try {
         agentResponse = await AgentPipeline.runCodingAgent(
@@ -696,6 +714,8 @@ export class GitWorktreeService {
             baselineCommands,
             baselineBuildErrors,
             taskRuntime: options.taskRuntime,
+            checkpointJournal,
+            deferCompletionToGitWorktree: Boolean(options.taskRuntime),
           }
         );
       } catch (err: any) {
@@ -801,6 +821,73 @@ export class GitWorktreeService {
         if (!agentResponse.buildErrors) {
           agentResponse.buildErrors = agentResponse.explanation || "Zero changes generated without explicit verified no-op.";
         }
+      }
+
+      if (
+        options.taskRuntime
+        && options.taskRuntime.snapshot().status === "RUNNING"
+        && agentResponse.agentLoop?.outcome === "AWAITING_COMPLETION_EVALUATION"
+      ) {
+        const completionFacts = await RepositoryObserver.loadProjectFacts(projectId);
+        const completionObservation = await RepositoryObserver.observe(projectId, request, completionFacts, {
+          effectiveLocalPath: prepared.worktreePath,
+        });
+        const repositoryRevision = completionObservation.currentRevisionHash
+          ?? `unversioned-git-worktree-completion-${runId}`;
+        let completionWorkspace = options.taskRuntime.workspaceState().withRelevantPaths([
+          ...options.taskRuntime.workspaceState().snapshot().relevantPaths,
+          ...diffInfo.changedFiles,
+        ]).withEvidence({
+          id: `git-worktree-completion:${runId}:${repositoryRevision}`,
+          kind: "MATERIALIZED_REPOSITORY",
+          description: "Git worktree validation captured fresh materialized disk reality for CP8.",
+          revision: repositoryRevision,
+        });
+        if (diagnosticComparison) completionWorkspace = completionWorkspace.withDiagnosticComparison(diagnosticComparison);
+        options.taskRuntime.updateWorkspace(completionWorkspace);
+        const deterministicNoOp = agentResponse.successfulNoOp === true
+          && agentResponse.reason === "ALREADY_SATISFIED"
+          && validationPassed;
+        const completion = CompletionEvaluator.evaluate({
+          runtime: options.taskRuntime,
+          handoff: {
+            outcome: agentResponse.agentLoop.outcome,
+            workingPlanId: agentResponse.agentLoop.workingPlanId,
+            workingPlanRevision: agentResponse.agentLoop.workingPlanRevision,
+          },
+          journal: checkpointJournal,
+          repository: {
+            root: prepared.worktreePath,
+            revision: repositoryRevision,
+            changedPaths: diffInfo.changedFiles,
+            source: "MATERIALIZED_REPOSITORY",
+            coverage: "FULL_REPOSITORY_DELTA",
+            trustedChanges: baselineRepairedChanges.map((change) => ({
+              path: change.path,
+              fingerprint: change.action === "delete" || change.isDeleted
+                ? "MISSING"
+                : crypto.createHash("sha256").update(change.content).digest("hex"),
+              source: "BASELINE_REPAIR_COORDINATOR" as const,
+            })),
+          },
+          validation: {
+            passed: validationPassed,
+            repositoryRevision,
+            source: "GIT_WORKTREE_VALIDATION",
+          },
+          requirements: CompletionEvaluator.requirementsFromPlan(
+            agentResponse.taskExecutionPlan,
+            repositoryRevision,
+            checkpointJournal,
+            deterministicNoOp,
+          ),
+          diagnosticComparison,
+          diagnosticRepositoryRevision: diagnosticComparison ? repositoryRevision : undefined,
+          diagnosticsRequired: baselineCommands.length > 0,
+        });
+        if (completion.outcome === "COMPLETE") options.taskRuntime.complete(completion.receipt);
+        agentResponse.completionEvaluation = publicCompletionResult(completion);
+        agentResponse.taskRuntime = options.taskRuntime.snapshot();
       }
 
       // Step 4: Bounded Playwright Visual Verification for supported frontend apps
