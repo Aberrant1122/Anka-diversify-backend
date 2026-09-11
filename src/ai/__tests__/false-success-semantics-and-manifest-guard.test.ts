@@ -14,6 +14,10 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { execSync } from "child_process";
+import { AgentLoopCoordinator } from "../orchestration/AgentLoopCoordinator";
+import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
+import { TaskRuntime } from "../runtime/TaskRuntime";
+import { WorkingPlan } from "../runtime/WorkingPlan";
 
 describe("False Success Semantics & Manifest Failure Guard Regressions", () => {
   let tempDir: string;
@@ -38,77 +42,30 @@ describe("False Success Semantics & Manifest Failure Guard Regressions", () => {
     } catch {}
   });
 
-  // ── TEST 1: Manifest failure in AgentPipeline returns explicit terminal failure state ──
-  test("1. Manifest failure in AgentPipeline returns buildVerified=false, lifecycleStage=ManifestValidationFailed, and buildErrors", async () => {
-    jest.spyOn(RepositoryContextBuilder, "buildProjectContext").mockResolvedValue({
-      project: { id: "test-project", name: "test-project" },
-      activeTasks: [],
-      repoSnapshot: {
-        fileTree: ["package.json"],
-        keyFiles: [{ path: "package.json", content: "{}" }],
-      },
-    } as any);
-    jest.spyOn(MemoryPersistence, "getOrCreateSession").mockResolvedValue({
-      id: "mock-sess-1",
-      userId: "test-user",
-      projectId: "test-project",
-    } as any);
-    jest.spyOn(MemoryPersistence, "saveMessage").mockResolvedValue({} as any);
-
-    jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
-      taskType: "NEW_FEATURE",
-      risk: "HIGH",
-      estimatedComplexity: "LARGE",
-      intent: "NEW_FEATURE",
-      targetPath: "src/routes/users.routes.ts",
-      confidence: 0.95,
-      requiresClarification: false,
-      reasoning: "test reasoning",
+  test("1. CP9 planning rejection is not an authorization block or false completion", async () => {
+    const runtime = TaskRuntime.create({
+      taskId: "cp9-planning-failure", originalGoal: "Add user status",
+      workspace: AgentWorkspaceState.create({ projectId: "test-project", root: tempDir }),
     });
-
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-      manifestVersion: "1.0",
-      files: [
-        {
-          path: "src/routes/users.routes.ts",
-          action: "create",
-          description: "create routes",
-          dependencies: [],
+    runtime.start();
+    const result = await AgentLoopCoordinator.runPipeline({
+      runtime,
+      workingPlan: WorkingPlan.create({ id: "cp9-plan" }),
+      maxIterations: 1,
+      observe: async () => ({ workspace: runtime.workspaceState(), revision: "revision" }),
+      executeIteration: async () => ({
+        response: {
+          explanation: "[Planning Scope Rejected] no grounded candidate",
+          changes: [], commitMessage: "", sessionId: "session",
+          lifecycleStage: "ManifestValidationFailed",
+          errorCode: "PLANNING_SCOPE_REJECTED",
+          buildVerified: false,
         },
-      ],
-      totalFiles: 1,
+      }),
     });
-
-    // Force ManifestValidator to fail
-    jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({
-      valid: false,
-      errors: [
-        {
-          type: "orphan",
-          message: "Orphaned file detected: 'src/routes/users.routes.ts'",
-          suggestion: "Add import statement",
-          affectedFiles: ["src/routes/users.routes.ts"],
-        },
-      ],
-    });
-
-    // Force ManifestCorrectionEngine to fail correction
-    jest.spyOn(ManifestCorrectionEngine, "attemptCorrection").mockResolvedValue(null);
-
-    const response = await AgentPipeline.runCodingAgent(
-      "test-user",
-      "test-project",
-      { message: "Add user status" },
-      undefined,
-      { effectiveLocalPath: tempDir }
-    );
-
-    expect(response.changes).toEqual([]);
-    expect(response.buildVerified).toBe(false);
-    expect(response.lifecycleStage).toBe("ManifestValidationFailed");
-    expect(response.buildErrors).toBeTruthy();
-    expect(response.buildErrors).toContain("[Manifest Validation Failed]");
-    expect(response.buildErrors).toContain("Orphaned file detected");
+    expect(result.loop.outcome).toBe("VALIDATION_FAILURE");
+    expect(runtime.snapshot().status).toBe("RUNNING");
+    expect(runtime.snapshot().terminalOutcome).toBeUndefined();
   });
 
   // ── TEST 2: runIsolatedAgent with buildVerified=undefined -> validationPassed=false ──

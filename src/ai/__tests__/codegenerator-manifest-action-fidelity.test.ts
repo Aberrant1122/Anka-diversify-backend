@@ -105,11 +105,7 @@ describe("CodeGenerator Manifest Action Fidelity", () => {
         authoritativeSources,
       );
 
-      // Verify deletion mandate in prompt does NOT include app/page.tsx
-      expect(capturedUserPrompt).toContain("DELETION MANDATE: This request asks to delete specific approved file(s): app/components/Calculator.tsx, app/styles/calculator.css");
-      expect(capturedUserPrompt).not.toContain("delete specific approved file(s): app/components/Calculator.tsx, app/styles/calculator.css, app/page.tsx");
-
-      // Verify result preservation
+      // The model explicitly proposed deletes; the manifest only provided planning context.
       const pageChange = result.changes.find((c) => c.path === "app/page.tsx");
       expect(pageChange).toBeDefined();
       expect(pageChange?.action).toBe("modify");
@@ -222,7 +218,7 @@ describe("CodeGenerator Manifest Action Fidelity", () => {
     }
   });
 
-  test("Part M (Regression 3): Model incorrectly returning DELETE for manifest MODIFY is NOT coerced and is rejected by ExecutionScopeEnforcer", () => {
+  test("Part M (CP9): manifest action mismatch is not coerced and is audit-only at ExecutionScopeEnforcer", () => {
     const manifest: FileManifest = {
       manifestVersion: "1.0.0",
       totalFiles: 3,
@@ -245,8 +241,11 @@ describe("CodeGenerator Manifest Action Fidelity", () => {
       existingFilePaths: existingFiles,
     });
 
-    expect(scopeCheck.valid).toBe(false);
-    expect(scopeCheck.errors.some((e) => e.path === "app/page.tsx" && e.reason === "ACTION_MISMATCH")).toBe(true);
+    expect(scopeCheck.valid).toBe(true);
+    expect(scopeCheck.errors).toEqual([]);
+    expect(scopeCheck.manifestObservations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "app/page.tsx", reason: "PLANNED_ACTION_DIFFERED" }),
+    ]));
   });
 
   test("Part N (Regression 4): Pure remove prompt with cleanup modify preserves MODIFY for page.tsx", async () => {

@@ -109,7 +109,7 @@ import { RepairSessionTracker } from "./RepairSessionTracker";
 import { buildSelfHealingRepairPrompt } from "../prompts/repair";
 import {
   RepairChangeProposal,
-  validateRepairManifestScope,
+  auditRepairManifestPlan,
   resolveRepairProposals,
 } from "./RepairProposalResolver";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
@@ -131,9 +131,6 @@ export const MAX_REPAIR_WALL_TIME_MS = 600000; // 10 minutes
 
 export const SPECIFIC_GATE_ERRORS = new Set([
   "STALE_REPAIR_SOURCE",
-  "REPAIR_UNDECLARED_FILE",
-  "SCOPE_EXPANSION_REQUIRED",
-  "REPAIR_ACTION_MISMATCH",
   "SCOPE_VIOLATION",
   "UNAUTHORIZED_SCOPE_ERROR",
   "PUBLIC_CONTRACT_DRIFT",
@@ -255,24 +252,6 @@ export class SelfHealingEngine {
   }> {
     const isRepositoryMode = executionContract?.pipeline === "REPOSITORY";
 
-    // Fail closed if repository self-healing is invoked without required approved scope
-    if (
-      isRepositoryMode &&
-      !approvedManifest &&
-      executionContract?.taskType !== "DOCS"
-    ) {
-      return {
-        finalChanges: initialChanges,
-        attempts: 0,
-        success: false,
-        errorLog: "[REPAIR_SCOPE_REQUIRED] Execution halted: An approved file manifest is required for repository self-healing.",
-        errorType: "REPAIR_SCOPE_REQUIRED",
-        buildAttemptsCount: 0,
-        modelRepairAttempts: 0,
-        patchesAppliedCount: 0,
-      };
-    }
-
     const executableValidationCommands = commands
       .slice(0, 2)
       .filter((command) => typeof command === "string" && command.trim().length > 0);
@@ -314,8 +293,8 @@ export class SelfHealingEngine {
     const resolvedFailureSequence: string[] = [];
 
     const attemptedProposalFingerprints = new Set<string>();
-    /** Per-run memory of dynamically authorized revealed-baseline repair targets */
-    const authorizedRevealedBaselinePaths = new Set<string>();
+    /** Deterministically proven revealed-baseline candidates; not capability grants. */
+    const provenRevealedBaselinePaths = new Set<string>();
     const repairAttemptsHistory: Array<{
       attempt: number;
       proposalResult?: string;
@@ -556,7 +535,7 @@ export class SelfHealingEngine {
               preTaskSourceGetter,
               changes: currentChanges,
               isBroadRepairTask: isBroad,
-              authorizedRevealedBaselinePaths,
+              authorizedRevealedBaselinePaths: provenRevealedBaselinePaths,
             }
           );
 
@@ -628,9 +607,9 @@ export class SelfHealingEngine {
           };
         }
 
-        // For BROAD BUILD REPAIR ONLY: Dynamically authorize proven revealed baseline compiler targets
+        // For broad build repair, discover deterministically proven candidate targets.
         const isBroad = BaselineDeltaVerifier.isBroadBuildRepairTask(originalMessage, executionContract);
-        if (isBroad && approvedManifest && localPath) {
+        if (isBroad && localPath) {
           for (const diag of parsedDiags) {
             if (!diag.file) continue;
             const cleanPath = diag.file.replace(/^\.\//, "").replace(/\\/g, "/");
@@ -660,36 +639,16 @@ export class SelfHealingEngine {
                   preTaskSourceGetter,
                   changes: currentChanges,
                   isBroadRepairTask: isBroad,
-                  authorizedRevealedBaselinePaths,
+                  authorizedRevealedBaselinePaths: provenRevealedBaselinePaths,
                 }
               );
 
               if ((causality.isPreExisting && !causality.isTouched) || causality.isAuthorizedRepairFollowup) {
                 const abs = path.join(localPath, cleanPath);
                 if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-                  // 1. Extend approved manifest
                   const normPath = normalizeRepoPath(cleanPath);
-                  if (!approvedManifest.files.some((f) => normalizeRepoPath(f.path) === normPath)) {
-                    approvedManifest.files.push({
-                      path: cleanPath,
-                      action: "modify",
-                      description: "Dynamically authorized revealed baseline diagnostic target",
-                      dependencies: [],
-                    });
-                    approvedManifest.totalFiles = approvedManifest.files.length;
-                  }
-
-                  // 2. Extend execution contract target paths and search scope
-                  if (executionContract) {
-                    if (!executionContract.targetPaths.some((p) => normalizeRepoPath(p) === normPath)) {
-                      executionContract.targetPaths.push(cleanPath);
-                    }
-                    if (!executionContract.searchScope.some((p) => normalizeRepoPath(p) === normPath)) {
-                      executionContract.searchScope.push(cleanPath);
-                    }
-                  }
-
-                  // 3. Hydrate on-disk content into currentChanges & snapshot into fsManager
+                  // Hydrate current disk reality as a candidate. The downstream
+                  // CapabilityGuard still independently authorizes any mutation.
                   if (!currentChanges.some((c) => normalizeRepoPath(c.path) === normPath)) {
                     try {
                       const currentDiskContent = fs.readFileSync(abs, "utf8");
@@ -705,27 +664,26 @@ export class SelfHealingEngine {
                     } catch {}
                   }
 
-                  // 4. Record authorization lineage for this repair run
-                  authorizedRevealedBaselinePaths.add(normPath);
+                  provenRevealedBaselinePaths.add(normPath);
 
                   if (causality.isAuthorizedRepairFollowup) {
                     console.log(
-                      `[REPAIR_FOLLOWUP] file=${cleanPath} diagnostic=${diag.code} symbol=${diag.symbolName} causedByAuthorizedRepair=true authorized=true`
+                      `[REPAIR_FOLLOWUP] file=${cleanPath} diagnostic=${diag.code} symbol=${diag.symbolName} causedByVerifiedRepair=true candidate=true capabilityPending=true`
                     );
                   } else {
                     console.log(
-                      `[REVEALED_SCOPE] file=${cleanPath} baselineSource=${sourceInfo.origin} classification=REVEALED_BASELINE authorized=true`
+                      `[REVEALED_SCOPE] file=${cleanPath} baselineSource=${sourceInfo.origin} classification=REVEALED_BASELINE candidate=true capabilityPending=true`
                     );
                   }
                 }
               } else {
                 console.log(
-                  `[REVEALED_SCOPE] file=${cleanPath} authorized=false reason=AGENT_TOUCHED_OR_REGRESSION`
+                  `[REVEALED_SCOPE] file=${cleanPath} candidate=false reason=AGENT_TOUCHED_OR_REGRESSION`
                 );
               }
             } else {
               console.log(
-                `[REVEALED_SCOPE] file=${cleanPath} authorized=false reason=NO_BASELINE_PROOF`
+                `[REVEALED_SCOPE] file=${cleanPath} candidate=false reason=NO_BASELINE_PROOF`
               );
             }
           }
@@ -737,8 +695,7 @@ export class SelfHealingEngine {
           const norm = normalizeRepoPath(diag.file);
           return (
             currentChanges.some((c) => normalizeRepoPath(c.path) === norm) ||
-            Boolean(approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm)) ||
-            authorizedRevealedBaselinePaths.has(norm)
+            provenRevealedBaselinePaths.has(norm)
           );
         };
 
@@ -809,7 +766,7 @@ export class SelfHealingEngine {
             }
           }
 
-          // 2. Hydrate any authorized diagnostic files from parsedDiags not already in currentChanges
+          // 2. Hydrate proven diagnostic candidates not already in currentChanges
           for (const diag of parsedDiags) {
             const rawPath = diag.file || (diag as any).filePath;
             if (!rawPath) continue;
@@ -818,10 +775,9 @@ export class SelfHealingEngine {
 
             if (seenPaths.has(norm)) continue;
 
-            const isApprovedInManifest = approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm);
-            const isAuthorizedRevealed = authorizedRevealedBaselinePaths.has(norm);
+            const isProvenRevealed = provenRevealedBaselinePaths.has(norm);
 
-            if (isApprovedInManifest || isAuthorizedRevealed) {
+            if (isProvenRevealed) {
               let currentContent: string | null = null;
               if (localPath) {
                 const abs = path.join(localPath, cleanPath);
@@ -838,7 +794,7 @@ export class SelfHealingEngine {
                   path: cleanPath,
                   content: currentContent,
                   action: "modify",
-                  description: "Hydrated authorized target for dependency repair",
+                  description: "Hydrated proven candidate for dependency repair",
                 });
               }
             }
@@ -1170,8 +1126,7 @@ export class SelfHealingEngine {
         const norm = normalizeRepoPath(d.file);
         return (
           currentChanges.some((c) => normalizeRepoPath(c.path) === norm) ||
-          Boolean(approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm)) ||
-          authorizedRevealedBaselinePaths.has(norm)
+          provenRevealedBaselinePaths.has(norm)
         );
       };
       const authDiagnostics = rawDiagnostics.filter(isDiagAuthorized);
@@ -1188,27 +1143,6 @@ export class SelfHealingEngine {
         let targetChangeIdx = currentChanges.findIndex(
           (c) => c.path.replace(/\\/g, "/").endsWith(ts6133AuthDiag.file) || ts6133AuthDiag.file.endsWith(c.path.replace(/\\/g, "/"))
         );
-
-        if (targetChangeIdx < 0 && localPath && approvedManifest) {
-          const manifestMatch = approvedManifest.files.find(
-            (f) => f.path.replace(/\\/g, "/").endsWith(ts6133AuthDiag.file) || ts6133AuthDiag.file.endsWith(f.path.replace(/\\/g, "/"))
-          );
-          if (manifestMatch) {
-            const abs = path.join(localPath, manifestMatch.path);
-            if (fs.existsSync(abs)) {
-              try {
-                const content = fs.readFileSync(abs, "utf8");
-                currentChanges.push({
-                  path: manifestMatch.path,
-                  content,
-                  action: manifestMatch.action as any,
-                  description: "Hydrated for TS6133 deterministic repair",
-                });
-                targetChangeIdx = currentChanges.length - 1;
-              } catch {}
-            }
-          }
-        }
 
         if (targetChangeIdx >= 0) {
           const originalFile = currentChanges[targetChangeIdx];
@@ -1260,27 +1194,6 @@ export class SelfHealingEngine {
             (c) => c.path.replace(/\\/g, "/").endsWith(diag.file) || diag.file.endsWith(c.path.replace(/\\/g, "/")),
           );
 
-          if (targetChangeIdx < 0 && localPath && approvedManifest) {
-            const manifestMatch = approvedManifest.files.find(
-              (f) => f.path.replace(/\\/g, "/").endsWith(diag.file) || diag.file.endsWith(f.path.replace(/\\/g, "/")),
-            );
-            if (manifestMatch) {
-              const abs = path.join(localPath, manifestMatch.path);
-              if (fs.existsSync(abs)) {
-                try {
-                  const content = fs.readFileSync(abs, "utf8");
-                  currentChanges.push({
-                    path: manifestMatch.path,
-                    content,
-                    action: manifestMatch.action as any,
-                    description: "Hydrated for surgical repair",
-                  });
-                  targetChangeIdx = currentChanges.length - 1;
-                } catch {}
-              }
-            }
-          }
-
           if (targetChangeIdx >= 0) {
             const originalFile = currentChanges[targetChangeIdx];
             totalFileLines = originalFile.content.split("\n").length;
@@ -1311,9 +1224,7 @@ export class SelfHealingEngine {
         // Read CURRENT live worktree file contents directly from disk
         const currentFileContext: Record<string, string> = {};
         if (localPath) {
-          const pathsToRead = approvedManifest
-            ? approvedManifest.files.map((f) => f.path)
-            : currentChanges.map((c) => c.path);
+          const pathsToRead = Array.from(new Set(currentChanges.map((c) => c.path)));
 
           for (const relPath of pathsToRead) {
             const abs = path.join(localPath, relPath);
@@ -1344,7 +1255,7 @@ export class SelfHealingEngine {
         });
 
         const allowedRepairPaths = new Set(
-          (approvedManifest?.files.map((file) => file.path) || Object.keys(currentFileContext))
+          Object.keys(currentFileContext)
             .map((repairPath) => normalizedSafeRepairPath(repairPath))
             .filter((value): value is string => Boolean(value)),
         );
@@ -1445,17 +1356,9 @@ export class SelfHealingEngine {
             previousProposalFingerprint = proposalFingerprint;
 
             if (isRepositoryMode || approvedManifest) {
-              const manifestPrecheck = validateRepairManifestScope(proposals, approvedManifest);
-              if (!manifestPrecheck.valid) {
-                previousErrors = `[${manifestPrecheck.error.code}] ${manifestPrecheck.error.message}`;
-                lastErrorType = manifestPrecheck.error.code;
-                repairAttemptsHistory.push({
-                  attempt,
-                  proposalResult: "SCOPE_REJECTED",
-                  patchResult: `[${manifestPrecheck.error.code}] ${manifestPrecheck.error.message}`,
-                  validationResult: "UNRESOLVED",
-                });
-                continue;
+              const manifestAudit = auditRepairManifestPlan(proposals, approvedManifest);
+              if (!manifestAudit.valid) {
+                console.info(`[MANIFEST_AUDIT] ${manifestAudit.error.code}: ${manifestAudit.error.message}`);
               }
 
               let resolution = resolveRepairProposals(proposals, currentFileContext);

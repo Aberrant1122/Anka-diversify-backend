@@ -7,7 +7,7 @@ import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder
 import { RepositoryScanner } from "../repository/RepositoryScanner";
 import { IntentClassifier } from "../classification/IntentClassifier";
 import { RepositorySearch } from "../repository/RepositorySearch";
-import { CodeGenerator } from "../generation/CodeGenerator";
+import { buildApprovedFilePlanSection, CodeGenerator } from "../generation/CodeGenerator";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { ManifestGenerator } from "../../services/manifest-generator";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
@@ -15,6 +15,8 @@ import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { SecurityAuditor } from "../review/SecurityAuditor";
 import { ValidationDetector } from "../validation/ValidationDetector";
 import { ChatRequest } from "../shared/types";
+import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
+import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 // Mock PrismaClient to prevent DB connection attempts
 jest.mock("@prisma/client", () => {
@@ -136,100 +138,51 @@ describe("Pipeline Manifest & Scope Enforcement Integration Tests", () => {
     sessionId: "sess-1",
   };
 
-  test("CHANGE 5: Manifest failure prevents CodeGenerator invocation and file mutation", async () => {
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+  test("CHANGE 5 / CP9: structural manifest failure remains planning-only and causes no mutation", () => {
+    const proposedManifest = {
       files: [{ path: "src/unauthorized.ts", action: "modify", dependencies: [], description: "out of scope" }],
       totalFiles: 1,
       manifestVersion: "1.0.0",
-    });
-
-    jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({
-      valid: false,
-      errors: [
-        {
-          type: "path_constraint",
-          message: "Path src/unauthorized.ts violates targetPaths",
-          affectedFiles: ["src/unauthorized.ts"],
-          suggestion: "Remove file",
-        },
-      ],
-    });
-
-    const codeGenSpy = jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs");
-    const fsApplySpy = jest.spyOn(FileSystemStateManager.prototype, "apply");
-
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
-
-    expect(response.changes).toHaveLength(0);
-    expect(response.explanation).toContain("[Manifest Validation Failed]");
-    expect(codeGenSpy).not.toHaveBeenCalled();
-    expect(fsApplySpy).not.toHaveBeenCalled();
+    } as any;
+    const result = new ManifestValidator({
+      goal: "plan", taskType: "BUG_FIX", risk: "LOW", estimatedComplexity: "SMALL",
+      pipeline: "REPOSITORY", environment: "NODE_JS", repositoryRequired: true,
+      expectedFiles: [], validationType: "TYPESCRIPT_BUILD", targetPaths: ["src/index.ts"],
+      allowedActions: ["modify"], forbiddenActions: [], maxFiles: 1,
+      searchScope: ["src"], contextScope: ["src"], diffCriticEnabled: true,
+    }, { existingFiles: ["src/index.ts"] }).validate(proposedManifest);
+    expect(result.valid).toBe(false);
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
   });
 
-  test("CHANGE 6: Scope failure on undeclared file halts pipeline before FileSystemStateManager mutation", async () => {
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
+  test("CHANGE 6 / CP9: manifest omission is audit-only while CapabilityGuard denies unauthorized path", () => {
+    const proposedManifest = {
       files: [{ path: "src/index.ts", action: "modify", dependencies: [], description: "update index" }],
       totalFiles: 1,
       manifestVersion: "1.0.0",
+    } as any;
+    const proposal = [{ path: "package.json", content: "{}", description: "unplanned", action: "modify" as const }];
+    const audit = enforceExecutionScope({ proposedChanges: proposal, manifest: proposedManifest, existingFilePaths: ["package.json"] });
+    expect(audit.valid).toBe(true);
+    expect(audit.manifestObservations).toMatchObject([{ reason: "UNPLANNED_PATH" }]);
+    const authority = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir, authorityId: "cp9-pipeline", grants: [{ path: "src/index.ts", action: "FILE_MODIFY" }],
     });
-
-    jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({
-      valid: true,
-      errors: [],
-    });
-
-    // CodeGenerator returns an undeclared extra file (package.json)
-    jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
-      roadmap: [],
-      changes: [
-        { path: "src/index.ts", content: "console.log('updated');", description: "update", action: "modify" },
-        { path: "package.json", content: "{}", description: "undeclared change", action: "modify" },
-      ],
-      explanation: "Changes generated",
-      commitMessage: "feat: update",
-      validationCommands: [],
-    });
-
-    const fsApplySpy = jest.spyOn(FileSystemStateManager.prototype, "apply");
-
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
-
-    expect(response.changes).toHaveLength(0);
-    expect(response.explanation).toContain("[Execution Scope Violation]");
-    expect(response.explanation).toContain("UNDECLARED_FILE");
-    expect(fsApplySpy).not.toHaveBeenCalled();
-    // Verify disk content unchanged
-    expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
+    if (!authority) throw new Error("fixture authority required");
+    expect(CapabilityGuard.create({ workspaceRoot: tempDir, scopeId: "stage", authorizedScope: authority })
+      .authorize({ path: "package.json", action: "FILE_MODIFY", scopeId: "stage" }))
+      .toMatchObject({ allowed: false, code: "CAPABILITY_PATH_NOT_DECLARED" });
   });
 
-  test("CHANGE 7B: Approved manifest is passed directly into CodeGenerator.generateRoadmapAndDiffs", async () => {
-    const approvedManifest = {
+  test("CHANGE 7B / CP9: manifest remains available as advisory generation provenance", () => {
+    const planningManifest = {
       files: [{ path: "src/index.ts", action: "modify" as const, dependencies: [], description: "update index" }],
       totalFiles: 1,
       manifestVersion: "1.0.0",
     };
-
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue(approvedManifest);
-    jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({
-      valid: true,
-      errors: [],
-    });
-
-    const codeGenSpy = jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
-      roadmap: [],
-      changes: [
-        { path: "src/index.ts", content: "console.log('updated');", description: "update", action: "modify" },
-      ],
-      explanation: "Changes generated",
-      commitMessage: "feat: update",
-      validationCommands: [],
-    });
-
-    await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
-
-    expect(codeGenSpy).toHaveBeenCalled();
-    // Verify 6th parameter is approvedManifest
-    expect(codeGenSpy.mock.calls[0][5]).toEqual(approvedManifest);
+    const prompt = buildApprovedFilePlanSection(planningManifest);
+    expect(prompt).toContain("REQUESTED FILE PLAN — ADVISORY PLANNING CONTEXT");
+    expect(prompt).toContain("MODIFY: src/index.ts");
+    expect(prompt).toContain("They grant no mutation authority");
   });
 });

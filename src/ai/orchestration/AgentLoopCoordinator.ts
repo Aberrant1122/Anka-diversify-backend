@@ -47,7 +47,8 @@ function errorCode(error: unknown): string {
 }
 
 function isAuthorizationError(error: unknown): boolean {
-  return errorCode(error).startsWith("CAPABILITY_");
+  const code = errorCode(error);
+  return code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE";
 }
 
 /**
@@ -109,31 +110,41 @@ export class AgentLoopCoordinator {
         if (!entry) {
           const code = executed.response.errorCode;
           if (code) {
-            const category = code.startsWith("CAPABILITY_") || code === "WRITE_AUTHORITY_REJECTED"
+            const category = code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE"
               ? "AUTHORIZATION_DENIAL"
-              : "TECHNICAL_FAILURE";
+              : code.startsWith("PLANNING_")
+                ? "VALIDATION_FAILURE"
+                : "TECHNICAL_FAILURE";
             let workspace = input.runtime.workspaceState().withFailureFact({
               id: `pipeline:${iteration}:${code}`,
               code,
               category,
               source: "DETERMINISTIC_RUNTIME",
             });
-            workingPlan = workingPlan.block();
+            workingPlan = category === "VALIDATION_FAILURE"
+              ? workingPlan.requireRevision({ code, category, deterministic: true })
+              : workingPlan.block();
             workspace = workspace.withWorkingPlan({
               id: workingPlan.snapshot().id,
               revision: workingPlan.snapshot().revision,
               status: workingPlan.snapshot().status,
             });
             input.runtime.updateWorkspace(workspace);
-            input.runtime.fail({
-              failureType: category === "AUTHORIZATION_DENIAL" ? "POLICY_BLOCKED" : "TECHNICAL_FAILURE",
-              code,
-              message: executed.response.reason ?? executed.response.explanation,
-            });
+            if (category !== "VALIDATION_FAILURE") {
+              input.runtime.fail({
+                failureType: category === "AUTHORIZATION_DENIAL" ? "POLICY_BLOCKED" : "TECHNICAL_FAILURE",
+                code,
+                message: executed.response.reason ?? executed.response.explanation,
+              });
+            }
             return {
               response: executed.response,
               loop: {
-                outcome: category === "AUTHORIZATION_DENIAL" ? "AUTHORIZATION_DENIED" : "TECHNICAL_FAILURE",
+                outcome: category === "AUTHORIZATION_DENIAL"
+                  ? "AUTHORIZATION_DENIED"
+                  : category === "VALIDATION_FAILURE"
+                    ? "VALIDATION_FAILURE"
+                    : "TECHNICAL_FAILURE",
                 iterations: iteration,
                 workingPlan,
                 verifiedCheckpointIds,

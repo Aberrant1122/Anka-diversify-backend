@@ -108,7 +108,7 @@ export class ManifestGenerator {
       for (const ob of obligations) {
         contextText += `- Path: "${ob.path}" | Required Action: "${ob.requiredAction}" | Role: ${ob.role} | Evidence IDs: [${ob.evidenceIds.join(", ")}]\n`;
       }
-      contextText += `- CONTRACT ENFORCEMENT: Any deviation between your manifest's action and the required action above will trigger an immediate MANIFEST_ACTION_MISMATCH rejection.\n\n`;
+      contextText += `- PLANNING CONSISTENCY: A manifest action differing from these deterministic obligations will require plan correction. This grants no mutation authority.\n\n`;
     }
 
     if (repositoryContext.evidenceStore) {

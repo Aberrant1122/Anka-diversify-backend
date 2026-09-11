@@ -383,7 +383,9 @@ export class CompletionEvaluator {
         id: `plan-stage:${stage.id}`,
         description: stage.intent.goal,
         required: true,
-        status: stage.status === "VERIFIED" && (checkpoints.length > 0 || deterministicNoOp)
+        // TaskExecutionPlan status is advisory. Satisfaction is derived only
+        // from VERIFIED journal evidence or a separately proven deterministic no-op.
+        status: checkpoints.length > 0 || deterministicNoOp
           ? "SATISFIED" as const
           : "UNSATISFIED" as const,
         repositoryRevision,

@@ -69,7 +69,7 @@ CRITICAL RULES:
    - If the project uses Next.js App Router (app/), do NOT create pages/ or src/pages/ files. Use app/**/page.tsx or embed/modify in existing app/page.tsx and existing components.
    - If the project uses Next.js Pages Router (pages/), do NOT create app/ or src/app/ files.
    - If the project already has existing components (e.g. components/Calculator.tsx, components/CalculatorButton.tsx, components/CalculatorDisplay.tsx), prefer modifying/reusing them over creating duplicate or parallel files.
-4. Keep every path and action identical to the rejected manifest. A correction may fix metadata and dependencies, but may not invent a path or change mutation authority.
+4. Keep corrections bounded to planning metadata and dependencies. A manifest never grants or changes mutation authority.
 5. Keep totalFiles <= maxFiles (${contract.maxFiles}).
 6. If external-dependency-missing errors were detected:
    - You MUST NOT use or invent uninstalled packages. Only use packages listed in installed external packages (${arch?.installedPackages?.join(", ") || "none"}), or implement using standard library/native JS.

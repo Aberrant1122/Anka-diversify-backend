@@ -227,16 +227,24 @@ export class AgentPipeline {
         runtime.fail({ failureType: "TECHNICAL_FAILURE", code: completionEvaluation.code, message: completionEvaluation.message });
       }
     }
-    await MemoryPersistence.saveMessage(persistenceSession.id, "assistant", result.response.explanation);
-    const reachedUserFacingSuccess = result.response.lifecycleStage === "Done"
-      || result.response.successfulNoOp === true
-      || result.response.compoundTaskStatus === "RUNNING"
-      || result.response.compoundTaskStatus === "COMPLETED";
+    const runtimeCompleted = runtime.snapshot().status === "COMPLETED"
+      && completionEvaluation?.outcome === "COMPLETE";
+    const authoritySafeResponse: AgentResponse = runtimeCompleted
+      ? { ...result.response, lifecycleStage: "Done", compoundTaskStatus: "COMPLETED" }
+      : {
+          ...result.response,
+          ...(result.response.lifecycleStage === "Done" ? { lifecycleStage: "Determine Completion" as const } : {}),
+          ...(result.response.compoundTaskStatus === "COMPLETED" ? { compoundTaskStatus: "VERIFIED" as const } : {}),
+        };
+    await MemoryPersistence.saveMessage(persistenceSession.id, "assistant", authoritySafeResponse.explanation);
+    const reachedUserFacingSuccess = runtimeCompleted
+      || authoritySafeResponse.compoundTaskStatus === "RUNNING"
+      || authoritySafeResponse.compoundTaskStatus === "VERIFIED";
     if (reachedUserFacingSuccess && !persistenceSession.title) {
       await MemoryPersistence.updateSessionTitle(persistenceSession.id, request.message);
     }
     return {
-      ...result.response,
+      ...authoritySafeResponse,
       agentLoop: {
         outcome: result.loop.outcome,
         iterations: result.loop.iterations,
@@ -601,7 +609,7 @@ export class AgentPipeline {
       const advancedPlanResult = TaskExecutionPlanManager.advancePlanStage(taskExecutionPlan);
       const updatedPlan = advancedPlanResult.plan;
       const compoundStatus = updatedPlan.stages.every((s) => s.status === "VERIFIED")
-        ? "COMPLETED"
+        ? "VERIFIED"
         : "RUNNING";
 
       const explanation =
@@ -642,7 +650,7 @@ export class AgentPipeline {
         healthStatus: "HEALTHY",
         taskExecutionPlan: updatedPlan,
         compoundTaskStatus: compoundStatus,
-        lifecycleStage: "Done",
+        lifecycleStage: "Determine Completion",
         baselineDiagnosticCount: 0,
         targetedBaselineDiagnostics: [],
         remainingBaselineDiagnostics: [],
@@ -712,6 +720,7 @@ export class AgentPipeline {
       clarificationData,
       finalConfidence,
       onProgress,
+      authorizedCapabilityScope: options?.authorizedCapabilityScope,
     });
     if (!("planningComplete" in manifestPlanning)) {
       return manifestPlanning;
@@ -772,53 +781,6 @@ export class AgentPipeline {
         hydrationResult.mergedSourceMap,
       );
     } catch (genErr: any) {
-      if (
-        genErr?.code === "CODEGEN_MANIFEST_ACTION_VIOLATION" ||
-        (genErr?.message && genErr.message.includes("[CODEGEN_MANIFEST_ACTION_VIOLATION]"))
-      ) {
-        const failureExplanation = `[Execution Scope Violation] [CODEGEN_MANIFEST_ACTION_VIOLATION] Generated file changes attempted action violating approved manifest contract:\n• ${genErr.message}`;
-        await saveConversationMessage("assistant", failureExplanation);
-
-        return {
-          explanation: failureExplanation,
-          changes: [],
-          commitMessage: "",
-          sessionId: session.id,
-          intent: intentResult.intent,
-          taskType: intentResult.taskType,
-          risk: intentResult.risk,
-          estimatedComplexity: intentResult.estimatedComplexity,
-          targetPath: intentResult.targetPath,
-          confidence: finalConfidence,
-          buildVerified: false,
-          buildErrors: failureExplanation,
-          lifecycleStage: "CodegenManifestActionViolation",
-          errorCode: "CODEGEN_MANIFEST_ACTION_VIOLATION",
-        };
-      }
-      if (
-        genErr?.code === "CODEGEN_MANIFEST_VIOLATION" ||
-        (genErr?.message && genErr.message.includes("[CODEGEN_MANIFEST_VIOLATION]"))
-      ) {
-        const failureExplanation = `[Execution Scope Violation] Generated file changes failed deterministic scope validation:\n• [UNDECLARED_FILE] ${genErr.message}`;
-        await saveConversationMessage("assistant", failureExplanation);
-
-        return {
-          explanation: failureExplanation,
-          changes: [],
-          commitMessage: "",
-          sessionId: session.id,
-          intent: intentResult.intent,
-          taskType: intentResult.taskType,
-          risk: intentResult.risk,
-          estimatedComplexity: intentResult.estimatedComplexity,
-          targetPath: intentResult.targetPath,
-          confidence: finalConfidence,
-          buildVerified: false,
-          buildErrors: failureExplanation,
-          lifecycleStage: "BuildFailed",
-        };
-      }
       throw genErr;
     }
     const s7Time = performance.now() - s7Start;
@@ -866,6 +828,9 @@ export class AgentPipeline {
         confidence: finalConfidence,
         roadmap: roadmapAndDiff.roadmap,
       };
+    }
+    if (scopeCheck.manifestObservations.length > 0) {
+      console.info(`[MANIFEST_AUDIT] ${scopeCheck.manifestObservations.map((item) => item.message).join("; ")}`);
     }
 
     // Diff Contract Critic Pass
@@ -1052,7 +1017,7 @@ export class AgentPipeline {
         ? TaskExecutionPlanManager.advancePlanStage(taskExecutionPlan).plan
         : TaskExecutionPlanManager.failStage(taskExecutionPlan, activeStage.id),
       compoundTaskStatus: gateSuccess
-        ? (taskExecutionPlan.stages.every((s) => s.status === "VERIFIED") ? "COMPLETED" : "RUNNING")
+        ? (taskExecutionPlan.stages.every((s) => s.status === "VERIFIED") ? "VERIFIED" : "RUNNING")
         : "FAILED",
       failedStage: gateSuccess ? undefined : activeStage.id,
       dependentStagesSkipped: gateSuccess
@@ -1087,7 +1052,7 @@ export class AgentPipeline {
         rollbackErrorLog ? rollbackErrorLog : "",
       ].filter(Boolean).join("\n\n") || (!isBuildVerified && !isTaskVerified ? repairResult.errorLog : ""),
       verificationChecklist: defaultChecklist,
-      lifecycleStage: gateSuccess ? "Done" : "BuildFailed",
+      lifecycleStage: gateSuccess ? "Determine Completion" : "BuildFailed",
       pipelineMeasurementText,
       patchCorrectionAttempted: (roadmapAndDiff as any).patchTelemetry?.patchCorrectionAttempted,
       patchCorrectionSucceeded: (roadmapAndDiff as any).patchTelemetry?.patchCorrectionSucceeded,
@@ -1101,6 +1066,15 @@ export class AgentPipeline {
       modelRepairAttempts: repairResult.modelRepairAttempts,
       patchesAppliedCount: repairResult.patchesAppliedCount,
       buildAttemptsCount: repairResult.buildAttemptsCount,
+      manifestAudit: {
+        role: "PLANNING_AUDIT",
+        requestedFiles: Object.freeze((approvedManifest?.files ?? []).map((file) => Object.freeze({
+          path: file.path,
+          action: file.action,
+          description: file.description,
+        }))),
+        observations: Object.freeze([...scopeCheck.manifestObservations]),
+      },
     };
   }
 }

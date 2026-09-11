@@ -21,6 +21,10 @@ export interface RepositoryContext {
   monorepo?: MonorepoDescriptor | null;
 }
 
+/**
+ * Structural/planning consistency validator only. A valid result does not prove
+ * generated code, authorize mutation, verify an ActionGroup, or complete a task.
+ */
 export class ManifestValidator {
   private contract: ExecutionContract;
   private existingFiles: Set<string>;
@@ -59,7 +63,7 @@ export class ManifestValidator {
   }
 
   /**
-   * Main entry point to validate a FileManifest against all rules.
+   * Main entry point for advisory manifest planning validation.
    */
   public validate(manifest: FileManifest, options?: { isSubTask?: boolean }): ValidationResult {
     const errors: ValidationError[] = [];
@@ -94,7 +98,7 @@ export class ManifestValidator {
     // Rule 6: Router Architecture Conformance
     errors.push(...this.validateRouterArchitecture(manifest));
 
-    // Rule 7: Authoritative MODIFY Target Existence
+    // Rule 7: planned MODIFY target consistency with the supplied repository view
     errors.push(...this.validateModifyTargets(manifest));
 
     return {

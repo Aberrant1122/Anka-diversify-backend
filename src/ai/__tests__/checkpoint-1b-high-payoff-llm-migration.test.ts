@@ -958,7 +958,7 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
       }).valid).toBe(false);
     });
 
-    it("30. manifest corrective generation uses CODE_CORRECTION and preserves path authority", async () => {
+    it("30. CP9 manifest divergence remains a proposal for CapabilityGuard instead of triggering manifest authority", async () => {
       const gatewaySpy = jest.spyOn(LLMGateway.getInstance(), "callStructured")
         .mockResolvedValueOnce(gatewayResult({
           explanation: "Wrong path",
@@ -977,15 +977,12 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
         { manifestVersion: "1", totalFiles: 1, files: [{ path: "src/approved.ts", action: "create", description: "Approved", dependencies: [] }] } as any,
       );
 
-      expect(result.changes.map((change) => change.path)).toEqual(["src/approved.ts"]);
+      expect(result.changes.map((change) => change.path)).toEqual(["src/invented.ts"]);
       expect(gatewaySpy.mock.calls[0][0].stage).toBe(PipelineStages.CODE_GENERATION);
-      expect(gatewaySpy.mock.calls[1][0]).toEqual(expect.objectContaining({
-        stage: PipelineStages.CODE_CORRECTION,
-        schema: expect.objectContaining({ name: "ManifestCodeCorrectionSchema", validate: expect.any(Function) }),
-      }));
+      expect(gatewaySpy).toHaveBeenCalledTimes(1);
     });
 
-    it("31. invalid corrective action is rejected rather than normalized", async () => {
+    it("31. CP9 does not normalize or reject a proposal solely from manifest action", async () => {
       jest.spyOn(LLMGateway.getInstance(), "callStructured")
         .mockResolvedValueOnce(gatewayResult({
           explanation: "Wrong path",
@@ -998,11 +995,12 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
           commitMessage: "feat: wrong action",
         }, PipelineStages.CODE_CORRECTION) as any);
 
-      await expect(CodeGenerator.generateRoadmapAndDiffs(
+      const result = await CodeGenerator.generateRoadmapAndDiffs(
         "Create approved", { intent: "FEATURE" }, { fileContext: {}, skeletonContext: {} }, "system",
         standaloneContract,
         { manifestVersion: "1", totalFiles: 1, files: [{ path: "src/approved.ts", action: "create", description: "Approved", dependencies: [] }] } as any,
-      )).rejects.toMatchObject({ code: "CODEGEN_MANIFEST_ACTION_VIOLATION" });
+      );
+      expect(result.changes).toMatchObject([{ path: "src/invented.ts", action: "create" }]);
     });
 
     it("32. security correction uses the gateway and remains subject to SecurityPolicy", async () => {

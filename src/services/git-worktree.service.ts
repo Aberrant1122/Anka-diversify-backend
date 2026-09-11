@@ -723,16 +723,19 @@ export class GitWorktreeService {
         throw err;
       }
 
-      if (prepared.worktreePath && agentResponse.changes && agentResponse.changes.length > 0) {
-        const allowedPaths = new Set(agentResponse.changes.map((c) => c.path.replace(/\\/g, "/")));
-        if (!allowedPaths.has("package.json")) {
-          try {
-            await execAsync("git checkout HEAD -- package.json package-lock.json", { cwd: prepared.worktreePath });
-          } catch {}
-        }
+      let diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
+      const dependencyFiles = new Set(["package.json", "package-lock.json"]);
+      const actualDependencyDelta = diffInfo.changedFiles.some((file) => dependencyFiles.has(file.replace(/\\/g, "/")));
+      const trustedDependencyGrant = (options.authorizedCapabilities ?? []).some((grant) =>
+        dependencyFiles.has(grant.path.replace(/\\/g, "/"))
+          && (grant.action === "FILE_CREATE" || grant.action === "FILE_MODIFY"),
+      );
+      if (prepared.worktreePath && actualDependencyDelta && !trustedDependencyGrant) {
+        try {
+          await execAsync("git checkout HEAD -- package.json package-lock.json", { cwd: prepared.worktreePath });
+          diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
+        } catch {}
       }
-
-      const diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
 
       let validationPassed = false;
       let deltaResult: BaselineDeltaResult | null = null;
@@ -885,7 +888,14 @@ export class GitWorktreeService {
           diagnosticRepositoryRevision: diagnosticComparison ? repositoryRevision : undefined,
           diagnosticsRequired: baselineCommands.length > 0,
         });
-        if (completion.outcome === "COMPLETE") options.taskRuntime.complete(completion.receipt);
+        if (completion.outcome === "COMPLETE") {
+          options.taskRuntime.complete(completion.receipt);
+          agentResponse.lifecycleStage = "Done";
+          agentResponse.compoundTaskStatus = "COMPLETED";
+        } else {
+          if (agentResponse.lifecycleStage === "Done") agentResponse.lifecycleStage = "Determine Completion";
+          if (agentResponse.compoundTaskStatus === "COMPLETED") agentResponse.compoundTaskStatus = "VERIFIED";
+        }
         agentResponse.completionEvaluation = publicCompletionResult(completion);
         agentResponse.taskRuntime = options.taskRuntime.snapshot();
       }

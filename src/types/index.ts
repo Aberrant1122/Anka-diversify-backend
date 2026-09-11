@@ -452,7 +452,7 @@ export interface ExecutionContract {
   contextScope: string[];
   /** Whether the Diff Critic stage should run */
   diffCriticEnabled: boolean;
-  /** Authority provenance mapping: why each path in targetPaths is authorized */
+  /** Planning provenance mapping; this does not grant a filesystem capability. */
   targetProvenance?: Record<string, string>;
   /** Deterministic file action obligations (create / modify / delete) */
   actionObligations?: FileActionObligation[];
@@ -568,6 +568,17 @@ export interface AgentResponse {
     question?: string;
     reason?: string;
     satisfiedRequirementIds?: readonly string[];
+  };
+  manifestAudit?: {
+    role: "PLANNING_AUDIT";
+    requestedFiles: readonly { path: string; action: "create" | "modify" | "delete"; description?: string }[];
+    observations: readonly {
+      path: string;
+      reason: "UNPLANNED_PATH" | "PLANNED_ACTION_DIFFERED";
+      message: string;
+      plannedAction?: "create" | "modify" | "delete";
+      actualAction: "create" | "modify" | "delete";
+    }[];
   };
 }
 

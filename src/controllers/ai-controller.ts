@@ -726,11 +726,13 @@ export class AiController {
   async approveManifest(req: Request, res: Response) {
     try {
       const { id } = req.params;
+      // Compatibility endpoint: approval is human planning-workflow metadata.
+      // It is never consumed as mutation, validation, checkpoint, or completion authority.
       const updated = await prisma.agentManifest.update({
         where: { id: String(id) },
         data: { validationStatus: "approved", approvedAt: new Date() },
       });
-      res.json({ success: true, data: updated });
+      res.json({ success: true, role: "PLANNING_WORKFLOW_ONLY", data: updated });
     } catch (error) {
       console.error("Approve manifest error:", error);
       res.status(500).json({ error: "Failed to approve manifest", message: error instanceof Error ? error.message : "Unknown error" });
@@ -744,7 +746,7 @@ export class AiController {
         where: { id: String(id) },
         data: { validationStatus: "rejected" },
       });
-      res.json({ success: true, data: updated });
+      res.json({ success: true, role: "PLANNING_WORKFLOW_ONLY", data: updated });
     } catch (error) {
       console.error("Reject manifest error:", error);
       res.status(500).json({ error: "Failed to reject manifest", message: error instanceof Error ? error.message : "Unknown error" });

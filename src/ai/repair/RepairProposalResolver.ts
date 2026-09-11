@@ -57,14 +57,13 @@ export interface RepairResolutionFailure {
 
 export type RepairResolutionResult = RepairResolutionSuccess | RepairResolutionFailure;
 
-// ─── Manifest Precheck on Repair Proposals ─────────────────────────────────
+// ─── Manifest Audit on Repair Proposals ────────────────────────────────────
 
 /**
- * Deterministically verifies that every repair proposal path exists in the approved manifest
- * and that the proposed action matches the declared manifest action.
- * ALL-OR-NOTHING: one violation fails the entire check.
+ * Compares repair proposals with the planning manifest for audit/provenance.
+ * This result is not mutation authorization and must not gate execution.
  */
-export function validateRepairManifestScope(
+export function auditRepairManifestPlan(
   proposals: readonly RepairChangeProposal[],
   manifest: FileManifest | null | undefined,
 ): { valid: true } | { valid: false; error: RepairResolutionError } {
@@ -91,7 +90,7 @@ export function validateRepairManifestScope(
         valid: false,
         error: {
           code: "REPAIR_UNDECLARED_FILE",
-          message: `Repair proposal for "${proposal.path}" was rejected: file was not declared in the approved manifest.`,
+          message: `Repair proposal for "${proposal.path}" was not present in the planning manifest.`,
           path: proposal.path,
           proposalIndex: i,
         },
@@ -99,13 +98,13 @@ export function validateRepairManifestScope(
     }
 
     // For repair, files declared as CREATE or MODIFY can be repaired via MODIFY or CREATE.
-    // Deletion of non-delete files, or modifying delete files, is rejected as REPAIR_ACTION_MISMATCH.
+    // Preserve action differences as legacy-coded audit observations.
     if (proposal.action === "delete" && declaredAction !== "delete") {
       return {
         valid: false,
         error: {
           code: "REPAIR_ACTION_MISMATCH",
-          message: `Repair proposal for "${proposal.path}" attempted deletion, but manifest authorized action "${declaredAction}".`,
+          message: `Repair proposal for "${proposal.path}" requested deletion while the planning manifest proposed "${declaredAction}".`,
           path: proposal.path,
           proposalIndex: i,
         },
@@ -117,7 +116,7 @@ export function validateRepairManifestScope(
         valid: false,
         error: {
           code: "REPAIR_ACTION_MISMATCH",
-          message: `Repair proposal for "${proposal.path}" attempted action "${proposal.action}", but manifest declared the file for DELETION.`,
+          message: `Repair proposal for "${proposal.path}" requested "${proposal.action}" while the planning manifest proposed deletion.`,
           path: proposal.path,
           proposalIndex: i,
         },
@@ -127,6 +126,9 @@ export function validateRepairManifestScope(
 
   return { valid: true };
 }
+
+/** @deprecated Planning audit only. Use auditRepairManifestPlan. */
+export const validateRepairManifestScope = auditRepairManifestPlan;
 
 // ─── Repair Proposal Resolver ───────────────────────────────────────────────
 

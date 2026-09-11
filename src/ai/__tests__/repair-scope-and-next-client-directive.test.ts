@@ -89,8 +89,8 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
     expect(manifestCheck.valid).toBe(true);
   });
 
-  // ── TEST C: Path outside manifest remains SCOPE_VIOLATION ─────────────────
-  test("TEST C: Path outside manifest remains SCOPE_VIOLATION / REPAIR_UNDECLARED_FILE", () => {
+  // ── TEST C: Manifest mismatch is audit-only; disk reality remains enforced ─
+  test("TEST C: unplanned repair is audited while missing disk source still fails", () => {
     const manifest: FileManifest = {
       files: [{ path: "app/page.tsx", action: "modify", dependencies: [], description: "Modify page" }],
       totalFiles: 1,
@@ -128,7 +128,10 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
     });
 
     expect(scopeCheck.valid).toBe(false);
-    expect(scopeCheck.errors[0].reason).toBe("UNDECLARED_FILE");
+    expect(scopeCheck.errors[0].reason).toBe("MODIFY_FILE_NOT_FOUND");
+    expect(scopeCheck.manifestObservations).toMatchObject([{
+      path: "app/components/Undeclared.tsx", reason: "UNPLANNED_PATH",
+    }]);
   });
 
   // ── TEST D: Generated file is read from current worktree during repair ────

@@ -26,6 +26,7 @@ import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import type { RepositoryContextAssemblyResult } from "./RepositoryObserver";
 import { DestructiveTargetResolver } from "../contracts/DestructiveTargetResolver";
 import { detectCompoundIntent, buildFinalExecutionContract } from "../contracts/ExecutionContractBuilder";
+import { AuthorizedCapabilityScope, CapabilityAction, CapabilityGuard } from "../runtime/CapabilityGuard";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { ManifestGenerator } from "../generation/ManifestGenerator";
 import { getOpenAI } from "../shared/utils";
@@ -95,6 +96,7 @@ export interface AgentManifestPlanningInput {
   clarificationData: ReturnType<typeof TaskExecutionPlanManager.parseClarificationInput>;
   finalConfidence: number;
   onProgress?: (event: AgentProgressEvent) => void;
+  authorizedCapabilityScope?: AuthorizedCapabilityScope;
 }
 
 export interface AgentManifestPlanningSuccess {
@@ -183,7 +185,7 @@ export class AgentPlanner {
       durationMs,
     };
   }
-  /** Plans, corrects, and validates the authoritative manifest; it does not execute mutations. */
+  /** Plans, corrects, structurally validates, and records an advisory manifest. */
   public static async planManifest(
     input: AgentManifestPlanningInput,
   ): Promise<AgentManifestPlanningResult> {
@@ -213,7 +215,7 @@ export class AgentPlanner {
     } = input;
     let executionContract = input.executionContract;
     const session = { id: sessionId };
-    // Stage 6: Authoritative Manifest Generation & Validation (with optional advisory decomposition)
+    // Stage 6: Advisory Manifest Generation & Planning Validation
     const s6Start = performance.now();
     let approvedManifest: FileManifest | null = null;
     let manifestGenerationError: string | null = null;
@@ -292,7 +294,7 @@ export class AgentPlanner {
         }
       }
 
-      // Authoritative Feature Resolution & Evidence Hydration before Manifest Planning
+      // Deterministic feature resolution and evidence hydration before manifest planning
       const compound = detectCompoundIntent(request.message);
       const isDestructiveStage =
         activeStage.intent.destructive ||
@@ -419,14 +421,14 @@ export class AgentPlanner {
         step: 3,
         stageName: "MANIFEST_PLANNING",
         label: "Plan File Actions",
-        detail: "Formulating authoritative file action plan (create / modify / delete)...",
+        detail: "Formulating advisory file action plan (create / modify / delete)...",
         badge: "PLANNING",
         progress: 58,
-        log: "[Plan] Formulating authoritative file manifest...",
+        log: "[Plan] Formulating advisory file manifest...",
         executionContract,
       });
 
-      // 1. Authoritative FileManifest generation for ALL tasks
+      // 1. Advisory FileManifest generation for planning and provenance
       let rawManifest: FileManifest | null = null;
       try {
         const generator = new ManifestGenerator(getOpenAI());
@@ -507,7 +509,7 @@ export class AgentPlanner {
                     `• ${m.path}: manifest declared action "${m.actual}", but required action is "${m.expected}"`
                 )
                 .join("\n");
-              const failureExplanation = `[Execution Scope Violation] [MANIFEST_ACTION_MISMATCH] Manifest action contract violation:\n${mismatchDetails}`;
+              const failureExplanation = `[Planning Contract Mismatch] Manifest action request conflicts with deterministic task action obligations:\n${mismatchDetails}`;
               await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
 
               return {
@@ -524,7 +526,7 @@ export class AgentPlanner {
                 buildVerified: false,
                 buildErrors: failureExplanation,
                 lifecycleStage: "ManifestActionMismatch",
-                errorCode: "MANIFEST_ACTION_MISMATCH",
+                errorCode: "PLANNING_MANIFEST_ACTION_MISMATCH",
               };
             }
           }
@@ -651,7 +653,8 @@ export class AgentPlanner {
           }
         }
 
-        // Step 8 & 9: Run EvidenceBoundWriteSetResolver to authorize exact write paths and build final ExecutionContract
+        // Ground manifest requests in deterministic repository evidence. This
+        // selects planning candidates and never grants a capability.
         const proposedPlannedChanges: PlannedChange[] = (rawManifest.files || []).map((f) => {
           return {
             path: f.path,
@@ -662,7 +665,7 @@ export class AgentPlanner {
           };
         });
 
-        const writeAuthResult = EvidenceBoundWriteSetResolver.resolve({
+        const planningEvidenceResult = EvidenceBoundWriteSetResolver.resolve({
           policy: policyContract,
           intentSpec: taskIntentSpec,
           proposedChanges: proposedPlannedChanges,
@@ -672,21 +675,70 @@ export class AgentPlanner {
           targetRepositoryId: projectId,
         });
 
-        // Always construct the final ExecutionContract bound to resolved approved paths (even if empty)
+        const capabilityGuard = effectiveLocalPath && input.authorizedCapabilityScope
+          ? CapabilityGuard.create({
+              workspaceRoot: effectiveLocalPath,
+              scopeId: activeStage.id,
+              authorizedScope: input.authorizedCapabilityScope,
+            })
+          : CapabilityGuard.denyAll();
+        const capabilityDenied: Array<{ path: string; reason: string }> = [];
+        const capabilityApprovedPaths = planningEvidenceResult.authorizedChanges
+          .filter((change) => {
+            const action: CapabilityAction = change.action === "create"
+              ? "FILE_CREATE"
+              : change.action === "delete"
+                ? "FILE_DELETE"
+                : "FILE_MODIFY";
+            const decision = capabilityGuard.authorize({ action, path: change.path, scopeId: activeStage.id });
+            if (!decision.allowed) capabilityDenied.push({ path: change.path, reason: `${decision.code}: ${decision.reason}` });
+            return decision.allowed;
+          })
+          .map((change) => normalizeRepoPath(change.path));
+
+        const groundedPlanningPaths = Array.from(new Set([
+          ...executionContract.targetPaths,
+          ...capabilityApprovedPaths,
+        ].map(normalizeRepoPath).filter(Boolean)));
         executionContract = buildFinalExecutionContract(
           policyContract,
-          writeAuthResult.approvedPaths,
+          groundedPlanningPaths,
           canonicalExistingFiles,
           executionContract.actionObligations
         );
 
         // Blocker 5 fail-closed: If proposed changes exist but none were approved by evidence authority,
         // targetPaths MUST be [] and pipeline returns a controlled planning failure immediately.
-        if (proposedPlannedChanges.length > 0 && writeAuthResult.approvedPaths.length === 0) {
-          const rejectedReasons = writeAuthResult.rejectedPaths
+        if (proposedPlannedChanges.length > 0 && planningEvidenceResult.approvedPaths.length === 0) {
+          const rejectedReasons = planningEvidenceResult.rejectedPaths
             .map((r) => `• ${r.path}: ${r.reason}`)
             .join("\n");
-          const failureExplanation = `[Write Authority Rejected] [Manifest Validation Failed] All planned file changes were rejected by evidence-bound write authority:\n${rejectedReasons}`;
+          const failureExplanation = `[Planning Scope Rejected] Manifest requests lacked required deterministic planning evidence:\n${rejectedReasons}`;
+          await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+          return {
+            explanation: failureExplanation,
+            changes: [],
+            commitMessage: "",
+            sessionId: session.id,
+            intent: intentResult.intent,
+            taskType: intentResult.taskType,
+            risk: intentResult.risk,
+            estimatedComplexity: intentResult.estimatedComplexity,
+            targetPath: intentResult.targetPath,
+            confidence: finalConfidence,
+            buildVerified: false,
+            buildErrors: failureExplanation,
+            lifecycleStage: "ManifestValidationFailed",
+            errorCode: "PLANNING_SCOPE_REJECTED",
+          };
+        }
+
+        if (proposedPlannedChanges.length > 0 && capabilityApprovedPaths.length === 0) {
+          const rejectedReasons = capabilityDenied
+            .map((r) => `• ${r.path}: ${r.reason}`)
+            .join("\n");
+          const failureExplanation = `[Write Authority Rejected] CapabilityGuard denied every evidence-grounded requested mutation:\n${rejectedReasons}`;
           await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
 
           return {
@@ -703,14 +755,14 @@ export class AgentPlanner {
             buildVerified: false,
             buildErrors: failureExplanation,
             lifecycleStage: "WriteAuthorityRejected",
-            errorCode: "WRITE_AUTHORITY_REJECTED",
+            errorCode: capabilityDenied[0]?.reason.split(":", 1)[0] || "CAPABILITY_POLICY_MISSING",
           };
         }
 
-        // Requirement 10 & 11: Construct coherent authorized manifest from dependency closure
-        const approvedSet = new Set(writeAuthResult.approvedPaths.map((p) => normalizeRepoPath(p)));
+        // Construct a coherent evidence-grounded planning manifest.
+        const approvedSet = new Set(capabilityApprovedPaths);
         const coherentFiles = (rawManifest.files || []).filter((f) => approvedSet.has(normalizeRepoPath(f.path)));
-        const coherentAuthorizedManifest: FileManifest = {
+        const coherentPlanningManifest: FileManifest = {
           files: coherentFiles,
           totalFiles: coherentFiles.length,
           manifestVersion: rawManifest.manifestVersion || "1.0.0",
@@ -722,14 +774,14 @@ export class AgentPlanner {
           packageVersions: architectureSummary.packageVersions,
           monorepo,
         });
-        let valRes = validator.validate(coherentAuthorizedManifest);
+        let valRes = validator.validate(coherentPlanningManifest);
 
         try {
           await prisma.agentManifest.create({
             data: {
               projectId,
               sessionId: session.id,
-              manifestJson: coherentAuthorizedManifest as any,
+              manifestJson: coherentPlanningManifest as any,
               validationStatus: valRes.valid ? "approved" : "rejected",
               validationErrors: valRes.errors as any,
             },
@@ -739,12 +791,12 @@ export class AgentPlanner {
         }
 
         if (valRes.valid) {
-          approvedManifest = coherentAuthorizedManifest;
+          approvedManifest = coherentPlanningManifest;
         } else {
           console.warn("[AgentPipeline] Initial manifest validation failed. Attempting 1 bounded correction...");
           try {
             const correctedManifest = await ManifestCorrectionEngine.attemptCorrection(
-              coherentAuthorizedManifest,
+              coherentPlanningManifest,
               valRes.errors,
               request.message,
               planningContext,
@@ -807,7 +859,7 @@ export class AgentPlanner {
           detail: `Approved plan: ${approvedManifest.files.length} file(s) [${fileListStr}]`,
           badge: `PLAN · ${approvedManifest.files.length} FILES`,
           progress: 68,
-          log: `[Plan] Approved manifest: ${fileListStr}`,
+          log: `[Plan] Validated planning manifest: ${fileListStr}`,
           executionContract,
         });
       }
@@ -832,7 +884,7 @@ export class AgentPlanner {
               status: "completed",
             },
           });
-          // Advisory decomposition completed; approvedManifest remains the authoritative validated manifest
+          // Advisory decomposition and manifest remain mutable planning artifacts.
         } catch (e: any) {
           console.warn("[AgentPipeline] Advisory task decomposition error (non-blocking):", e?.message || e);
         }
@@ -840,29 +892,8 @@ export class AgentPlanner {
     }
     const s6Time = performance.now() - s6Start;
 
-    if (
-      manifestEnabled &&
-      !approvedManifest &&
-      executionContract.pipeline === "REPOSITORY" &&
-      executionContract.taskType !== "DOCS"
-    ) {
-      const failureExplanation = manifestGenerationError
-        ? `[MANIFEST_GENERATION_FAILED] Failed to generate file manifest: ${manifestGenerationError}`
-        : `[APPROVED_MANIFEST_REQUIRED] Execution halted: An approved file manifest is required for repository changes, but none was generated or validated.`;
-      await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
-
-      return {
-        explanation: failureExplanation,
-        changes: [],
-        commitMessage: "",
-        sessionId: session.id,
-        intent: intentResult.intent,
-        taskType: intentResult.taskType,
-        risk: intentResult.risk,
-        estimatedComplexity: intentResult.estimatedComplexity,
-        targetPath: intentResult.targetPath,
-        confidence: finalConfidence,
-      };
+    if (manifestEnabled && !approvedManifest && manifestGenerationError) {
+      console.info(`[MANIFEST_AUDIT] Planning manifest unavailable; continuing from trusted task, repository, and capability facts: ${manifestGenerationError}`);
     }
 
     return {

@@ -280,7 +280,7 @@ const CONTENT_REPAIR_SCHEMA = {
 } as const;
 
 /**
- * Builds a deterministic, concise prompt section instructing the LLM to stay strictly within the approved FileManifest.
+ * Builds advisory manifest planning context for proposal generation.
  */
 export function buildApprovedFilePlanSection(manifest?: FileManifest | null): string {
   if (!manifest || !Array.isArray(manifest.files) || manifest.files.length === 0) {
@@ -294,20 +294,19 @@ export function buildApprovedFilePlanSection(manifest?: FileManifest | null): st
 
   return `
 ══════════════════════════════════════════════════════════
-APPROVED FILE PLAN — MANDATORY EXECUTION SCOPE
+REQUESTED FILE PLAN — ADVISORY PLANNING CONTEXT
 ══════════════════════════════════════════════════════════
-You may produce changes ONLY for the files declared below.
+These are requested candidate changes. They grant no mutation authority.
 
 ${fileLines.join("\n")}
 
-STRICT EXECUTION REQUIREMENTS:
-1. Every generated change path must exactly correspond to an approved manifest file listed above.
-2. Every generated change MUST explicitly set "action": "create" | "modify" | "delete" matching the approved action.
+PROPOSAL GUIDANCE:
+1. Prefer requested paths when they remain consistent with current repository facts.
+2. Every generated change MUST explicitly set "action": "create" | "modify" | "delete".
 3. For deletion operations, set "action": "delete", "isDeleted": true, "content": "", and a clear description.
-4. Do NOT create additional helper files, utilities, tests, or configurations unless explicitly declared in the plan above.
-5. Do NOT modify package.json, config files, routes, or other files unless explicitly declared above.
-6. If the implementation appears to require another file not listed in the plan: DO NOT invent or modify it. Stay strictly within the approved plan.
-7. Use exact repository-relative paths as written above.
+4. If current repository facts require a different path/action, return that explicit proposal with a rationale.
+5. CapabilityGuard and deterministic validation independently decide whether any proposal may execute.
+6. Use exact repository-relative paths as written above.
 
 ═══════════════════════════════════════════
 ACTION-SPECIFIC OUTPUT FORMAT
@@ -529,7 +528,7 @@ Respond ONLY with valid JSON:
                   && (step.layer === undefined || ["Controller", "Service", "Repository", "Schema", "UI"].includes(step.layer))
                   && Array.isArray(step.targetFiles) && step.targetFiles.length > 0 && new Set(step.targetFiles).size === step.targetFiles.length && step.targetFiles.every(safePath)
                   && typeof step.description === "string" && step.description.trim()));
-              return { valid, errors: valid ? undefined : ["Roadmap must contain ordered, bounded phases targeting authorized manifest paths"], data: parsed };
+              return { valid, errors: valid ? undefined : ["Roadmap must contain ordered, bounded phases using requested planning paths"], data: parsed };
             },
           },
         });
@@ -712,109 +711,9 @@ When using an existing local component, conform to its authoritative exported pr
     let explanation = parsed.explanation;
     let commitMessage = parsed.commitMessage;
 
-    // ── Deterministic Manifest Contract Enforcement ──
-    if (approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0) {
-      const manifestActionMap = new Map<string, "create" | "modify" | "delete">();
-      for (const f of approvedManifest.files) {
-        if (f && f.path) {
-          manifestActionMap.set(normalizeRepoPath(f.path), f.action);
-        }
-      }
-      const approvedPathSet = new Set(manifestActionMap.keys());
-
-      const findUndeclaredPaths = (changesList: any[]): string[] => {
-        return changesList
-          .map((c) => (c && typeof c.path === "string" ? c.path : ""))
-          .filter((p) => p && !approvedPathSet.has(normalizeRepoPath(p)));
-      };
-
-      const findActionMismatches = (changesList: any[]): Array<{ path: string; expected: string; actual: string }> => {
-        const mismatches: Array<{ path: string; expected: string; actual: string }> = [];
-        for (const c of changesList) {
-          if (!c || typeof c.path !== "string") continue;
-          const norm = normalizeRepoPath(c.path);
-          const expected = manifestActionMap.get(norm);
-          if (expected) {
-            const actual = (c.action || (c.isDeleted ? "delete" : "modify")).toLowerCase();
-            if (actual !== expected) {
-              mismatches.push({ path: c.path, expected, actual });
-            }
-          }
-        }
-        return mismatches;
-      };
-
-      let undeclared = findUndeclaredPaths(rawChanges);
-      let actionMismatches = findActionMismatches(rawChanges);
-
-      if (undeclared.length > 0 || actionMismatches.length > 0) {
-        console.warn(
-          `[CodeGenerator] Manifest contract violation: undeclared=[${undeclared.join(", ")}], actionMismatches=[${actionMismatches.map((m) => `${m.path}: expected ${m.expected} got ${m.actual}`).join(", ")}]. Triggering bounded corrective regeneration (Attempt 1/1)...`
-        );
-
-        let retrySucceeded = false;
-        const approvedSpecs = Array.from(manifestActionMap.entries()).map(([p, a]) => `${p} (action: ${a})`).join(", ");
-          let correctiveUserMessage = `[CODEGEN_MANIFEST_VIOLATION] Your generated output violated the approved manifest contract.\n`;
-          if (undeclared.length > 0) {
-            correctiveUserMessage += `- Undeclared files: [${undeclared.join(", ")}]. You are strictly forbidden from generating undeclared files.\n`;
-          }
-          if (actionMismatches.length > 0) {
-            correctiveUserMessage += `- Action mismatches: ${actionMismatches.map((m) => `${m.path} (expected action "${m.expected}", but you returned "${m.actual}")`).join(", ")}. You MUST emit EXACTLY the approved action.\n`;
-          }
-          correctiveUserMessage += `Generate changes ONLY for these approved paths with their EXACT actions: [${approvedSpecs}].\nRespond ONLY with valid JSON matching the required format.`;
-
-          const retryCompletion = await gateway.callStructured<CodeGenerationPayload>({
-            stage: PipelineStages.CODE_CORRECTION,
-            messages: [
-              { role: "system", content: effectiveCodingPrompt },
-              { role: "user", content: userPrompt },
-              { role: "assistant", content: completion.rawResponse.choices[0]?.message?.content || JSON.stringify(completion.content) },
-              { role: "user", content: correctiveUserMessage },
-            ],
-            temperature: 0.1,
-            maxTokens: 16000,
-            repositoryEvidence,
-            schema: codeGenerationSchema("ManifestCodeCorrectionSchema", true),
-          });
-
-          const retryParsed = retryCompletion.content;
-          const retryChanges: ModelGeneratedChange[] = retryParsed.changes;
-          const retryUndeclared = findUndeclaredPaths(retryChanges);
-          const retryActionMismatches = findActionMismatches(retryChanges);
-
-          if (retryUndeclared.length === 0 && retryActionMismatches.length === 0 && retryChanges.length > 0) {
-            console.log(
-              `[CodeGenerator] Bounded corrective regeneration succeeded. All ${retryChanges.length} generated changes comply with approved manifest contract.`
-            );
-            rawChanges = retryChanges;
-            parsed = retryParsed;
-            explanation = retryParsed.explanation || explanation;
-            commitMessage = retryParsed.commitMessage || commitMessage;
-            retrySucceeded = true;
-          } else {
-            undeclared = retryUndeclared;
-            actionMismatches = retryActionMismatches;
-          }
-        if (!retrySucceeded) {
-          if (actionMismatches.length > 0) {
-            const violationErr: any = new Error(
-              `[CODEGEN_MANIFEST_ACTION_VIOLATION] Generated action mismatch for approved manifest file(s): ${actionMismatches.map((m) => `${m.path} (expected ${m.expected}, got ${m.actual})`).join(", ")}`
-            );
-            violationErr.code = "CODEGEN_MANIFEST_ACTION_VIOLATION";
-            violationErr.actionMismatches = actionMismatches;
-            throw violationErr;
-          } else {
-            const violationErr: any = new Error(
-              `[CODEGEN_MANIFEST_VIOLATION] Generated file(s) outside approved manifest: [${undeclared.join(", ")}]. Approved paths: [${Array.from(approvedPathSet).join(", ")}].`
-            );
-            violationErr.code = "CODEGEN_MANIFEST_VIOLATION";
-            violationErr.undeclaredPaths = undeclared;
-            violationErr.approvedPaths = Array.from(approvedPathSet);
-            throw violationErr;
-          }
-        }
-      }
-    }
+    // The manifest guides generation, but generated proposals are not accepted or
+    // rejected here because of manifest membership. CapabilityGuard and the
+    // transaction/validation boundary decide whether they may be materialized.
 
     // ── Resolve raw LLM proposals into AgentFileChange[] ──
     const hasManifestContext = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
@@ -1033,19 +932,8 @@ When using an existing local component, conform to its authoritative exported pr
     }
 
     if (approvedManifest && Array.isArray(approvedManifest.files)) {
-      const existingPathsInChanges = new Set(changes.map((c) => normalizeRepoPath(c.path)));
-      for (const mf of approvedManifest.files) {
-        const norm = normalizeRepoPath(mf.path);
-        if (mf.action === "delete" && !existingPathsInChanges.has(norm)) {
-          changes.push({
-            path: mf.path,
-            content: "",
-            description: mf.description || `Delete ${mf.path}`,
-            action: "delete",
-            isDeleted: true,
-          });
-        }
-      }
+      // Preserve planned action metadata for audit, but never synthesize a
+      // mutation merely because the manifest requested one.
       for (const change of changes) {
         const decl = manifestFileMap.get(normalizeRepoPath(change.path));
         if (decl && decl.action === "delete" && change.action === "delete") {
