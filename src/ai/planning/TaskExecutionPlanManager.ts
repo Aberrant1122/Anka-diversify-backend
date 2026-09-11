@@ -49,6 +49,9 @@ export class TaskExecutionPlanManager {
         confidence: classification.confidence,
         requiresClarification: false,
         reasoning: `Stage ${idx + 1}: ${s.goal}`,
+        successCondition: s.successCondition ?? (
+          s.taskType === classification.taskType ? classification.successCondition : undefined
+        ),
         targetPath: s.targetPath || (idx === 0 ? explicitUserPaths[0] : undefined),
       };
 

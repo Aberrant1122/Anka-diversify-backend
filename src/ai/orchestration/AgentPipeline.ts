@@ -1,4 +1,3 @@
-import fs from "fs";
 import { formatMs } from "../shared/utils";
 import { ChatRequest, AgentResponse, AgentProgressEvent, ExecutionContract } from "../shared/types";
 import {
@@ -10,8 +9,6 @@ import { ContractGuardrails } from "../contracts/ContractGuardrails";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import { CodeGenerator } from "../generation/CodeGenerator";
-import { ValidationPlanner } from "../validation/ValidationPlanner";
-import { ValidationRunner } from "../validation/ValidationRunner";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { PipelineTelemetry } from "./PipelineTelemetry";
 import { PipelineResultBuilder } from "./PipelineResult";
@@ -33,6 +30,21 @@ import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
 import { TaskRuntime } from "../runtime/TaskRuntime";
 import { WorkingPlan } from "../runtime/WorkingPlan";
 import { CompletionEvaluationResult, CompletionEvaluator } from "../runtime/CompletionEvaluator";
+import {
+  BaselineDiagnosticVerifier,
+  TrustedDiagnosticNoOpProof,
+} from "../runtime/BaselineDiagnosticVerifier";
+
+export function isAlignedDeterministicNoOp(input: {
+  proof: unknown;
+  currentRepositoryRevision: string | undefined;
+  currentRequest: string;
+}): boolean {
+  return BaselineDiagnosticVerifier.matchesNoOpProof(input.proof, {
+    repositoryRevision: input.currentRepositoryRevision,
+    request: input.currentRequest,
+  });
+}
 
 function snapshotChanges(
   before: RepositoryObservation | undefined,
@@ -86,6 +98,7 @@ export class AgentPipeline {
       persistConversation?: boolean;
       persistenceSession?: { id: string; title?: string | null };
       deferCompletionToGitWorktree?: boolean;
+      trustedEarlyNoOpProof?: TrustedDiagnosticNoOpProof;
       [key: string]: any;
     },
   ): Promise<AgentResponse> {
@@ -279,6 +292,7 @@ export class AgentPipeline {
       persistConversation?: boolean;
       persistenceSession?: { id: string; title?: string | null };
       deferCompletionToGitWorktree?: boolean;
+      trustedEarlyNoOpProof?: TrustedDiagnosticNoOpProof;
       [key: string]: any;
     },
   ): Promise<AgentResponse> {
@@ -535,75 +549,15 @@ export class AgentPipeline {
       intentResult.taskType === "BUG_FIX" ||
       activeStage.intent.operations?.some((op) => op.kind === "REPAIR");
 
-    const hasSourceDiagnostics =
-      normalizedDiagnostics.some((d) => d.category === "SOURCE_DIAGNOSTIC") ||
-      diagnosticEvidences.some((e) => e.kind === "DIAGNOSTIC" && !e.metadata?.stale);
-
-    const hasEnvironmentFailure =
-      normalizedDiagnostics.some(
-        (d) =>
-          d.category === "ENVIRONMENT_FAILURE" ||
-          d.category === "TOOLCHAIN_FAILURE" ||
-          d.category === "DEPENDENCY_FAILURE"
-      ) ||
-      options?.baselineDependencyInstall === "FAIL" ||
-      options?.dependenciesReady === false ||
-      options?.healthStatus === "BASELINE_REPOSITORY_UNHEALTHY";
-
-    const dependenciesReady =
-      options?.dependenciesReady !== false &&
-      options?.baselineDependencyInstall !== "FAIL" &&
-      !hasEnvironmentFailure;
-
-    let baselinePassed: boolean | undefined =
-      options?.baselineBuildPassed !== undefined
-        ? Boolean(options.baselineBuildPassed)
-        : options?.baselineBuild === "PASS"
-        ? true
-        : options?.baselineBuild === "FAIL"
-        ? false
-        : undefined;
-
-    if (
-      isRepairStage &&
-      baselinePassed === undefined &&
-      dependenciesReady &&
-      effectiveLocalPath &&
-      fs.existsSync(effectiveLocalPath)
-    ) {
-      const baselineCmds =
-        options?.baselineCommands ||
-        ValidationPlanner.detectValidationCommands(
-          effectiveLocalPath,
-          effectiveSnapshot,
-          executionContract
-        );
-      if (baselineCmds.length > 0) {
-        try {
-          const baselineCheck = await ValidationRunner.validateWithShell(
-            [],
-            effectiveLocalPath,
-            baselineCmds
-          );
-          baselinePassed = baselineCheck.success;
-        } catch {
-          baselinePassed = false;
-        }
-      } else {
-        baselinePassed = true;
-      }
-    }
-
-    const isAlreadySatisfied =
-      isRepairStage &&
-      dependenciesReady &&
-      baselinePassed === true &&
-      !hasSourceDiagnostics &&
-      !hasEnvironmentFailure;
+    const isAlreadySatisfied = isAlignedDeterministicNoOp({
+      proof: isRepairStage ? options?.trustedEarlyNoOpProof : undefined,
+      currentRepositoryRevision: currentRevisionHash,
+      currentRequest: effectiveGoal,
+    });
 
     if (isAlreadySatisfied) {
       console.log(
-        `[AgentPipeline] Repair task is already satisfied: deterministic baseline validation passed with 0 source diagnostics. Returning ALREADY_SATISFIED successful no-op.`
+        `[AgentPipeline] Repair task is already satisfied by an authentic backend diagnostic proof bound to the current repository revision. Returning ALREADY_SATISFIED successful no-op.`
       );
 
       const advancedPlanResult = TaskExecutionPlanManager.advancePlanStage(taskExecutionPlan);
@@ -613,7 +567,7 @@ export class AgentPipeline {
         : "RUNNING";
 
       const explanation =
-        `[Deterministic No-Op: ALREADY_SATISFIED] Baseline verification succeeded and zero source diagnostics exist for this repository. The requested repair is already satisfied.`;
+        `[Deterministic No-Op: ALREADY_SATISFIED] An authentic backend diagnostic proof objectively establishes the requested condition for the current repository revision.`;
 
       onProgress?.({
         step: 10,

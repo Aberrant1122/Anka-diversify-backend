@@ -1,4 +1,5 @@
 import path from "path";
+import crypto from "crypto";
 
 export type DiagnosticBaselinePhase = "BASELINE" | "CURRENT";
 export type BaselineDiagnosticStatus = "UNCHANGED" | "RESOLVED";
@@ -34,7 +35,16 @@ export interface DiagnosticValidationSnapshot {
   passed: boolean;
   commands: readonly string[];
   diagnostics: readonly DeterministicDiagnosticFact[];
+  validationChannel?: "SOURCE_DIAGNOSTICS" | "BUILD" | "TEST" | "LINT" | "OTHER";
   source: "DETERMINISTIC_TOOL";
+}
+
+export interface TrustedDiagnosticNoOpProof {
+  condition: "SOURCE_DIAGNOSTICS";
+  obligationId: string;
+  repositoryRevision: string;
+  requestFingerprint: string;
+  source: "BASELINE_DIAGNOSTIC_VERIFIER";
 }
 
 export interface BaselineDiagnosticOutcome {
@@ -62,14 +72,20 @@ export interface CaptureDiagnosticSnapshotInput {
   passed: boolean;
   commands: string[];
   diagnostics: DiagnosticFactInput[];
+  validationChannel?: DiagnosticValidationSnapshot["validationChannel"];
   repositoryRoot?: string;
   source: "DETERMINISTIC_TOOL";
 }
 
 const authenticDiagnosticComparisons = new WeakSet<object>();
+const authenticDiagnosticNoOpProofs = new WeakSet<object>();
 
 export function isAuthenticDiagnosticBaselineComparison(value: unknown): value is DiagnosticBaselineComparison {
   return typeof value === "object" && value !== null && authenticDiagnosticComparisons.has(value);
+}
+
+export function isAuthenticDiagnosticNoOpProof(value: unknown): value is TrustedDiagnosticNoOpProof {
+  return typeof value === "object" && value !== null && authenticDiagnosticNoOpProofs.has(value);
 }
 
 const ANSI_ESCAPE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -134,6 +150,17 @@ function freezeSnapshot(snapshot: DiagnosticValidationSnapshot): DiagnosticValid
  * Identity deliberately excludes line/column while retaining category, path, code, symbol, and message.
  */
 export class BaselineDiagnosticVerifier {
+  public static matchesNoOpProof(
+    proof: unknown,
+    input: { repositoryRevision: string | undefined; request: string },
+  ): proof is TrustedDiagnosticNoOpProof {
+    return isAuthenticDiagnosticNoOpProof(proof)
+      && typeof input.repositoryRevision === "string"
+      && input.repositoryRevision.length > 0
+      && proof.repositoryRevision === input.repositoryRevision
+      && proof.requestFingerprint === this.fingerprintRequest(input.request);
+  }
+
   public static capture(input: CaptureDiagnosticSnapshotInput): DiagnosticValidationSnapshot {
     if (input.source !== "DETERMINISTIC_TOOL") {
       throw new Error("Diagnostic snapshots require deterministic tool provenance");
@@ -153,6 +180,7 @@ export class BaselineDiagnosticVerifier {
       passed: input.passed,
       commands: Object.freeze(input.commands.map((command) => command.trim()).filter(Boolean).sort()),
       diagnostics: Object.freeze(diagnostics),
+      ...(input.validationChannel ? { validationChannel: input.validationChannel } : {}),
       source: "DETERMINISTIC_TOOL",
     });
   }
@@ -226,6 +254,60 @@ export class BaselineDiagnosticVerifier {
     });
     authenticDiagnosticComparisons.add(comparison);
     return comparison;
+  }
+
+  public static proveAlreadySatisfied(input: {
+    obligation: {
+      id: string;
+      condition: "SOURCE_DIAGNOSTICS";
+      source: "BACKEND_TASK_CONTRACT";
+      request: string;
+    };
+    comparison: DiagnosticBaselineComparison;
+    repositoryRevision: string;
+    diagnosticRepositoryRevision: string;
+  }): TrustedDiagnosticNoOpProof | null {
+    if (
+      input.obligation.source !== "BACKEND_TASK_CONTRACT" ||
+      !input.obligation.id.trim() ||
+      !input.obligation.request.trim() ||
+      !input.repositoryRevision.trim() ||
+      input.repositoryRevision !== input.diagnosticRepositoryRevision ||
+      !isAuthenticDiagnosticBaselineComparison(input.comparison)
+    ) {
+      return null;
+    }
+
+    const { baseline, current } = input.comparison;
+    const commandsMatch = baseline.commands.length > 0
+      && baseline.commands.length === current.commands.length
+      && baseline.commands.every((command, index) => command === current.commands[index]);
+    if (
+      baseline.validationChannel !== "SOURCE_DIAGNOSTICS" ||
+      current.validationChannel !== "SOURCE_DIAGNOSTICS" ||
+      !commandsMatch ||
+      !baseline.passed ||
+      !current.passed ||
+      baseline.diagnostics.length > 0 ||
+      current.diagnostics.length > 0 ||
+      !input.comparison.verifiedSuccess
+    ) {
+      return null;
+    }
+
+    const proof = Object.freeze({
+      condition: "SOURCE_DIAGNOSTICS" as const,
+      obligationId: input.obligation.id.trim(),
+      repositoryRevision: input.repositoryRevision.trim(),
+      requestFingerprint: this.fingerprintRequest(input.obligation.request),
+      source: "BASELINE_DIAGNOSTIC_VERIFIER" as const,
+    });
+    authenticDiagnosticNoOpProofs.add(proof);
+    return proof;
+  }
+
+  private static fingerprintRequest(request: string): string {
+    return crypto.createHash("sha256").update(request.trim()).digest("hex");
   }
 
   private static canonicalize(
