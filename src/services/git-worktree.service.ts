@@ -2,8 +2,6 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import crypto from "crypto";
-import { exec, execSync } from "child_process";
-import { promisify } from "util";
 import { AgentPipeline } from "../ai/orchestration/AgentPipeline";
 import { AgentFileChange, AgentProgressEvent, AgentResponse, ChatRequest, BaselineDiagnostic } from "../types";
 import { WorktreeDependencyService, DependencyPreparationResult } from "./worktree-dependency.service";
@@ -28,8 +26,18 @@ import type { TaskRuntime } from "../ai/runtime/TaskRuntime";
 import { CompletionEvaluationResult, CompletionEvaluator } from "../ai/runtime/CompletionEvaluator";
 import { VerifiedCheckpointJournal } from "../ai/runtime/VerifiedCheckpointJournal";
 import { RepositoryObserver } from "../ai/orchestration/RepositoryObserver";
+import { NodeGitCommandExecutor } from "./git-command";
+import { GitShippingMode, GitShippingResult, GitWorkflowService } from "./git-workflow.service";
+import type { CodeReviewProvider } from "./code-review-provider";
 
-const execAsync = promisify(exec);
+const git = new NodeGitCommandExecutor();
+
+interface RunOwnershipRecord {
+  readonly runId: string;
+  readonly repositoryRoot: string;
+  readonly worktreePath: string;
+  readonly branchName: string;
+}
 
 function publicCompletionResult(result: CompletionEvaluationResult): NonNullable<AgentResponse["completionEvaluation"]> {
   if (result.outcome === "COMPLETE") {
@@ -76,6 +84,17 @@ export interface RepositoryRunSummary {
   diagnosticComparison?: DiagnosticBaselineComparison;
   visualVerification?: VisualVerificationResult;
   agentResponse: AgentResponse;
+  shipping?: GitShippingResult;
+}
+
+export interface RepositoryShippingPolicy {
+  readonly shippingId: string;
+  readonly mode: GitShippingMode;
+  readonly targetBranch: string;
+  readonly trustedTargetRevision: string;
+  readonly remote?: string;
+  readonly expectedRepositoryIdentity?: string;
+  readonly reviewProvider?: CodeReviewProvider;
 }
 
 export interface RunIsolatedAgentOptions {
@@ -86,6 +105,7 @@ export interface RunIsolatedAgentOptions {
   request: ChatRequest;
   authorizedCapabilities?: readonly CapabilityGrant[];
   taskRuntime?: TaskRuntime;
+  shipping?: RepositoryShippingPolicy;
   onProgress?: (event: AgentProgressEvent) => void;
 }
 
@@ -133,6 +153,42 @@ export class GitWorktreeService {
       : path.join(os.tmpdir(), "anka", "runs");
   }
 
+  private static validateRunId(runId: string): void {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(runId)) {
+      throw new Error("INVALID_RUN_ID: runId must be a backend-safe identifier.");
+    }
+  }
+
+  private static ownershipPath(runId: string): string {
+    return path.join(this.getRunsRoot(), ".owners", `${runId}.json`);
+  }
+
+  private static async writeOwnership(record: RunOwnershipRecord): Promise<void> {
+    const marker = this.ownershipPath(record.runId);
+    await fs.promises.mkdir(path.dirname(marker), { recursive: true });
+    await fs.promises.writeFile(marker, JSON.stringify(record), { encoding: "utf8", flag: "wx" });
+  }
+
+  private static async readOwnership(runId: string): Promise<RunOwnershipRecord | null> {
+    try {
+      const value: unknown = JSON.parse(await fs.promises.readFile(this.ownershipPath(runId), "utf8"));
+      if (!value || typeof value !== "object") return null;
+      const record = value as Partial<RunOwnershipRecord>;
+      if (record.runId !== runId || typeof record.repositoryRoot !== "string"
+        || typeof record.worktreePath !== "string" || typeof record.branchName !== "string") return null;
+      const expectedPath = path.resolve(this.getRunsRoot(), runId);
+      if (path.resolve(record.worktreePath) !== expectedPath || !record.branchName.startsWith("anka/run-")) return null;
+      return Object.freeze({
+        runId,
+        repositoryRoot: path.resolve(record.repositoryRoot),
+        worktreePath: expectedPath,
+        branchName: record.branchName,
+      });
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Validates and resolves the canonical root directory of a local Git repository.
    */
@@ -152,7 +208,7 @@ export class GitWorktreeService {
     }
 
     try {
-      const { stdout } = await execAsync("git rev-parse --show-toplevel", { cwd: resolvedPath });
+      const { stdout } = await git.run(resolvedPath, ["rev-parse", "--show-toplevel"]);
       const root = stdout.trim();
       return path.resolve(root);
     } catch (err: any) {
@@ -177,7 +233,7 @@ export class GitWorktreeService {
    */
   static async getHeadCommitSha(repositoryRoot: string): Promise<string> {
     try {
-      const { stdout } = await execAsync("git rev-parse HEAD", { cwd: repositoryRoot });
+      const { stdout } = await git.run(repositoryRoot, ["rev-parse", "HEAD"]);
       const sha = stdout.trim();
       if (!sha || sha.length < 7) {
         throw new Error("Unable to resolve valid Git HEAD commit SHA.");
@@ -194,7 +250,7 @@ export class GitWorktreeService {
    */
   static async assertCleanWorkingTree(repositoryRoot: string): Promise<void> {
     try {
-      const { stdout } = await execAsync("git status --porcelain", { cwd: repositoryRoot });
+      const { stdout } = await git.run(repositoryRoot, ["status", "--porcelain"]);
       if (stdout.trim().length > 0) {
         throw new Error(
           `SOURCE_REPOSITORY_DIRTY: Source repository at "${repositoryRoot}" contains uncommitted changes. ANKA requires a clean repository state before creating an isolated execution worktree.`
@@ -214,9 +270,8 @@ export class GitWorktreeService {
    */
   static async prepareRepositoryRun(options: PrepareRepositoryRunOptions): Promise<PreparedRepositoryRun> {
     const { repositoryPath, runId } = options;
-    if (!runId || typeof runId !== "string") {
-      throw new Error("INVALID_RUN_ID: runId must be a non-empty string.");
-    }
+    if (!runId || typeof runId !== "string") throw new Error("INVALID_RUN_ID: runId must be a non-empty string.");
+    this.validateRunId(runId);
 
     // Verify runtime tools before executing
     await RuntimePreflightService.verifyTools(["git", "node", "npm"]);
@@ -228,39 +283,29 @@ export class GitWorktreeService {
     const branchName = `anka/run-${runId}`;
     const worktreePath = path.resolve(this.getRunsRoot(), runId);
 
-    // Track active run in memory
-    this.activeRuns.add(runId);
-
     // Ensure parent temp directory exists
     await fs.promises.mkdir(path.dirname(worktreePath), { recursive: true });
 
-    // Clean prior stale worktree path if present
-    if (fs.existsSync(worktreePath)) {
-      try {
-        await execAsync(`git worktree remove --force "${worktreePath}"`, { cwd: repositoryRoot });
-      } catch {}
-      try {
-        await fs.promises.rm(worktreePath, { recursive: true, force: true });
-      } catch {}
+    // A collision is never treated as authority to delete an existing path or branch.
+    if (fs.existsSync(worktreePath) || fs.existsSync(this.ownershipPath(runId))) {
+      throw new Error(`WORKTREE_COLLISION: Refusing to replace existing run path or ownership record for "${runId}".`);
     }
-
-    // Prune stale worktree registrations
-    try {
-      await execAsync("git worktree prune", { cwd: repositoryRoot });
-    } catch {}
-
-    // Delete existing branch with identical name if leftover
-    try {
-      await execAsync(`git branch -D "${branchName}"`, { cwd: repositoryRoot });
-    } catch {}
+    const branchExists = await git.run(repositoryRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`])
+      .then(() => true, () => false);
+    if (branchExists) throw new Error(`WORKTREE_COLLISION: Refusing to delete existing branch "${branchName}".`);
 
     // Create branch and worktree from base commit SHA
     try {
-      await execAsync(`git worktree add -b "${branchName}" "${worktreePath}" ${baseCommitSha}`, {
-        cwd: repositoryRoot,
-      });
+      await git.run(repositoryRoot, ["worktree", "add", "-b", branchName, worktreePath, baseCommitSha]);
+      await this.writeOwnership({ runId, repositoryRoot, worktreePath, branchName });
+      this.activeRuns.add(runId);
     } catch (err: any) {
       this.activeRuns.delete(runId);
+      // This path/branch was created by the immediately preceding command, so
+      // cleanup remains bounded even if ownership-record persistence failed.
+      try { await git.run(repositoryRoot, ["worktree", "remove", "--force", worktreePath]); } catch {}
+      try { await git.run(repositoryRoot, ["branch", "-D", branchName]); } catch {}
+      try { await fs.promises.rm(this.ownershipPath(runId), { force: true }); } catch {}
       throw new Error(
         `WORKTREE_CREATION_FAILED: Failed creating isolated worktree at "${worktreePath}": ${err?.message || err}`
       );
@@ -280,7 +325,7 @@ export class GitWorktreeService {
    */
   static async getWorktreeDiff(worktreePath: string, baseCommitSha: string): Promise<WorktreeDiffResult> {
     try {
-      const { stdout: statusOut } = await execAsync("git status --porcelain", { cwd: worktreePath });
+      const { stdout: statusOut } = await git.run(worktreePath, ["status", "--porcelain"]);
       const changedFiles = statusOut
         .split("\n")
         .map((line) => {
@@ -290,7 +335,7 @@ export class GitWorktreeService {
         })
         .filter(Boolean);
 
-      const { stdout: diffOut } = await execAsync(`git diff ${baseCommitSha}`, { cwd: worktreePath });
+      const { stdout: diffOut } = await git.run(worktreePath, ["diff", baseCommitSha]);
 
       const diffLines = diffOut.split("\n");
       const summaryLines = diffLines.filter((l) => l.startsWith("diff --git") || l.startsWith("+++") || l.startsWith("---"));
@@ -315,9 +360,14 @@ export class GitWorktreeService {
    */
   static async rollbackWorktree(worktreePath: string, baseCommitSha: string): Promise<void> {
     if (!worktreePath || !fs.existsSync(worktreePath)) return;
+    const runId = path.basename(path.resolve(worktreePath));
+    const ownership = await this.readOwnership(runId);
+    if (!ownership || ownership.worktreePath !== path.resolve(worktreePath)) {
+      throw new Error("WORKTREE_OWNERSHIP_REQUIRED: Refusing rollback outside an ANKA-owned run worktree.");
+    }
     try {
-      await execAsync(`git reset --hard ${baseCommitSha}`, { cwd: worktreePath });
-      await execAsync("git clean -fd", { cwd: worktreePath });
+      await git.run(worktreePath, ["reset", "--hard", baseCommitSha]);
+      await git.run(worktreePath, ["clean", "-fd"]);
     } catch (err) {
       console.error(`[GitWorktreeService] Failed to rollback worktree at "${worktreePath}":`, err);
     }
@@ -332,29 +382,21 @@ export class GitWorktreeService {
     branchName?: string,
     runId?: string
   ): Promise<void> {
-    if (runId) {
-      this.activeRuns.delete(runId);
+    const effectiveRunId = runId ?? path.basename(path.resolve(worktreePath));
+    const ownership = await this.readOwnership(effectiveRunId);
+    if (!ownership || ownership.worktreePath !== path.resolve(worktreePath)) return;
+    if (repositoryRoot && path.resolve(repositoryRoot) !== ownership.repositoryRoot) return;
+    if (branchName && branchName !== ownership.branchName) return;
+    this.activeRuns.delete(effectiveRunId);
+    if (fs.existsSync(ownership.repositoryRoot)) {
+      try { await git.run(ownership.repositoryRoot, ["worktree", "remove", "--force", ownership.worktreePath]); } catch {}
+      try { await git.run(ownership.repositoryRoot, ["worktree", "prune"]); } catch {}
+      try { await git.run(ownership.repositoryRoot, ["branch", "-D", ownership.branchName]); } catch {}
     }
-
-    if (repositoryRoot && fs.existsSync(repositoryRoot)) {
-      try {
-        await execAsync(`git worktree remove --force "${worktreePath}"`, { cwd: repositoryRoot });
-      } catch {}
-      try {
-        await execAsync("git worktree prune", { cwd: repositoryRoot });
-      } catch {}
-      if (branchName) {
-        try {
-          await execAsync(`git branch -D "${branchName}"`, { cwd: repositoryRoot });
-        } catch {}
-      }
+    if (fs.existsSync(ownership.worktreePath)) {
+      try { await fs.promises.rm(ownership.worktreePath, { recursive: true, force: true }); } catch {}
     }
-
-    if (fs.existsSync(worktreePath)) {
-      try {
-        await fs.promises.rm(worktreePath, { recursive: true, force: true });
-      } catch {}
-    }
+    try { await fs.promises.rm(this.ownershipPath(effectiveRunId), { force: true }); } catch {}
   }
 
   /**
@@ -376,18 +418,20 @@ export class GitWorktreeService {
         for (const entry of entries) {
           if (entry.isDirectory()) {
             const runId = entry.name;
+            if (runId === ".owners") continue;
             if (this.activeRuns.has(runId)) {
               continue;
             }
 
             const fullPath = path.join(rootDir, runId);
             try {
-              if (fs.existsSync(fullPath)) {
+              const ownership = rootDir === runsRoot ? await this.readOwnership(runId) : null;
+              if (ownership && fs.existsSync(fullPath)) {
                 const stat = await fs.promises.stat(fullPath);
                 const age = now - stat.mtimeMs;
                 if (age >= maxAgeMs) {
-                  await fs.promises.rm(fullPath, { recursive: true, force: true });
-                  cleanedCount++;
+                  await this.cleanupWorktree(fullPath, ownership.repositoryRoot, ownership.branchName, runId);
+                  if (!fs.existsSync(fullPath)) cleanedCount++;
                 }
               }
             } catch {}
@@ -410,6 +454,7 @@ export class GitWorktreeService {
     return RepositoryCacheManager.withLease(projectId, async () => {
       const prepared = await this.prepareRepositoryRun({ repositoryPath, runId });
       console.log(`[ANKA_EXEC] worktree=${prepared.worktreePath}`);
+      let preserveForShippingRetry = false;
 
       try {
         // 2. Prepare dependencies inside isolated worktree
@@ -732,7 +777,7 @@ export class GitWorktreeService {
       );
       if (prepared.worktreePath && actualDependencyDelta && !trustedDependencyGrant) {
         try {
-          await execAsync("git checkout HEAD -- package.json package-lock.json", { cwd: prepared.worktreePath });
+          await git.run(prepared.worktreePath, ["checkout", "HEAD", "--", "package.json", "package-lock.json"]);
           diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
         } catch {}
       }
@@ -931,6 +976,45 @@ export class GitWorktreeService {
         }
       }
 
+      let shipping: GitShippingResult | undefined;
+      if (options.shipping) {
+        if (!options.taskRuntime) {
+          throw new Error("GIT_WORKFLOW_REQUIRED: Shipping requires the authoritative TaskRuntime.");
+        }
+        // From this point, a shipping failure must not erase already-verified task history.
+        preserveForShippingRetry = true;
+        const infrastructureChanges = baselineRepairedChanges.map((change) => {
+          const relativePath = change.path.replace(/\\/g, "/");
+          const absolutePath = path.resolve(prepared.worktreePath, relativePath);
+          return Object.freeze({
+            path: relativePath,
+            fingerprint: change.action === "delete" || change.isDeleted || !fs.existsSync(absolutePath)
+              ? "MISSING"
+              : crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex"),
+            policyAuthorized: true as const,
+          });
+        });
+        shipping = await new GitWorkflowService().ship({
+          repositoryRoot: prepared.repositoryRoot,
+          worktreePath: prepared.worktreePath,
+          baseRevision: prepared.baseCommitSha,
+          taskBranch: prepared.branchName,
+          targetBranch: options.shipping.targetBranch,
+          trustedTargetRevision: options.shipping.trustedTargetRevision,
+          shippingId: options.shipping.shippingId,
+          taskRuntime: options.taskRuntime,
+          checkpointJournal,
+          validationPassed,
+          mode: options.shipping.mode,
+          remote: options.shipping.remote,
+          expectedRepositoryIdentity: options.shipping.expectedRepositoryIdentity,
+          commitSummary: agentResponse.commitMessage,
+          trustedInfrastructureChanges: infrastructureChanges,
+          reviewProvider: options.shipping.reviewProvider,
+          validationSummary: validationPassed ? "Deterministic validation passed" : "Deterministic validation failed",
+        });
+      }
+
       return {
         runId,
         branchName: prepared.branchName,
@@ -943,6 +1027,7 @@ export class GitWorktreeService {
         validationErrors: !validationPassed ? (agentResponse.buildErrors || agentResponse.explanation) : undefined,
         diagnosticComparison,
         visualVerification,
+        ...(shipping ? { shipping } : {}),
         agentResponse: {
           ...agentResponse,
           changes: totalChanges,
@@ -976,12 +1061,16 @@ export class GitWorktreeService {
         },
       };
       } finally {
-        await this.cleanupWorktree(
-          prepared.worktreePath,
-          prepared.repositoryRoot,
-          prepared.branchName,
-          runId
-        );
+        if (!preserveForShippingRetry) {
+          await this.cleanupWorktree(
+            prepared.worktreePath,
+            prepared.repositoryRoot,
+            prepared.branchName,
+            runId
+          );
+        } else {
+          this.activeRuns.delete(runId);
+        }
       }
     });
   }

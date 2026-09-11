@@ -313,11 +313,19 @@ describe("Strictly Disposable Execution Worktrees (Step 2 of 3: Tests A-L)", () 
 
   test("K. Stale startup run directories are removed by sweepOrphanedRuns", async () => {
     const runsRoot = GitWorktreeService.getRunsRoot();
-    const staleRunDir = path.join(runsRoot, "stale-orphaned-run-1");
+    const staleRunId = "stale-orphaned-run-1";
+    const prepared = await GitWorktreeService.prepareRepositoryRun({
+      repositoryPath: sourceRepoDir,
+      runId: staleRunId,
+    });
+    const staleRunDir = prepared.worktreePath;
     const freshRunDir = path.join(runsRoot, "recent-run-2");
 
-    fs.mkdirSync(staleRunDir, { recursive: true });
     fs.mkdirSync(freshRunDir, { recursive: true });
+
+    // Simulate a worktree owned by a previous process. Unowned directories are
+    // intentionally never sweep targets.
+    (GitWorktreeService as any).activeRuns.delete(staleRunId);
 
     // Set stale directory mtime to 3 hours ago (older than 2h threshold)
     const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);

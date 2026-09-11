@@ -1,13 +1,12 @@
 import fs from "fs";
 import path from "path";
-import { exec } from "child_process";
-import { promisify } from "util";
 import { prisma } from "./database";
 import { decrypt } from "../utils/encryption";
 import { GitWorktreeService } from "./git-worktree.service";
 import { RepositoryCacheManager } from "./repository-cache.manager";
+import { NodeGitCommandExecutor } from "./git-command";
 
-const execAsync = promisify(exec);
+const git = new NodeGitCommandExecutor();
 
 export interface MaterializedRepositoryMetadata {
   canonicalRoot: string;
@@ -80,20 +79,26 @@ export class RepositoryMaterializationService {
   /**
    * Builds an authenticated or clean Git URL for cloning/fetching with credentials.
    */
-  private static buildAuthGitUrl(rawUrl: string, encryptedToken?: string | null): string {
+  private static buildGitTransport(rawUrl: string, encryptedToken?: string | null): {
+    readonly url: string;
+    readonly environment?: Readonly<Record<string, string>>;
+  } {
     let token: string | undefined;
     if (encryptedToken) {
-      try {
-        token = decrypt(encryptedToken);
-      } catch {}
+      token = decrypt(encryptedToken);
     }
 
-    let fetchUrl = rawUrl.trim();
-    if (token && fetchUrl.startsWith("https://github.com/")) {
-      const repoPath = fetchUrl.replace("https://github.com/", "");
-      fetchUrl = `https://x-access-token:${token}@github.com/${repoPath}`;
-    }
-    return fetchUrl;
+    const url = rawUrl.trim();
+    if (!token || !url.startsWith("https://github.com/")) return { url };
+    const authorization = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
+    return {
+      url,
+      environment: Object.freeze({
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.extraHeader",
+        GIT_CONFIG_VALUE_0: `Authorization: Basic ${authorization}`,
+      }),
+    };
   }
 
   /**
@@ -148,17 +153,17 @@ export class RepositoryMaterializationService {
 
           let branch = "main";
           try {
-            const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: canonicalRoot });
+            const { stdout } = await git.run(canonicalRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
             branch = stdout.trim() || "main";
           } catch {}
 
           let origin = "";
           try {
-            const { stdout } = await execAsync("git remote get-url origin", { cwd: canonicalRoot });
+            const { stdout } = await git.run(canonicalRoot, ["remote", "get-url", "origin"]);
             origin = stdout.trim();
           } catch {}
 
-          const { stdout: lsOut } = await execAsync("git ls-files", { cwd: canonicalRoot });
+          const { stdout: lsOut } = await git.run(canonicalRoot, ["ls-files"]);
           const trackedFilesCount = lsOut.split("\n").filter((l) => l.trim().length > 0).length;
 
           return {
@@ -204,13 +209,13 @@ export class RepositoryMaterializationService {
 
         let branch = "main";
         try {
-          const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: canonicalRoot });
+          const { stdout } = await git.run(canonicalRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
           branch = stdout.trim() || "main";
         } catch {}
 
         let origin = "";
         try {
-          const { stdout } = await execAsync("git remote get-url origin", { cwd: canonicalRoot });
+          const { stdout } = await git.run(canonicalRoot, ["remote", "get-url", "origin"]);
           origin = stdout.trim();
         } catch {}
 
@@ -218,41 +223,42 @@ export class RepositoryMaterializationService {
         let updated = false;
 
         if (project.githubUrl) {
-          const fetchUrl = this.buildAuthGitUrl(project.githubUrl, project.githubToken);
+          const transport = this.buildGitTransport(project.githubUrl, project.githubToken);
 
           try {
             // Verify working tree is clean
-            const { stdout: statusOut } = await execAsync("git status --porcelain", { cwd: canonicalRoot });
+            const { stdout: statusOut } = await git.run(canonicalRoot, ["status", "--porcelain"]);
             if (statusOut.trim().length > 0) {
               console.warn(`[RepoSync] Managed clone has uncommitted files. Cleaning.`);
-              await execAsync("git reset --hard HEAD", { cwd: canonicalRoot });
-              await execAsync("git clean -fd", { cwd: canonicalRoot });
+              await git.run(canonicalRoot, ["reset", "--hard", "HEAD"]);
+              await git.run(canonicalRoot, ["clean", "-fd"]);
             }
 
             // Ensure remote URL is configured
             try {
-              await execAsync(`git remote set-url origin "${fetchUrl}"`, { cwd: canonicalRoot });
+              await git.run(canonicalRoot, ["remote", "set-url", "origin", transport.url]);
             } catch {
-              await execAsync(`git remote add origin "${fetchUrl}"`, { cwd: canonicalRoot });
+              await git.run(canonicalRoot, ["remote", "add", "origin", transport.url]);
             }
 
             // Fetch from remote
-            await execAsync("git fetch origin", { cwd: canonicalRoot, timeout: 60000 });
+            await git.run(canonicalRoot, ["fetch", "origin"], { timeoutMs: 60_000, environment: transport.environment });
 
             // Resolve remote branch HEAD SHA
             let remoteHead = "";
             try {
-              const { stdout: remoteShaOut } = await execAsync(`git rev-parse origin/${branch}`, { cwd: canonicalRoot });
+              const { stdout: remoteShaOut } = await git.run(canonicalRoot, ["rev-parse", `refs/remotes/origin/${branch}`]);
               remoteHead = remoteShaOut.trim();
             } catch {
               try {
-                const { stdout: fetchHeadOut } = await execAsync("git rev-parse FETCH_HEAD", { cwd: canonicalRoot });
+                const { stdout: fetchHeadOut } = await git.run(canonicalRoot, ["rev-parse", "FETCH_HEAD"]);
                 remoteHead = fetchHeadOut.trim();
               } catch {}
             }
 
             if (remoteHead && remoteHead !== localHeadBefore) {
-              await execAsync(`git reset --hard ${remoteHead}`, { cwd: canonicalRoot });
+              if (!/^[0-9a-f]{40}$/i.test(remoteHead)) throw new Error("GIT_INVALID_REVISION: Remote HEAD is not a commit SHA");
+              await git.run(canonicalRoot, ["reset", "--hard", remoteHead]);
               localHeadAfter = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
               updated = true;
             }
@@ -266,7 +272,7 @@ export class RepositoryMaterializationService {
           }
         }
 
-        const { stdout: lsOut } = await execAsync("git ls-files", { cwd: canonicalRoot });
+        const { stdout: lsOut } = await git.run(canonicalRoot, ["ls-files"]);
         const trackedFilesCount = lsOut.split("\n").filter((l) => l.trim().length > 0).length;
 
         // Touch last-used timestamp in cache metadata
@@ -322,8 +328,9 @@ export class RepositoryMaterializationService {
         }
 
         // Fetch and reset
-        await execAsync("git fetch origin", { cwd: canonicalRoot, timeout: 60000 });
-        await execAsync(`git reset --hard ${commitSha}`, { cwd: canonicalRoot });
+        if (!/^[0-9a-f]{40}$/i.test(commitSha)) return false;
+        await git.run(canonicalRoot, ["fetch", "origin"], { timeoutMs: 60_000 });
+        await git.run(canonicalRoot, ["reset", "--hard", commitSha]);
         const localHeadAfter = await GitWorktreeService.getHeadCommitSha(canonicalRoot);
 
         console.log(`[REPO_SYNC] remoteHead=${commitSha.slice(0, 8)}`);
@@ -379,17 +386,17 @@ export class RepositoryMaterializationService {
 
           let branch = "main";
           try {
-            const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: canonicalRoot });
+            const { stdout } = await git.run(canonicalRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
             branch = stdout.trim() || "main";
           } catch {}
 
           let origin = "";
           try {
-            const { stdout } = await execAsync("git remote get-url origin", { cwd: canonicalRoot });
+            const { stdout } = await git.run(canonicalRoot, ["remote", "get-url", "origin"]);
             origin = stdout.trim();
           } catch {}
 
-          const { stdout: lsOut } = await execAsync("git ls-files", { cwd: canonicalRoot });
+          const { stdout: lsOut } = await git.run(canonicalRoot, ["ls-files"]);
           const trackedFilesCount = lsOut.split("\n").filter((l) => l.trim().length > 0).length;
 
           return {
@@ -413,19 +420,20 @@ export class RepositoryMaterializationService {
       const targetDir = this.getManagedRepositoryPath(projectId);
       const isFresh = RepositoryCacheManager.isCacheFresh(projectId);
 
-      const cloneUrl = this.buildAuthGitUrl(project.githubUrl, project.githubToken);
+      const transport = this.buildGitTransport(project.githubUrl, project.githubToken);
 
       try {
         if (!isFresh) {
           await RepositoryCacheManager.removeProjectCache(projectId);
           await fs.promises.mkdir(path.dirname(targetDir), { recursive: true });
 
-          await execAsync(`git clone "${cloneUrl}" "${targetDir}"`, {
-            timeout: 120000,
+          await git.run(path.dirname(targetDir), ["clone", transport.url, targetDir], {
+            timeoutMs: 120_000,
+            environment: transport.environment,
           });
         } else {
           try {
-            await execAsync("git fetch origin", { cwd: targetDir, timeout: 60000 });
+            await git.run(targetDir, ["fetch", "origin"], { timeoutMs: 60_000, environment: transport.environment });
           } catch (fetchErr: any) {
             console.warn(`[RepoMaterialization] git fetch failed on "${targetDir}": ${RepositoryCacheManager.redactCredentials(fetchErr?.message)}`);
           }
@@ -436,17 +444,17 @@ export class RepositoryMaterializationService {
 
         let branch = "main";
         try {
-          const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: canonicalRoot });
+          const { stdout } = await git.run(canonicalRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
           branch = stdout.trim() || "main";
         } catch {}
 
         let origin = "";
         try {
-          const { stdout } = await execAsync("git remote get-url origin", { cwd: canonicalRoot });
+          const { stdout } = await git.run(canonicalRoot, ["remote", "get-url", "origin"]);
           origin = stdout.trim();
         } catch {}
 
-        const { stdout: lsOut } = await execAsync("git ls-files", { cwd: canonicalRoot });
+        const { stdout: lsOut } = await git.run(canonicalRoot, ["ls-files"]);
         const trackedFilesCount = lsOut.split("\n").filter((l) => l.trim().length > 0).length;
 
         // Touch cache metadata (do NOT persist ephemeral path to Project.localPath in database)

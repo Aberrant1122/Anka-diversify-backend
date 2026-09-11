@@ -584,6 +584,21 @@ export interface AgentResponse {
   buildAttemptsCount?: number;
   visualVerification?: VisualVerificationResult;
   taskRuntime?: TaskRuntimeSnapshot;
+  gitShipping?: {
+    readonly baseRevision: string;
+    readonly taskHeadRevision: string;
+    readonly finalVerifiedRevision: string;
+    readonly taskBranch: string;
+    readonly commitCreated: boolean;
+    readonly commitSha?: string;
+    readonly changedPaths: readonly string[];
+    readonly remote?: string;
+    readonly pushed: boolean;
+    readonly provider?: "GITHUB" | "GITLAB";
+    readonly reviewId?: string;
+    readonly reviewUrl?: string;
+    readonly ciStatus: "NOT_REQUESTED" | "PENDING" | "PASSED" | "FAILED" | "UNKNOWN";
+  };
   agentLoop?: {
     outcome: "AWAITING_COMPLETION_EVALUATION" | "CLARIFICATION_REQUIRED" | "TECHNICAL_FAILURE" | "AUTHORIZATION_DENIED" | "VALIDATION_FAILURE" | "BUDGET_EXHAUSTED" | "MAX_ITERATIONS_REACHED";
     iterations: number;

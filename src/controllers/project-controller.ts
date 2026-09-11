@@ -7,7 +7,6 @@ import { generatePresignedUrl, generateDownloadUrl, deleteFromS3, detectType } f
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
-import { RepositoryMaterializationService } from "../services/repository-materialization.service";
 import { AuthorizedCapabilityScope } from "../ai/runtime/CapabilityGuard";
 import { ValidationCoordinator } from "../ai/orchestration/ValidationCoordinator";
 const prisma = new PrismaClient();
@@ -264,29 +263,12 @@ export class ProjectController {
   }
 
   async saveRepoFile(req: Request, res: Response) {
-    try {
-      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
-      if (!project?.githubUrl) {
-        return res.status(400).json({ success: false, error: "No GitHub repository connected" });
-      }
-      const { path: filePath, content, commitMessage } = req.body;
-      if (!filePath || content === undefined) {
-        return res.status(400).json({ success: false, error: "path and content required" });
-      }
-
-      // Decrypt the GitHub token
-      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
-
-      const message = commitMessage || `edit: update ${filePath}`;
-      const result = await ProjectGitHubService.pushChanges(project.githubUrl, [{ path: filePath, content }], message, token);
-      if (result?.sha) {
-        await RepositoryMaterializationService.syncManagedCloneToCommit(param(req, "id"), result.sha);
-      }
-      res.json({ success: true, data: result });
-    } catch (error) {
-      console.error("Error saving repo file:", error);
-      res.status(500).json({ success: false, error: "Failed to save file" });
-    }
+    void req;
+    return res.status(409).json({
+      success: false,
+      error: "GIT_WORKFLOW_REQUIRED",
+      message: "Repository edits must be applied through CP10 and shipped from a verified isolated task branch.",
+    });
   }
 
   async applyLocalChanges(req: Request, res: Response) {

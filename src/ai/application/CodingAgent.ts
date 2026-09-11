@@ -3,13 +3,16 @@ import path from "path";
 import crypto from "crypto";
 import { ChatRequest, AgentResponse, AgentProgressEvent } from "../shared/types";
 import { AgentPipeline } from "../orchestration/AgentPipeline";
-import { GitWorktreeService, RepositoryRunSummary } from "../../services/git-worktree.service";
+import { GitWorktreeService, RepositoryRunSummary, RepositoryShippingPolicy } from "../../services/git-worktree.service";
 import { RepositoryMaterializationService } from "../../services/repository-materialization.service";
 import { prisma } from "../../services/database";
 import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
 import { TaskRuntime } from "../runtime/TaskRuntime";
 import { runWithTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
 import { AuthorizedCapabilityScope, CapabilityGrant } from "../runtime/CapabilityGuard";
+import { NodeGitCommandExecutor } from "../../services/git-command";
+
+const git = new NodeGitCommandExecutor();
 
 export interface CodingAgentInternalOptions {
   /**
@@ -28,6 +31,8 @@ export interface CodingAgentInternalOptions {
    * separate argument so ChatRequest/model data cannot create or widen it.
    */
   authorizedCapabilities?: readonly CapabilityGrant[];
+  /** Trusted backend shipping policy; never read from ChatRequest/model output. */
+  shipping?: RepositoryShippingPolicy;
 }
 
 export class CodingAgent {
@@ -137,10 +142,8 @@ export class CodingAgent {
     const headSha = await GitWorktreeService.getHeadCommitSha(gitRoot);
     let trackedFilesCount = 0;
     try {
-      const ls = fs.readFileSync(path.join(gitRoot, ".git", "index"), "utf8"); // or exec git ls-files
-      const { execSync } = require("child_process");
-      const out = execSync("git ls-files", { cwd: gitRoot, encoding: "utf8" });
-      trackedFilesCount = out.split("\n").filter((f: string) => f.trim().length > 0).length;
+      const { stdout } = await git.run(gitRoot, ["ls-files"]);
+      trackedFilesCount = stdout.split("\n").filter((file) => file.trim().length > 0).length;
     } catch {}
 
     console.log(`[REPO_READY] project=${projectId}`);
@@ -185,6 +188,7 @@ export class CodingAgent {
           request,
           authorizedCapabilities: internalOptions?.authorizedCapabilities,
           taskRuntime: runtime,
+          shipping: internalOptions?.shipping,
           onProgress,
         })
       );
@@ -233,6 +237,7 @@ export class CodingAgent {
       ...summary.agentResponse,
       visualVerification: summary.visualVerification || summary.agentResponse?.visualVerification,
       taskRuntime: runtime.snapshot(),
+      ...(summary.shipping ? { gitShipping: summary.shipping } : {}),
     };
   }
 

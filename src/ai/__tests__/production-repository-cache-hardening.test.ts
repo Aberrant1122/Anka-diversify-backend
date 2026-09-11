@@ -133,7 +133,7 @@ describe("Production Ephemeral Repository Cache Hardening (Step 3 of 3)", () => 
     expect(RepositoryCacheManager.isProjectActive("proj-active")).toBe(false);
   });
 
-  test("4. Startup Sweep: cleans expired caches and orphan runs without crashing", async () => {
+  test("4. Startup Sweep: cleans expired caches but preserves unowned run directories", async () => {
     // Setup 1 expired cache
     const expiredProj = path.join(customCacheDir, "proj-expired");
     fs.mkdirSync(path.join(expiredProj, ".git"), { recursive: true });
@@ -143,7 +143,8 @@ describe("Production Ephemeral Repository Cache Hardening (Step 3 of 3)", () => 
       JSON.stringify({ projectId: "proj-expired", createdAt: longAgo, lastUsedAt: longAgo })
     );
 
-    // Setup 1 orphan run directory older than 2 hours
+    // An old directory without an ANKA ownership record is not sufficient
+    // authority for recursive deletion.
     const staleRun = path.join(customRunsDir, "stale-run-startup");
     fs.mkdirSync(staleRun, { recursive: true });
     const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
@@ -151,10 +152,10 @@ describe("Production Ephemeral Repository Cache Hardening (Step 3 of 3)", () => 
 
     const sweepSummary = await RepositoryCacheManager.performStartupSweep();
     expect(sweepSummary.sweptCaches).toBeGreaterThanOrEqual(1);
-    expect(sweepSummary.sweptRuns).toBeGreaterThanOrEqual(1);
+    expect(sweepSummary.sweptRuns).toBe(0);
 
     expect(fs.existsSync(expiredProj)).toBe(false);
-    expect(fs.existsSync(staleRun)).toBe(false);
+    expect(fs.existsSync(staleRun)).toBe(true);
   });
 
   test("5. Runtime Preflight: missing git produces clean RUNTIME_DEPENDENCY_MISSING: git error", async () => {
