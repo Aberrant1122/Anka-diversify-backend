@@ -389,16 +389,19 @@ ACTIVE TASKS:
 ${projectContext.activeTasks.map((t: any) => `- ${t.title} (${t.status}, priority: ${t.priority})`).join("\n") || "None"}
 
 CRITICAL CODE QUALITY RULES:
-1. Every file you output MUST be COMPLETE and SELF-CONTAINED.
-2. Write the ENTIRE file content from line 1 to the end.
+1. For newly created files, output COMPLETE and SELF-CONTAINED file content from line 1 to the end.
+2. For existing files being modified, output targeted edits with exact oldText and newText pairs matching existing source code verbatim.
 3. All code MUST compile without errors.
 ${dominantLanguage ? `- This project's established language/stack is ${dominantLanguage} — ALL new files MUST use it.` : ""}
 
 Respond ONLY with valid JSON:
 {
   "explanation": "what you changed and why",
-  "changes": [{ "path": "relative/path", "content": "COMPLETE file content", "description": "one-line summary" }],
-  "commitMessage": "feat: description"
+  "commitMessage": "feat: description",
+  "changes": [
+    { "path": "relative/path/new-file.ts", "action": "create", "content": "COMPLETE file content", "description": "one-line summary" },
+    { "path": "relative/path/existing-file.ts", "action": "modify", "description": "one-line summary", "edits": [{ "oldText": "exact text to replace", "newText": "replacement text" }] }
+  ]
 }`;
   }
 
@@ -710,7 +713,7 @@ When using an existing local component, conform to its authoritative exported pr
     const hasManifest = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
     const jsonFormatReminder = hasManifest
       ? `\n\nREMINDER: Respond ONLY with valid JSON. For CREATE actions, output complete file content. For MODIFY actions, output targeted edits[] with exact oldText/newText pairs. For DELETE actions, output deletion markers. See STRICT MODIFY RULES above.`
-      : `\n\nREMINDER: Respond ONLY with valid JSON. Every file in your "changes" array MUST contain the COMPLETE 100% file content.`;
+      : `\n\nREMINDER: Respond ONLY with valid JSON. For CREATE actions, output complete file content. For MODIFY actions, output targeted edits[] with exact oldText/newText pairs. For DELETE actions, output deletion markers.`;
 
     const contextSummary = contextContent || (repositoryEvidence.length > 0
       ? "Repository evidence is supplied through the bounded ContextManager."
