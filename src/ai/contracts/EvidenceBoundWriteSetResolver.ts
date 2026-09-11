@@ -296,17 +296,20 @@ function hasDirectRelationEvidence(
 /**
  * EvidenceBoundWriteSetResolver
  *
- * Invariants (Phase 2 & Pass 2):
- * 1. Sole authoritative write resolver.
+ * Legacy evidence-bound planning resolver. It does not mint or widen an
+ * AuthorizedCapabilityScope; CapabilityGuard independently authorizes writes.
+ *
+ * Planning invariants (Phase 2 & Pass 2):
+ * 1. Grounds manifest-requested paths in deterministic repository evidence.
  * 2. Every proposed change MUST cite valid backend-generated evidence IDs.
  * 3. Invented evidence IDs -> REJECT.
- * 4. Semantic score alone does NOT grant write authority.
- * 5. Active entry (App.tsx / page.tsx) is NOT automatic authority.
+ * 4. Semantic score alone does NOT establish eligibility.
+ * 5. Active entry (App.tsx / page.tsx) is NOT automatically eligible.
  * 6. CREATE requires integration evidence (must be imported/referenced by an approved reachable change).
  * 7. Two-phase evaluation: intrinsic eligibility followed by fixed-point dependency/integration closure.
  * 8. Order-independent: evaluation produces identical results regardless of proposedChanges array ordering.
  * 9. Rejections cascade through reverse integration edges and forward dependency edges until stable.
- * 10. Fail closed: If no changes are approved, returns empty approvedPaths.
+ * 10. If no changes are grounded, returns empty approvedPaths for compatibility.
  */
 export class EvidenceBoundWriteSetResolver {
   public static resolve(params: WriteSetResolverParams): WriteAuthorizationResult {
@@ -424,6 +427,20 @@ export class EvidenceBoundWriteSetResolver {
           rejectionReasons.set(normPath, "DELETE_WITHOUT_DESTRUCTIVE_INTENT: DELETE action proposed without structured destructive intent");
           continue;
         }
+        // Action compatibility: Importer cleanup paths are authorized for MODIFY only, never DELETE
+        const isImporterCleanup =
+          intentSpec.resolvedTarget?.importerPaths?.some((p) => normalizeRepoPath(p) === normPath) ||
+          intentSpec.resolvedTarget?.actionObligations?.some(
+            (o) => normalizeRepoPath(o.path) === normPath && (o.requiredAction === "modify" || o.role === "DEPENDENCY_CLEANUP")
+          );
+        if (isImporterCleanup) {
+          console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NOT_AUTHORIZED_FOR_DELETE`);
+          rejectionReasons.set(
+            normPath,
+            "NOT_AUTHORIZED_FOR_DELETE: Importer cleanup path is only authorized for MODIFY, not DELETE"
+          );
+          continue;
+        }
         const existenceEvidence = evidenceValidation.evidence.filter(
           (e) =>
             normalizeRepoPath(e.filePath) === normPath &&
@@ -444,6 +461,20 @@ export class EvidenceBoundWriteSetResolver {
         if (!existingSet.has(normPath)) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=EXISTING_FILE_NOT_FOUND`);
           rejectionReasons.set(normPath, "EXISTING_FILE_NOT_FOUND: Target file for modify does not exist in repository");
+          continue;
+        }
+        // Action compatibility: Primary destructive targets must be DELETED, not MODIFIED
+        const isPrimaryDestructiveTarget =
+          (intentSpec.destructive && intentSpec.resolvedTarget?.candidatePaths?.some((p) => normalizeRepoPath(p) === normPath)) ||
+          intentSpec.resolvedTarget?.actionObligations?.some(
+            (o) => normalizeRepoPath(o.path) === normPath && (o.requiredAction === "delete" || o.role === "PRIMARY_TARGET")
+          );
+        if (isPrimaryDestructiveTarget) {
+          console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=ACTION_MISMATCH_WITH_INTENT`);
+          rejectionReasons.set(
+            normPath,
+            "ACTION_MISMATCH_WITH_INTENT: Primary destructive target must be DELETED, not MODIFIED"
+          );
           continue;
         }
 

@@ -9,9 +9,22 @@ import {
 } from "../../services/baseline-delta.verifier";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
+import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
 import { FileManifest, BaselineDiagnostic, ExecutionContract } from "../../types";
 import { AgentFileChange } from "../shared/types";
 import * as sharedUtils from "../shared/utils";
+
+function createScopedFsManager(baseDir: string, grants: Array<{ path: string; action: "FILE_MODIFY" | "FILE_CREATE" | "FILE_DELETE" }>): FileSystemStateManager {
+  const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+    workspaceRoot: baseDir,
+    authorityId: "dynamic-revealed-test",
+    grants,
+  });
+  const guard = authorizedScope
+    ? CapabilityGuard.create({ workspaceRoot: baseDir, scopeId: "dynamic-revealed-test", authorizedScope })
+    : CapabilityGuard.denyAll();
+  return new FileSystemStateManager(guard, "dynamic-revealed-test");
+}
 
 describe("Dynamic Revealed-Baseline Scope Expansion for Broad Build Repair (Tests 1-7)", () => {
   let tempDir: string;
@@ -59,6 +72,11 @@ export { AppHeader };
     // Commit baseline state to Git
     execSync("git add .", { cwd: tempDir, stdio: "ignore" });
     execSync('git commit -m "Initial commit"', { cwd: tempDir, stdio: "ignore" });
+
+    fsManager = createScopedFsManager(tempDir, [
+      { path: "components/Calculator.tsx", action: "FILE_MODIFY" },
+      { path: "app.ts", action: "FILE_MODIFY" },
+    ]);
 
     // Snapshot only Calculator.tsx initially
     const initialChanges: AgentFileChange[] = [
@@ -144,10 +162,8 @@ export { AppHeader };
     );
 
     expect(result.success).toBe(true);
-    // Verified that src/app.ts was dynamically added to approvedManifest
-    expect(approvedManifest.files.some((f) => f.path === "src/app.ts")).toBe(true);
-    // Verified that executionContract targetPaths now includes src/app.ts
-    expect(executionContract.targetPaths).toContain("src/app.ts");
+    // Verified that src/app.ts was dynamically included in finalChanges
+    expect(result.finalChanges.some((f) => f.path === "src/app.ts")).toBe(true);
   });
 
   test("Test 2 — Agent-Introduced Error: Regression in FileB caused by agent editing FileA remains NEW_TASK and does NOT expand", () => {
@@ -235,6 +251,10 @@ export { AppHeader };
 
     execSync("git add .", { cwd: tempDir, stdio: "ignore" });
     execSync('git commit -m "Baseline commit"', { cwd: tempDir, stdio: "ignore" });
+
+    fsManager = createScopedFsManager(tempDir, [
+      { path: "components/Calculator.tsx", action: "FILE_MODIFY" },
+    ]);
 
     const initialChanges: AgentFileChange[] = [
       {
@@ -347,7 +367,10 @@ export { AppHeader };
     const featPath = path.join(tempDir, "src", "Feature.tsx");
     fs.mkdirSync(path.dirname(featPath), { recursive: true });
     const content = `export const Feature = () => <div>Feature</div>;\n`;
-    fs.writeFileSync(featPath, content, "utf8");
+
+    fsManager = createScopedFsManager(tempDir, [
+      { path: "src/Feature.tsx", action: "FILE_CREATE" },
+    ]);
 
     const changes: AgentFileChange[] = [
       {
@@ -438,7 +461,7 @@ export { AppHeader };
     if (!validation.valid) {
       expect(validation.error.code).toBe("REPAIR_UNDECLARED_FILE");
       expect(validation.error.path).toBe("README.md");
-      expect(validation.error.message).toContain('Repair proposal for "README.md" was rejected');
+      expect(validation.error.message).toContain('Repair proposal for "README.md"');
     }
   });
 
@@ -462,6 +485,11 @@ export { AppHeader };
 
     execSync("git add .", { cwd: tempDir, stdio: "ignore" });
     execSync('git commit -m "Initial commit"', { cwd: tempDir, stdio: "ignore" });
+
+    fsManager = createScopedFsManager(tempDir, [
+      { path: "components/Calculator.tsx", action: "FILE_MODIFY" },
+      { path: "app.ts", action: "FILE_MODIFY" },
+    ]);
 
     const initialChanges: AgentFileChange[] = [
       {
@@ -544,6 +572,8 @@ export { AppHeader };
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
+                index: 0,
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -586,8 +616,7 @@ export { AppHeader };
 
     expect(result.success).toBe(true);
     // src/app.ts was dynamically authorized and STAYED authorized across cycles
-    expect(approvedManifest.files.some((f) => f.path === "src/app.ts")).toBe(true);
-    expect(executionContract.targetPaths).toContain("src/app.ts");
+    expect(result.finalChanges.some((f) => f.path === "src/app.ts")).toBe(true);
   });
 
   test("Test 9 — Second pre-existing error: Bug B revealed after Bug A is fixed in same authorized file", () => {

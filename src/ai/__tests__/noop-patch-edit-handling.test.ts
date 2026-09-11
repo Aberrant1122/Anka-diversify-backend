@@ -1,8 +1,40 @@
 import { CodeGenerator } from "../generation/CodeGenerator";
 import { PatchCorrectionEngine } from "../generation/PatchCorrectionEngine";
+import { LLMGateway } from "../gateway/LLMGateway";
 import { ExecutionContract, FileManifest } from "../../types";
 
 describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function mockStructuredGeneration(changes: any[]): void {
+    jest.spyOn(LLMGateway.prototype, "callStructured").mockImplementation(async (request: any) => {
+      if (request.schema?.name === "ImplementationRoadmapSchema") {
+        return {
+          content: {
+            roadmap: [{
+              phase: 1,
+              title: "Apply focused repair",
+              layer: "UI",
+              targetFiles: ["components/Calculator.tsx"],
+              description: "Apply the requested bounded patch",
+            }],
+          },
+          finish_reason: "stop",
+        } as any;
+      }
+      return {
+        content: {
+          explanation: "Proposed bounded patch edits",
+          changes,
+          commitMessage: "fix: apply bounded patch",
+        },
+        finish_reason: "stop",
+      } as any;
+    });
+  }
+
   const baseContract: ExecutionContract = {
     goal: "Repair all build errors",
     taskType: "BUG_FIX",
@@ -93,6 +125,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
                     changes: mockProposals,
                   }),
                 },
+                finish_reason: "stop",
               },
             ],
           }),
@@ -101,6 +134,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
     };
 
     jest.spyOn(require("../shared/utils"), "getOpenAI").mockReturnValue(mockOpenAI);
+    mockStructuredGeneration(mockProposals);
 
     const result = await CodeGenerator.generateRoadmapAndDiffs(
       "Fix all build errors in this repository until the build passes.",
@@ -144,6 +178,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
                     changes: mockProposals,
                   }),
                 },
+                finish_reason: "stop",
               },
             ],
           }),
@@ -152,6 +187,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
     };
 
     jest.spyOn(require("../shared/utils"), "getOpenAI").mockReturnValue(mockOpenAI);
+    mockStructuredGeneration(mockProposals);
 
     const spyCorrectPatch = jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({
       attempted: true,
@@ -207,6 +243,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
                     changes: mockProposals,
                   }),
                 },
+                finish_reason: "stop",
               },
             ],
           }),
@@ -215,6 +252,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
     };
 
     jest.spyOn(require("../shared/utils"), "getOpenAI").mockReturnValue(mockOpenAI);
+    mockStructuredGeneration(mockProposals);
     jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({
       attempted: true,
       succeeded: false,
@@ -265,6 +303,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
                     changes: mockProposals,
                   }),
                 },
+                finish_reason: "stop",
               },
             ],
           }),
@@ -273,6 +312,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
     };
 
     jest.spyOn(require("../shared/utils"), "getOpenAI").mockReturnValue(mockOpenAI);
+    mockStructuredGeneration(mockProposals);
 
     const result = await CodeGenerator.generateRoadmapAndDiffs(
       "Fix useState error in components/Calculator.tsx",
@@ -315,6 +355,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
                     changes: mockProposals,
                   }),
                 },
+                finish_reason: "stop",
               },
             ],
           }),
@@ -323,6 +364,7 @@ describe("CodeGenerator — Deterministic No-Op Patch Edit Normalization", () =>
     };
 
     jest.spyOn(require("../shared/utils"), "getOpenAI").mockReturnValue(mockOpenAI);
+    mockStructuredGeneration(mockProposals);
 
     const result = await CodeGenerator.generateRoadmapAndDiffs(
       "Fix useState in Calculator",

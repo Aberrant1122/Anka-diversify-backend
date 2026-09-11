@@ -73,17 +73,6 @@ export function injectImages(
   };
 }
 
-export function modelForPhase(phase: string): string {
-  switch (phase) {
-    case "requirements":
-    case "documentation":
-    case "architecture":
-      return "gpt-4o";
-    default:
-      return "gpt-4o-mini";
-  }
-}
-
 export function estimateCostUSD(
   model: string,
   usage: { prompt_tokens?: number; completion_tokens?: number },

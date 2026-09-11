@@ -1,10 +1,11 @@
 import fs from "fs";
 import path from "path";
 
-describe("AgentPipeline - Single detectValidationCommands Call (P1-A Fix)", () => {
-  it("should call detectValidationCommands exactly once in AgentPipeline source", () => {
-    const pipelinePath = path.join(__dirname, "..", "orchestration", "AgentPipeline.ts");
-    const content = fs.readFileSync(pipelinePath, "utf8");
+describe("ValidationCoordinator - Single operational detectValidationCommands Call (P1-A Fix)", () => {
+  const coordinatorPath = path.join(__dirname, "..", "orchestration", "ValidationCoordinator.ts");
+
+  it("should call detectValidationCommands exactly once in ValidationCoordinator source", () => {
+    const content = fs.readFileSync(coordinatorPath, "utf8");
 
     const matches = content.match(/detectValidationCommands\(/g);
     expect(matches).not.toBeNull();
@@ -12,8 +13,7 @@ describe("AgentPipeline - Single detectValidationCommands Call (P1-A Fix)", () =
   });
 
   it("should pass executionContract to the single detectValidationCommands call", () => {
-    const pipelinePath = path.join(__dirname, "..", "orchestration", "AgentPipeline.ts");
-    const content = fs.readFileSync(pipelinePath, "utf8");
+    const content = fs.readFileSync(coordinatorPath, "utf8");
 
     // Find the detectValidationCommands call and verify it includes executionContract
     const callIndex = content.indexOf("detectValidationCommands(");
@@ -25,8 +25,7 @@ describe("AgentPipeline - Single detectValidationCommands Call (P1-A Fix)", () =
   });
 
   it("should store the result in effectiveValidationCommands, not validationCommands", () => {
-    const pipelinePath = path.join(__dirname, "..", "orchestration", "AgentPipeline.ts");
-    const content = fs.readFileSync(pipelinePath, "utf8");
+    const content = fs.readFileSync(coordinatorPath, "utf8");
 
     // The variable should be effectiveValidationCommands (with contract)
     expect(content).toContain("const effectiveValidationCommands = ValidationPlanner.detectValidationCommands(");

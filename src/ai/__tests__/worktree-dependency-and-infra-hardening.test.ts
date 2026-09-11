@@ -1,3 +1,4 @@
+import { LLMGateway } from "../gateway/LLMGateway";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -204,39 +205,33 @@ describe("AI Step 15 & 16 — Real-Repo Worktree Dependency & Build Hardening", 
     expect(audit.passed).toBe(false);
     expect(audit.riskLevel).toBe("HIGH");
     expect(audit.vulnerabilities).toBeDefined();
-    expect(audit.vulnerabilities?.[0].issue).toContain("mathjs.evaluate");
+    expect(audit.vulnerabilities?.[0].issue).toContain("dynamic mathematical evaluation via mathjs");
     expect(audit.summary).toContain("FLAGGED (HIGH risk)");
   });
 
   test("I. Critique score is defensively clamped and normalized so percentage is always 0% – 100%", async () => {
-    const mockOpenAI: any = {
-      chat: {
-        completions: {
-          create: jest.fn().mockImplementation((args: any) => {
-            if (args.messages[0].content.includes("Application Security Auditor")) {
-              return Promise.resolve({
-                choices: [{ message: { content: JSON.stringify({ passed: true, riskLevel: "LOW" }) } }],
-              });
-            }
-            return Promise.resolve({
-              choices: [
-                {
-                  message: {
-                    content: JSON.stringify({
-                      score: 7,
-                      passed: true,
-                      critique: [],
-                    }),
-                  },
-                },
-              ],
-            });
-          }),
+    jest.spyOn(LLMGateway.prototype, "callStructured").mockImplementation(async (req: any) => {
+      if (req.schema?.name === "SecurityCritiqueSchema") {
+        return {
+          content: {
+            score: 0.7,
+            passed: true,
+            critique: [],
+            improvements: "none",
+          },
+          finish_reason: "stop",
+        } as any;
+      }
+      return {
+        content: {
+          passed: true,
+          riskLevel: "LOW",
+          vulnerabilities: [],
+          recommendations: [],
         },
-      },
-    };
-
-    jest.spyOn(require("../shared/utils"), "getOpenAI").mockReturnValue(mockOpenAI);
+        finish_reason: "stop",
+      } as any;
+    });
 
     const changes = [
       {

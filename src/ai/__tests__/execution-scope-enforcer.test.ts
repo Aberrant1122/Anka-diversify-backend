@@ -59,7 +59,7 @@ describe("ExecutionScopeEnforcer — Deterministic Execution Boundary Tests", ()
     expect(res.errors).toHaveLength(0);
   });
 
-  test("TEST B: Undeclared file rejects complete generation with UNDECLARED_FILE", () => {
+  test("TEST B: unplanned file is audit-only while trusted contract still constrains it", () => {
     const manifest: FileManifest = {
       files: [
         {
@@ -97,10 +97,12 @@ describe("ExecutionScopeEnforcer — Deterministic Execution Boundary Tests", ()
     });
 
     expect(res.valid).toBe(false);
-    expect(res.errors.some((e) => e.reason === "UNDECLARED_FILE" && e.path === "package.json")).toBe(true);
+    expect(res.errors.some((e) => e.reason === "TARGET_PATH_VIOLATION" && e.path === "package.json")).toBe(true);
+    expect(res.errors.some((e) => e.reason === "UNDECLARED_FILE")).toBe(false);
+    expect(res.manifestObservations).toMatchObject([{ path: "package.json", reason: "UNPLANNED_PATH" }]);
   });
 
-  test("TEST C: Action mismatch rejects with ACTION_MISMATCH", () => {
+  test("TEST C: manifest action mismatch is retained as audit provenance", () => {
     const manifest: FileManifest = {
       files: [
         {
@@ -132,8 +134,11 @@ describe("ExecutionScopeEnforcer — Deterministic Execution Boundary Tests", ()
       existingFilePaths,
     });
 
-    expect(res.valid).toBe(false);
-    expect(res.errors.some((e) => e.reason === "ACTION_MISMATCH")).toBe(true);
+    expect(res.valid).toBe(true);
+    expect(res.errors).toEqual([]);
+    expect(res.manifestObservations).toMatchObject([{
+      path: "src/auth.ts", reason: "PLANNED_ACTION_DIFFERED", plannedAction: "modify", actualAction: "delete",
+    }]);
   });
 
   test("TEST D: Create existing file fails with CREATE_FILE_ALREADY_EXISTS", () => {
@@ -345,7 +350,7 @@ describe("ExecutionScopeEnforcer — Deterministic Execution Boundary Tests", ()
     expect(res.errors.some((e) => e.reason === "MAX_FILES_EXCEEDED")).toBe(true);
   });
 
-  test("TEST J: Broad task (NEW_FEATURE) is still strictly constrained by manifest", () => {
+  test("TEST J: broad task manifest omission is audit-only", () => {
     const broadContract: ExecutionContract = {
       ...baseContract,
       taskType: "NEW_FEATURE",
@@ -389,8 +394,9 @@ describe("ExecutionScopeEnforcer — Deterministic Execution Boundary Tests", ()
       existingFilePaths,
     });
 
-    expect(res.valid).toBe(false);
-    expect(res.errors.some((e) => e.reason === "UNDECLARED_FILE" && e.path === "package.json")).toBe(true);
+    expect(res.valid).toBe(true);
+    expect(res.errors).toEqual([]);
+    expect(res.manifestObservations).toMatchObject([{ path: "package.json", reason: "UNPLANNED_PATH" }]);
   });
 
   test("TEST K: Immutability — inputs are not mutated", () => {

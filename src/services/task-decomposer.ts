@@ -14,6 +14,8 @@ import {
   detectPrimaryActiveEntryPoint,
   buildRepositoryUISystemPromptSection,
 } from "../ai/planning/RepositoryArchitectureDetector";
+import { LLMGateway } from "../ai/gateway/LLMGateway";
+import { PipelineStages } from "../ai/gateway/PipelineStage";
 
 export class TaskDecomposer {
   private openai: OpenAI;
@@ -82,21 +84,58 @@ export class TaskDecomposer {
     }
 
     try {
-      const response = await this.openai.chat.completions.create({
-        model: process.env.OPENAI_AGENT_MODEL || "gpt-4o",
+      const gateway = LLMGateway.getInstance();
+      const response = await gateway.callStructured<{ nodes: any[] }>({
+        stage: PipelineStages.TASK_DECOMPOSITION,
+        openaiClient: this.openai,
         messages: [
           { role: "system", content: TASK_DECOMPOSITION_PROMPT },
           { role: "user", content: contextText },
         ],
         temperature: 0.2,
-        response_format: { type: "json_object" },
+        schema: {
+          name: "TaskDecompositionSchema",
+          strict: false,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              nodes: {
+                type: "array",
+                minItems: 2,
+                maxItems: 8,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: "string" },
+                    description: { type: "string" },
+                    category: { type: "string", enum: ["types_and_interfaces", "mock_data", "leaf_components", "container_components", "routing_and_navigation", "api_integration", "state_management"] },
+                    targetFiles: { type: "array", items: { type: "string" } },
+                    dependencies: { type: "array", items: { type: "string" } },
+                    estimatedComplexity: { type: "string", enum: ["SMALL", "MEDIUM"] },
+                    repositoryId: { type: "string" },
+                  },
+                  required: ["id", "category", "description", "targetFiles", "dependencies", "estimatedComplexity"],
+                },
+              },
+              graphVersion: { type: "string", enum: ["1.0.0"] },
+            },
+            required: ["nodes", "graphVersion"],
+          },
+          validate: (parsed) => {
+            try {
+              this.normalizeAndValidateGraph(parsed, userRequest, availableRepositories?.map((repo) => repo.repositoryId));
+              return { valid: true, data: parsed };
+            } catch (error: any) {
+              return { valid: false, errors: [error?.message || "Invalid task decomposition"] };
+            }
+          },
+        },
       });
 
-      const rawContent = response.choices[0]?.message?.content || "{}";
-      const parsed = JSON.parse(rawContent);
-
       const validRepoIds = availableRepositories?.map((r) => r.repositoryId);
-      const graph = this.normalizeAndValidateGraph(parsed, userRequest, validRepoIds);
+      const graph = this.normalizeAndValidateGraph(response.content, userRequest, validRepoIds);
       return graph;
     } catch (err: any) {
       console.error("[TaskDecomposer] Error in task decomposition:", err?.message || err);
@@ -262,36 +301,41 @@ export class TaskDecomposer {
       "state_management",
     ]);
 
+    if (Object.keys(parsed).some((key) => !["nodes", "graphVersion"].includes(key)) || parsed.graphVersion !== "1.0.0" || parsed.nodes.length < 2 || parsed.nodes.length > 8) throw new Error("TASK_DECOMPOSITION_FAILED: Invalid graph envelope");
+
     const cleanNodes: SubTask[] = [];
     const seenIds = new Set<string>();
+    const seenTargetFiles = new Set<string>();
 
     for (let i = 0; i < parsed.nodes.length; i++) {
       const raw = parsed.nodes[i];
-      const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : `subtask-${i + 1}`;
-      if (seenIds.has(id)) continue;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).some((key) => !["id", "category", "description", "targetFiles", "dependencies", "estimatedComplexity", "repositoryId"].includes(key))) throw new Error("TASK_DECOMPOSITION_FAILED: Invalid node fields");
+      const id = typeof raw.id === "string" ? raw.id.trim() : "";
+      if (!id || seenIds.has(id)) throw new Error("TASK_DECOMPOSITION_FAILED: Missing or duplicate task ID");
       seenIds.add(id);
 
-      const category: SubTaskCategory = validCategories.has(raw.category)
-        ? raw.category
-        : "container_components";
-
-      const description = typeof raw.description === "string" ? raw.description : `SubTask ${id}`;
-      const targetFiles = Array.isArray(raw.targetFiles)
-        ? raw.targetFiles.map((f: any) => String(f).trim()).filter(Boolean)
-        : [];
-      const dependencies = Array.isArray(raw.dependencies)
-        ? raw.dependencies.map((d: any) => String(d).trim()).filter(Boolean)
-        : [];
-
-      const rawComplexity = String(raw.estimatedComplexity || "").toUpperCase();
-      const estimatedComplexity: "SMALL" | "MEDIUM" = rawComplexity === "SMALL" ? "SMALL" : "MEDIUM";
+      if (!validCategories.has(raw.category)) throw new Error("TASK_DECOMPOSITION_FAILED: Invalid task category");
+      const category = raw.category as SubTaskCategory;
+      if (typeof raw.description !== "string" || !raw.description.trim()) throw new Error("TASK_DECOMPOSITION_FAILED: Missing task description");
+      const description = raw.description;
+      if (!Array.isArray(raw.targetFiles) || raw.targetFiles.length === 0) throw new Error("TASK_DECOMPOSITION_FAILED: Missing target files");
+      const targetFiles = raw.targetFiles.map((value: unknown) => {
+        if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\0")) throw new Error("TASK_DECOMPOSITION_FAILED: Invalid target file");
+        const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "");
+        if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.split("/").some((part: string) => !part || part === "." || part === "..") || seenTargetFiles.has(normalized)) throw new Error("TASK_DECOMPOSITION_FAILED: Unsafe or duplicate target file");
+        seenTargetFiles.add(normalized); return normalized;
+      });
+      if (!Array.isArray(raw.dependencies) || new Set(raw.dependencies).size !== raw.dependencies.length || raw.dependencies.some((dep: unknown) => typeof dep !== "string" || !dep.trim() || dep === id)) throw new Error("TASK_DECOMPOSITION_FAILED: Invalid dependency list");
+      const dependencies = [...raw.dependencies];
+      if (raw.estimatedComplexity !== "SMALL" && raw.estimatedComplexity !== "MEDIUM") throw new Error("TASK_DECOMPOSITION_FAILED: Invalid task complexity");
+      const estimatedComplexity = raw.estimatedComplexity;
 
       let repositoryId: string | undefined;
-      if (validRepoIds && validRepoIds.length > 0 && typeof raw.repositoryId === "string") {
-        const trimmed = raw.repositoryId.trim();
-        if (validRepoIds.includes(trimmed)) {
-          repositoryId = trimmed;
-        }
+      if (validRepoIds && validRepoIds.length > 0) {
+        if (typeof raw.repositoryId !== "string" || !validRepoIds.includes(raw.repositoryId.trim())) throw new Error("TASK_DECOMPOSITION_FAILED: Invalid or missing repository ID");
+        repositoryId = raw.repositoryId.trim();
+      } else if (raw.repositoryId !== undefined) {
+        throw new Error("TASK_DECOMPOSITION_FAILED: Unexpected repository ID");
       }
 
       cleanNodes.push({
@@ -309,21 +353,18 @@ export class TaskDecomposer {
       throw new Error("TASK_DECOMPOSITION_FAILED: No clean nodes remained after normalization");
     }
 
+    for (const node of cleanNodes) {
+      if (node.dependencies.some((dependency) => !seenIds.has(dependency))) throw new Error("TASK_DECOMPOSITION_FAILED: Dependency references unknown task ID");
+    }
+
     const graph: DependencyExecutionGraph = {
       nodes: cleanNodes,
       executionOrder: [],
       graphVersion: "1.0.0",
     };
 
-    if (this.validateDAG(graph)) {
-      graph.executionOrder = this.topologicalSort(graph);
-    } else {
-      console.warn("[TaskDecomposer] Cycle detected in parsed graph! Removing backward dependencies.");
-      for (const node of graph.nodes) {
-        node.dependencies = [];
-      }
-      graph.executionOrder = graph.nodes.map((n) => n.id);
-    }
+    if (!this.validateDAG(graph)) throw new Error("TASK_DECOMPOSITION_FAILED: Dependency graph contains a cycle");
+    graph.executionOrder = this.topologicalSort(graph);
 
     return graph;
   }

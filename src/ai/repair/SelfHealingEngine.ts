@@ -1,7 +1,6 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import { getOpenAI } from "../shared/utils";
 import { AgentFileChange, AgentProgressEvent, ExecutionContract } from "../shared/types";
 import { FileManifest, RootBuildFailure, ValidationDetails, BaselineDiagnostic } from "../../types";
 import { ValidationRunner } from "../validation/ValidationRunner";
@@ -13,6 +12,78 @@ import { ErrorClassifier } from "../validation/ErrorClassifier";
 import { ErrorDiagnosticsParser, DiagnosticError, PublicContractGuard, DeterministicTs6133Repair } from "../../services/surgical-repair.engine";
 import { SurgicalPatchEngine, SurgicalPatchChunk } from "./SurgicalPatchEngine";
 import { applyPatchToFile } from "../patch/PatchApplicator";
+import { EditingConflictError } from "../editing/EditingPrimitives";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
+
+interface DependencyRepairPayload {
+  changes: Array<{ path: string; content: string }>;
+}
+
+interface ModelRepairPayload {
+  repaired?: boolean;
+  patchExplanation?: string;
+  changes: RepairChangeProposal[];
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizedSafeRepairPath(value: unknown): string | null {
+  if (typeof value !== "string" || !value || value !== value.trim() || value.includes("\0")) return null;
+  const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return null;
+  if (!normalized.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..")) return null;
+  return normalized;
+}
+
+function validateDependencyRepairPayload(value: unknown, allowedPaths: Set<string>) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== "changes") || !Array.isArray(value.changes) || value.changes.length === 0) {
+    return { valid: false, errors: ["Dependency repair must contain only a non-empty changes array"] };
+  }
+  for (const item of value.changes) {
+    if (!isPlainRecord(item) || Object.keys(item).some((key) => key !== "path" && key !== "content")) {
+      return { valid: false, errors: ["Dependency repair change contains unknown fields"] };
+    }
+    const normalizedPath = normalizedSafeRepairPath(item.path);
+    if (!normalizedPath || !allowedPaths.has(normalizedPath) || typeof item.content !== "string" || item.content.length === 0) {
+      return { valid: false, errors: ["Dependency repair change has an unauthorized path or invalid content"] };
+    }
+  }
+  return { valid: true, data: value as unknown as DependencyRepairPayload };
+}
+
+function validateModelRepairPayload(value: unknown, allowedPaths: Set<string>) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => !["repaired", "patchExplanation", "changes"].includes(key)) || !Array.isArray(value.changes) || value.changes.length === 0) {
+    return { valid: false, errors: ["Repair payload must contain a non-empty changes array"] };
+  }
+  if (value.repaired !== undefined && typeof value.repaired !== "boolean") return { valid: false, errors: ["repaired must be boolean when supplied"] };
+  if (value.patchExplanation !== undefined && typeof value.patchExplanation !== "string") return { valid: false, errors: ["patchExplanation must be a string when supplied"] };
+
+  for (const item of value.changes) {
+    if (!isPlainRecord(item)) return { valid: false, errors: ["Repair change must be an object"] };
+    const allowedKeys = new Set(["path", "action", "description", "content", "edits", "isDeleted"]);
+    if (Object.keys(item).some((key) => !allowedKeys.has(key))) return { valid: false, errors: ["Repair change contains unknown fields"] };
+    const normalizedPath = normalizedSafeRepairPath(item.path);
+    if (!normalizedPath || !allowedPaths.has(normalizedPath) || typeof item.description !== "string" || item.description.trim().length === 0 || !["create", "modify", "delete"].includes(String(item.action))) {
+      return { valid: false, errors: ["Repair change has an unauthorized path or invalid core fields"] };
+    }
+    if (item.action === "create") {
+      if (typeof item.content !== "string" || item.content.length === 0 || item.edits !== undefined || item.isDeleted !== undefined) return { valid: false, errors: ["Create repair shape is invalid"] };
+    } else if (item.action === "delete") {
+      if (item.content !== "" || item.isDeleted !== true || item.edits !== undefined) return { valid: false, errors: ["Delete repair shape is invalid"] };
+    } else {
+      if (!Array.isArray(item.edits) || item.edits.length === 0 || item.content !== undefined || item.isDeleted !== undefined) return { valid: false, errors: ["Modify repair requires edits only"] };
+      for (const edit of item.edits) {
+        if (!isPlainRecord(edit) || Object.keys(edit).some((key) => key !== "oldText" && key !== "newText") || typeof edit.oldText !== "string" || edit.oldText.length === 0 || typeof edit.newText !== "string" || edit.oldText === edit.newText) {
+          return { valid: false, errors: ["Modify repair edit is invalid"] };
+        }
+      }
+    }
+  }
+  return { valid: true, data: value as unknown as ModelRepairPayload };
+}
 
 function extractMissingDepKeys(diags: DiagnosticError[], rawErrors?: string): Set<string> {
   const keys = new Set<string>();
@@ -39,11 +110,11 @@ import { RepairSessionTracker } from "./RepairSessionTracker";
 import { buildSelfHealingRepairPrompt } from "../prompts/repair";
 import {
   RepairChangeProposal,
-  validateRepairManifestScope,
+  auditRepairManifestPlan,
   resolveRepairProposals,
 } from "./RepairProposalResolver";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
-import { verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
+import { sha256, verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { PatchCorrectionEngine } from "../generation/PatchCorrectionEngine";
 import {
@@ -61,9 +132,6 @@ export const MAX_REPAIR_WALL_TIME_MS = 600000; // 10 minutes
 
 export const SPECIFIC_GATE_ERRORS = new Set([
   "STALE_REPAIR_SOURCE",
-  "REPAIR_UNDECLARED_FILE",
-  "SCOPE_EXPANSION_REQUIRED",
-  "REPAIR_ACTION_MISMATCH",
   "SCOPE_VIOLATION",
   "UNAUTHORIZED_SCOPE_ERROR",
   "PUBLIC_CONTRACT_DRIFT",
@@ -185,18 +253,22 @@ export class SelfHealingEngine {
   }> {
     const isRepositoryMode = executionContract?.pipeline === "REPOSITORY";
 
-    // Fail closed if repository self-healing is invoked without required approved scope
-    if (
-      isRepositoryMode &&
-      !approvedManifest &&
-      executionContract?.taskType !== "DOCS"
-    ) {
+    const executableValidationCommands = commands
+      .slice(0, 2)
+      .filter((command) => typeof command === "string" && command.trim().length > 0);
+    if (!localPath || executableValidationCommands.length === 0) {
+      const reason = !localPath
+        ? "Self-healing remains unverified: a local repository path is required for deterministic validation."
+        : "Self-healing remains unverified: no deterministic validation commands were executed.";
       return {
         finalChanges: initialChanges,
         attempts: 0,
         success: false,
-        errorLog: "[REPAIR_SCOPE_REQUIRED] Execution halted: An approved file manifest is required for repository self-healing.",
-        errorType: "REPAIR_SCOPE_REQUIRED",
+        errorLog: reason,
+        errorType: "VALIDATION_UNVERIFIED",
+        repairTrigger: "NONE",
+        repairApplied: false,
+        repaired: false,
         buildAttemptsCount: 0,
         modelRepairAttempts: 0,
         patchesAppliedCount: 0,
@@ -205,6 +277,7 @@ export class SelfHealingEngine {
 
     const repairLoopStartTime = performance.now();
     let currentChanges = [...initialChanges];
+    let pendingChanges = [...initialChanges];
     let previousErrors = "";
     let lastErrorType = "UNKNOWN";
     let repairTrigger: "SHELL_VALIDATION_FAILURE" | "LLM_REVIEW_REJECTION" | "NONE" = "NONE";
@@ -222,8 +295,8 @@ export class SelfHealingEngine {
     const resolvedFailureSequence: string[] = [];
 
     const attemptedProposalFingerprints = new Set<string>();
-    /** Per-run memory of dynamically authorized revealed-baseline repair targets */
-    const authorizedRevealedBaselinePaths = new Set<string>();
+    /** Deterministically proven revealed-baseline candidates; not capability grants. */
+    const provenRevealedBaselinePaths = new Set<string>();
     const repairAttemptsHistory: Array<{
       attempt: number;
       proposalResult?: string;
@@ -347,32 +420,20 @@ export class SelfHealingEngine {
             patchesAppliedCount,
           };
         }
-      } else if (!currentChanges.length) {
-        return {
-          finalChanges: [],
-          attempts: attempt,
-          success: true,
-          errorType: classification.type,
-          repairTrigger: "NONE",
-          repairApplied: false,
-          repaired: false,
-          buildAttemptsCount: buildAttempts,
-          modelRepairAttempts,
-          patchesAppliedCount,
-        };
       } else {
         if (fsManager && localPath) {
           try {
-            await fsManager.apply(currentChanges, localPath);
+            await fsManager.apply(pendingChanges, localPath);
+            pendingChanges = [];
           } catch (err: any) {
-            if (err instanceof RepairInfrastructureError) {
+            if (err instanceof RepairInfrastructureError || err instanceof EditingConflictError) {
               return {
                 finalChanges: currentChanges,
                 attempts: attempt,
                 success: false,
                 errorLog: err.message,
                 infrastructureError: true,
-                errorType: "INFRA",
+                errorType: err instanceof EditingConflictError ? err.code : "INFRA",
                 repairTrigger,
                 repairApplied,
                 repaired: attempt > 1 || repairApplied,
@@ -384,27 +445,28 @@ export class SelfHealingEngine {
             }
           }
         } else if (localPath && !isRepositoryMode) {
-          for (const change of currentChanges) {
-            try {
-              const abs = path.join(localPath, change.path);
-              if (change.action === "delete" || change.isDeleted) {
-                if (fs.existsSync(abs)) await fs.promises.rm(abs, { recursive: true, force: true });
-              } else {
-                await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-                await fs.promises.writeFile(abs, change.content, "utf8");
-              }
-            } catch {}
-          }
+          return {
+            finalChanges: currentChanges,
+            attempts: attempt,
+            success: false,
+            errorLog: "[CAPABILITY_POLICY_MISSING] Filesystem mutation requires a guarded FileSystemStateManager.",
+            infrastructureError: true,
+            errorType: "INFRA",
+            repairTrigger,
+            repairApplied,
+            repaired: attempt > 1 || repairApplied,
+            rootFailure,
+            buildAttemptsCount: buildAttempts,
+            modelRepairAttempts,
+            patchesAppliedCount,
+          };
         }
 
         if (localPath && commands.length > 0) {
           buildAttempts++;
         }
 
-        const validation =
-          localPath && commands.length > 0
-            ? await ValidationRunner.validateWithShell(currentChanges, localPath, commands)
-            : await ValidationRunner.selfReviewChanges(currentChanges);
+        const validation = await ValidationRunner.validateWithShell(currentChanges, localPath, executableValidationCommands);
 
         validationSuccess = validation.success;
         if (validationSuccess) {
@@ -476,7 +538,7 @@ export class SelfHealingEngine {
               preTaskSourceGetter,
               changes: currentChanges,
               isBroadRepairTask: isBroad,
-              authorizedRevealedBaselinePaths,
+              authorizedRevealedBaselinePaths: provenRevealedBaselinePaths,
             }
           );
 
@@ -548,9 +610,9 @@ export class SelfHealingEngine {
           };
         }
 
-        // For BROAD BUILD REPAIR ONLY: Dynamically authorize proven revealed baseline compiler targets
+        // For broad build repair, discover deterministically proven candidate targets.
         const isBroad = BaselineDeltaVerifier.isBroadBuildRepairTask(originalMessage, executionContract);
-        if (isBroad && approvedManifest && localPath) {
+        if (isBroad && localPath) {
           for (const diag of parsedDiags) {
             if (!diag.file) continue;
             const cleanPath = diag.file.replace(/^\.\//, "").replace(/\\/g, "/");
@@ -580,36 +642,16 @@ export class SelfHealingEngine {
                   preTaskSourceGetter,
                   changes: currentChanges,
                   isBroadRepairTask: isBroad,
-                  authorizedRevealedBaselinePaths,
+                  authorizedRevealedBaselinePaths: provenRevealedBaselinePaths,
                 }
               );
 
               if ((causality.isPreExisting && !causality.isTouched) || causality.isAuthorizedRepairFollowup) {
                 const abs = path.join(localPath, cleanPath);
                 if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-                  // 1. Extend approved manifest
                   const normPath = normalizeRepoPath(cleanPath);
-                  if (!approvedManifest.files.some((f) => normalizeRepoPath(f.path) === normPath)) {
-                    approvedManifest.files.push({
-                      path: cleanPath,
-                      action: "modify",
-                      description: "Dynamically authorized revealed baseline diagnostic target",
-                      dependencies: [],
-                    });
-                    approvedManifest.totalFiles = approvedManifest.files.length;
-                  }
-
-                  // 2. Extend execution contract target paths and search scope
-                  if (executionContract) {
-                    if (!executionContract.targetPaths.some((p) => normalizeRepoPath(p) === normPath)) {
-                      executionContract.targetPaths.push(cleanPath);
-                    }
-                    if (!executionContract.searchScope.some((p) => normalizeRepoPath(p) === normPath)) {
-                      executionContract.searchScope.push(cleanPath);
-                    }
-                  }
-
-                  // 3. Hydrate on-disk content into currentChanges & snapshot into fsManager
+                  // Hydrate current disk reality as a candidate. The downstream
+                  // CapabilityGuard still independently authorizes any mutation.
                   if (!currentChanges.some((c) => normalizeRepoPath(c.path) === normPath)) {
                     try {
                       const currentDiskContent = fs.readFileSync(abs, "utf8");
@@ -625,27 +667,26 @@ export class SelfHealingEngine {
                     } catch {}
                   }
 
-                  // 4. Record authorization lineage for this repair run
-                  authorizedRevealedBaselinePaths.add(normPath);
+                  provenRevealedBaselinePaths.add(normPath);
 
                   if (causality.isAuthorizedRepairFollowup) {
                     console.log(
-                      `[REPAIR_FOLLOWUP] file=${cleanPath} diagnostic=${diag.code} symbol=${diag.symbolName} causedByAuthorizedRepair=true authorized=true`
+                      `[REPAIR_FOLLOWUP] file=${cleanPath} diagnostic=${diag.code} symbol=${diag.symbolName} causedByVerifiedRepair=true candidate=true capabilityPending=true`
                     );
                   } else {
                     console.log(
-                      `[REVEALED_SCOPE] file=${cleanPath} baselineSource=${sourceInfo.origin} classification=REVEALED_BASELINE authorized=true`
+                      `[REVEALED_SCOPE] file=${cleanPath} baselineSource=${sourceInfo.origin} classification=REVEALED_BASELINE candidate=true capabilityPending=true`
                     );
                   }
                 }
               } else {
                 console.log(
-                  `[REVEALED_SCOPE] file=${cleanPath} authorized=false reason=AGENT_TOUCHED_OR_REGRESSION`
+                  `[REVEALED_SCOPE] file=${cleanPath} candidate=false reason=AGENT_TOUCHED_OR_REGRESSION`
                 );
               }
             } else {
               console.log(
-                `[REVEALED_SCOPE] file=${cleanPath} authorized=false reason=NO_BASELINE_PROOF`
+                `[REVEALED_SCOPE] file=${cleanPath} candidate=false reason=NO_BASELINE_PROOF`
               );
             }
           }
@@ -657,8 +698,7 @@ export class SelfHealingEngine {
           const norm = normalizeRepoPath(diag.file);
           return (
             currentChanges.some((c) => normalizeRepoPath(c.path) === norm) ||
-            Boolean(approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm)) ||
-            authorizedRevealedBaselinePaths.has(norm)
+            provenRevealedBaselinePaths.has(norm)
           );
         };
 
@@ -729,7 +769,7 @@ export class SelfHealingEngine {
             }
           }
 
-          // 2. Hydrate any authorized diagnostic files from parsedDiags not already in currentChanges
+          // 2. Hydrate proven diagnostic candidates not already in currentChanges
           for (const diag of parsedDiags) {
             const rawPath = diag.file || (diag as any).filePath;
             if (!rawPath) continue;
@@ -738,10 +778,9 @@ export class SelfHealingEngine {
 
             if (seenPaths.has(norm)) continue;
 
-            const isApprovedInManifest = approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm);
-            const isAuthorizedRevealed = authorizedRevealedBaselinePaths.has(norm);
+            const isProvenRevealed = provenRevealedBaselinePaths.has(norm);
 
-            if (isApprovedInManifest || isAuthorizedRevealed) {
+            if (isProvenRevealed) {
               let currentContent: string | null = null;
               if (localPath) {
                 const abs = path.join(localPath, cleanPath);
@@ -758,7 +797,7 @@ export class SelfHealingEngine {
                   path: cleanPath,
                   content: currentContent,
                   action: "modify",
-                  description: "Hydrated authorized target for dependency repair",
+                  description: "Hydrated proven candidate for dependency repair",
                 });
               }
             }
@@ -769,9 +808,13 @@ export class SelfHealingEngine {
           let depChanges: AgentFileChange[] = [...currentChanges];
 
           try {
-            const openai = getOpenAI();
-            const depCompletion = await openai.chat.completions.create({
-              model: "gpt-4o",
+            const allowedDependencyPaths = new Set(
+              effectiveRepairContextChanges
+                .map((change) => normalizedSafeRepairPath(change.path))
+                .filter((value): value is string => Boolean(value)),
+            );
+            const depResult = await LLMGateway.getInstance().callStructured<DependencyRepairPayload>({
+              stage: PipelineStages.REPAIR,
               messages: [
                 {
                   role: "system",
@@ -783,22 +826,56 @@ export class SelfHealingEngine {
                 },
               ],
               temperature: 0.0,
-              response_format: { type: "json_object" },
+              schema: {
+                name: "MissingDependencyRepairSchema",
+                strict: true,
+                schema: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["changes"],
+                  properties: {
+                    changes: {
+                      type: "array",
+                      minItems: 1,
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        required: ["path", "content"],
+                        properties: {
+                          path: { type: "string", minLength: 1 },
+                          content: { type: "string", minLength: 1 },
+                        },
+                      },
+                    },
+                  },
+                },
+                validate: (value) => validateDependencyRepairPayload(value, allowedDependencyPaths),
+              },
             });
 
-            const parsed = JSON.parse(depCompletion.choices[0]?.message?.content || "{}");
-            if (Array.isArray(parsed.changes) && parsed.changes.length > 0) {
-              const importCheck = ImportValidator.validateChangesImports(parsed.changes, installedPackages);
-              const secCheck = SecurityPolicy.checkChanges(parsed.changes);
+            if (depResult.content.changes.length > 0) {
+              const appliedDepChanges: AgentFileChange[] = depResult.content.changes.map((change) => ({
+                path: change.path,
+                content: change.content,
+                action: "modify",
+                description: "Fix missing dependency",
+                editPrimitive: {
+                  type: "REPLACE_FILE",
+                  path: change.path,
+                  content: change.content,
+                  description: "Fix missing dependency",
+                  expectedSourceFingerprint: (() => {
+                    const source = effectiveRepairContextChanges.find(
+                      (candidate) => normalizeRepoPath(candidate.path) === normalizeRepoPath(change.path),
+                    )?.content;
+                    return source === undefined ? undefined : sha256(source);
+                  })(),
+                },
+              }));
+              const importCheck = ImportValidator.validateChangesImports(appliedDepChanges, installedPackages);
+              const secCheck = SecurityPolicy.checkChanges(appliedDepChanges);
 
               if (importCheck.valid && secCheck.safe) {
-                const appliedDepChanges: AgentFileChange[] = parsed.changes.map((c: any) => ({
-                  path: c.path,
-                  content: c.content || "",
-                  action: "modify" as const,
-                  description: "Fix missing dependency",
-                }));
-
                 const merged = [...currentChanges];
                 for (const change of appliedDepChanges) {
                   const norm = normalizeRepoPath(change.path);
@@ -818,7 +895,7 @@ export class SelfHealingEngine {
               }
             }
           } catch (e: any) {
-            console.warn("[SelfHealingEngine] Bounded missing dependency correction error:", e?.message);
+            throw e;
           }
 
           if (depCorrectionSucceeded && localPath && commands.length > 0) {
@@ -1064,8 +1141,7 @@ export class SelfHealingEngine {
         const norm = normalizeRepoPath(d.file);
         return (
           currentChanges.some((c) => normalizeRepoPath(c.path) === norm) ||
-          Boolean(approvedManifest?.files?.some((f) => normalizeRepoPath(f.path) === norm)) ||
-          authorizedRevealedBaselinePaths.has(norm)
+          provenRevealedBaselinePaths.has(norm)
         );
       };
       const authDiagnostics = rawDiagnostics.filter(isDiagAuthorized);
@@ -1083,27 +1159,6 @@ export class SelfHealingEngine {
           (c) => c.path.replace(/\\/g, "/").endsWith(ts6133AuthDiag.file) || ts6133AuthDiag.file.endsWith(c.path.replace(/\\/g, "/"))
         );
 
-        if (targetChangeIdx < 0 && localPath && approvedManifest) {
-          const manifestMatch = approvedManifest.files.find(
-            (f) => f.path.replace(/\\/g, "/").endsWith(ts6133AuthDiag.file) || ts6133AuthDiag.file.endsWith(f.path.replace(/\\/g, "/"))
-          );
-          if (manifestMatch) {
-            const abs = path.join(localPath, manifestMatch.path);
-            if (fs.existsSync(abs)) {
-              try {
-                const content = fs.readFileSync(abs, "utf8");
-                currentChanges.push({
-                  path: manifestMatch.path,
-                  content,
-                  action: manifestMatch.action as any,
-                  description: "Hydrated for TS6133 deterministic repair",
-                });
-                targetChangeIdx = currentChanges.length - 1;
-              } catch {}
-            }
-          }
-        }
-
         if (targetChangeIdx >= 0) {
           const originalFile = currentChanges[targetChangeIdx];
           const preTaskSource = preTaskSourceGetter(originalFile.path);
@@ -1117,9 +1172,26 @@ export class SelfHealingEngine {
           });
 
           if (deterministicPatch) {
-            const patchResult = applyPatchToFile(originalFile.content, [deterministicPatch]);
+            const sourceContent = originalFile.content;
+            const patchResult = applyPatchToFile(sourceContent, [deterministicPatch]);
             if (patchResult.success) {
               currentChanges[targetChangeIdx].content = patchResult.content;
+              currentChanges[targetChangeIdx].action = "modify";
+              const pendingIndex = pendingChanges.findIndex(
+                (change) => normalizeRepoPath(change.path) === normalizeRepoPath(originalFile.path),
+              );
+              const expectedSourceFingerprint = pendingIndex >= 0
+                ? pendingChanges[pendingIndex].editPrimitive?.expectedSourceFingerprint ?? sha256(sourceContent)
+                : sha256(sourceContent);
+              currentChanges[targetChangeIdx].editPrimitive = {
+                type: "REPLACE_FILE",
+                path: originalFile.path,
+                content: patchResult.content,
+                description: originalFile.description,
+                expectedSourceFingerprint,
+              };
+              if (pendingIndex >= 0) pendingChanges[pendingIndex] = currentChanges[targetChangeIdx];
+              else pendingChanges.push(currentChanges[targetChangeIdx]);
               const addedLines = deterministicPatch.newText ? deterministicPatch.newText.split("\n").length : 0;
               const removedLines = deterministicPatch.oldText ? deterministicPatch.oldText.split("\n").length : 0;
               patchesApplied.push({
@@ -1154,27 +1226,6 @@ export class SelfHealingEngine {
             (c) => c.path.replace(/\\/g, "/").endsWith(diag.file) || diag.file.endsWith(c.path.replace(/\\/g, "/")),
           );
 
-          if (targetChangeIdx < 0 && localPath && approvedManifest) {
-            const manifestMatch = approvedManifest.files.find(
-              (f) => f.path.replace(/\\/g, "/").endsWith(diag.file) || diag.file.endsWith(f.path.replace(/\\/g, "/")),
-            );
-            if (manifestMatch) {
-              const abs = path.join(localPath, manifestMatch.path);
-              if (fs.existsSync(abs)) {
-                try {
-                  const content = fs.readFileSync(abs, "utf8");
-                  currentChanges.push({
-                    path: manifestMatch.path,
-                    content,
-                    action: manifestMatch.action as any,
-                    description: "Hydrated for surgical repair",
-                  });
-                  targetChangeIdx = currentChanges.length - 1;
-                } catch {}
-              }
-            }
-          }
-
           if (targetChangeIdx >= 0) {
             const originalFile = currentChanges[targetChangeIdx];
             totalFileLines = originalFile.content.split("\n").length;
@@ -1182,8 +1233,25 @@ export class SelfHealingEngine {
             const minPatch = SurgicalPatchEngine.generateMinimalPatch(originalFile.content, originalFile.path, diag);
 
             if (minPatch.replacementContent !== minPatch.targetContent) {
-              const res = SurgicalPatchEngine.applyPatch(originalFile.content, minPatch);
+              const sourceContent = originalFile.content;
+              const res = SurgicalPatchEngine.applyPatch(sourceContent, minPatch);
               currentChanges[targetChangeIdx].content = res.newContent;
+              currentChanges[targetChangeIdx].action = "modify";
+              const pendingIndex = pendingChanges.findIndex(
+                (change) => normalizeRepoPath(change.path) === normalizeRepoPath(originalFile.path),
+              );
+              const expectedSourceFingerprint = pendingIndex >= 0
+                ? pendingChanges[pendingIndex].editPrimitive?.expectedSourceFingerprint ?? sha256(sourceContent)
+                : sha256(sourceContent);
+              currentChanges[targetChangeIdx].editPrimitive = {
+                type: "REPLACE_FILE",
+                path: originalFile.path,
+                content: res.newContent,
+                description: originalFile.description,
+                expectedSourceFingerprint,
+              };
+              if (pendingIndex >= 0) pendingChanges[pendingIndex] = currentChanges[targetChangeIdx];
+              else pendingChanges.push(currentChanges[targetChangeIdx]);
               patchesApplied.push(minPatch);
               patchesAppliedCount++;
               totalLinesChanged += res.linesChanged;
@@ -1205,9 +1273,7 @@ export class SelfHealingEngine {
         // Read CURRENT live worktree file contents directly from disk
         const currentFileContext: Record<string, string> = {};
         if (localPath) {
-          const pathsToRead = approvedManifest
-            ? approvedManifest.files.map((f) => f.path)
-            : currentChanges.map((c) => c.path);
+          const pathsToRead = Array.from(new Set(currentChanges.map((c) => c.path)));
 
           for (const relPath of pathsToRead) {
             const abs = path.join(localPath, relPath);
@@ -1224,7 +1290,6 @@ export class SelfHealingEngine {
         }
 
         modelRepairAttempts++;
-        const openai = getOpenAI();
         const prompt = buildSelfHealingRepairPrompt({
           errorLog: previousErrors,
           diagnostics,
@@ -1238,22 +1303,66 @@ export class SelfHealingEngine {
           localPath,
         });
 
-        const repairCompletion = await openai.chat.completions.create({
-          model: "gpt-4o",
+        const allowedRepairPaths = new Set(
+          Object.keys(currentFileContext)
+            .map((repairPath) => normalizedSafeRepairPath(repairPath))
+            .filter((value): value is string => Boolean(value)),
+        );
+        const repairResult = await LLMGateway.getInstance().callStructured<ModelRepairPayload>({
+          stage: PipelineStages.REPAIR,
           messages: [
             { role: "system", content: prompt.system },
             { role: "user", content: prompt.user },
           ],
           temperature: 0.1,
-          max_tokens: 8000,
-          response_format: { type: "json_object" },
+          maxTokens: 8000,
+          schema: {
+            name: "SelfHealingRepairProposalSchema",
+            strict: false,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["changes"],
+              properties: {
+                repaired: { type: "boolean" },
+                patchExplanation: { type: "string" },
+                changes: {
+                  type: "array",
+                  minItems: 1,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["path", "action", "description"],
+                    properties: {
+                      path: { type: "string", minLength: 1 },
+                      action: { type: "string", enum: ["create", "modify", "delete"] },
+                      description: { type: "string", minLength: 1 },
+                      content: { type: "string" },
+                      isDeleted: { type: "boolean" },
+                      edits: {
+                        type: "array",
+                        minItems: 1,
+                        items: {
+                          type: "object",
+                          additionalProperties: false,
+                          required: ["oldText", "newText"],
+                          properties: {
+                            oldText: { type: "string", minLength: 1 },
+                            newText: { type: "string" },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            validate: (value) => validateModelRepairPayload(value, allowedRepairPaths),
+          },
         });
 
         try {
-          const repairParsed = JSON.parse(repairCompletion.choices[0]?.message?.content || "{}");
-          const proposals: RepairChangeProposal[] = Array.isArray(repairParsed.changes)
-            ? repairParsed.changes
-            : [];
+          const proposals = repairResult.content.changes;
 
           if (proposals.length > 0) {
             // Emergency Breaker 4: Proposal fingerprint check (Part H)
@@ -1296,17 +1405,9 @@ export class SelfHealingEngine {
             previousProposalFingerprint = proposalFingerprint;
 
             if (isRepositoryMode || approvedManifest) {
-              const manifestPrecheck = validateRepairManifestScope(proposals, approvedManifest);
-              if (!manifestPrecheck.valid) {
-                previousErrors = `[${manifestPrecheck.error.code}] ${manifestPrecheck.error.message}`;
-                lastErrorType = manifestPrecheck.error.code;
-                repairAttemptsHistory.push({
-                  attempt,
-                  proposalResult: "SCOPE_REJECTED",
-                  patchResult: `[${manifestPrecheck.error.code}] ${manifestPrecheck.error.message}`,
-                  validationResult: "UNRESOLVED",
-                });
-                continue;
+              const manifestAudit = auditRepairManifestPlan(proposals, approvedManifest);
+              if (!manifestAudit.valid) {
+                console.info(`[MANIFEST_AUDIT] ${manifestAudit.error.code}: ${manifestAudit.error.message}`);
               }
 
               let resolution = resolveRepairProposals(proposals, currentFileContext);
@@ -1547,6 +1648,7 @@ export class SelfHealingEngine {
                 }
               }
               currentChanges = merged;
+              pendingChanges = [...resolution.changes];
               repairApplied = true;
               appliedPatchesInPrevCycle = true;
               patchesAppliedCount += resolution.changes.length;
@@ -1560,6 +1662,7 @@ export class SelfHealingEngine {
             } else {
               // Standalone fallback
               const legacyProposals = proposals as any[];
+              const priorChanges = [...currentChanges];
               const repairMap = new Map<string, AgentFileChange>(
                 legacyProposals.map((c: AgentFileChange) => [c.path, c]),
               );
@@ -1568,6 +1671,25 @@ export class SelfHealingEngine {
                 if (!merged.find((m) => m.path === p)) merged.push(c as AgentFileChange);
               }
               currentChanges = merged;
+              pendingChanges = legacyProposals.map((proposal: AgentFileChange) => {
+                const previous = priorChanges.find((change) => normalizeRepoPath(change.path) === normalizeRepoPath(proposal.path));
+                const action = proposal.action ?? previous?.action ?? "modify";
+                return {
+                  ...proposal,
+                  action,
+                  editPrimitive: action === "create"
+                    ? { type: "CREATE_FILE" as const, path: proposal.path, content: proposal.content, description: proposal.description }
+                    : action === "delete"
+                      ? { type: "DELETE_FILE" as const, path: proposal.path, description: proposal.description }
+                      : {
+                          type: "REPLACE_FILE" as const,
+                          path: proposal.path,
+                          content: proposal.content,
+                          description: proposal.description,
+                          expectedSourceFingerprint: previous ? sha256(previous.content) : undefined,
+                        },
+                };
+              });
               repairApplied = true;
               appliedPatchesInPrevCycle = true;
               patchesAppliedCount += legacyProposals.length;

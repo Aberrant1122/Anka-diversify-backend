@@ -15,17 +15,18 @@ import { SecurityAuditor } from "../review/SecurityAuditor";
 import { ValidationDetector } from "../validation/ValidationDetector";
 import { ChatRequest } from "../shared/types";
 import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
+import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
 
 // Mock PrismaClient to prevent DB connection attempts
 jest.mock("@prisma/client", () => {
   return {
     PrismaClient: jest.fn().mockImplementation(() => ({
       project: {
-        findUnique: jest.fn().mockResolvedValue({
-          localPath: "/tmp/mock",
+        findUnique: jest.fn().mockImplementation(() => ({
+          localPath: (global as any).__phase2bTempDir || "/tmp/mock",
           githubUrl: "https://github.com/mock/mock",
           githubToken: "mock-token",
-        }),
+        })),
       },
       phaseArtifact: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -45,8 +46,10 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
   const originalApiKey = process.env.OPENAI_API_KEY;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     process.env.OPENAI_API_KEY = "test-mock-api-key";
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "phase2b-pipeline-test-"));
+    (global as any).__phase2bTempDir = tempDir;
     const srcDir = path.join(tempDir, "src");
     fs.mkdirSync(srcDir, { recursive: true });
     fs.writeFileSync(path.join(srcDir, "App.tsx"), "import React from 'react'; export const App = () => <div>App</div>;", "utf8");
@@ -122,6 +125,20 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
     sessionId: "sess-p2b",
   };
 
+  function getAuthorizedScope() {
+    return AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "phase2b-evidence-pipeline",
+      grants: [
+        { path: "src/Button.tsx", action: "FILE_MODIFY" },
+        { path: "src/components/Header.tsx", action: "FILE_CREATE" },
+        { path: "src/App.tsx", action: "FILE_MODIFY" },
+        { path: "src/Dashboard.tsx", action: "FILE_MODIFY" },
+        { path: "src/components/OrphanWidget.tsx", action: "FILE_CREATE" },
+      ],
+    })!;
+  }
+
   test("A. Unrelated semantic candidate rejection in full pipeline flow", async () => {
     // Investigation only finds FILE evidence via SEMANTIC_SEARCH for unrelated Dashboard.tsx
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
@@ -181,12 +198,12 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     const codeGenSpy = jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs");
 
-    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq);
+    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Resolver MUST reject unrelated Dashboard because FILE existence alone without structural/task relation does not authorize MODIFY
     // Final targetPaths becomes [] -> pipeline immediately fails closed with [Manifest Validation Failed]
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toContain("[Manifest Validation Failed]");
+    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
     expect(codeGenSpy).not.toHaveBeenCalled();
   });
 
@@ -239,11 +256,11 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     const codeGenSpy = jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs");
 
-    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq);
+    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Orphan CREATE citing only ENTRY_POINT without importer or standalone proof MUST be rejected
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toContain("[Manifest Validation Failed]");
+    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
     expect(codeGenSpy).not.toHaveBeenCalled();
   });
 
@@ -317,7 +334,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
 
-    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq);
+    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Resolver approves Button.tsx -> ManifestValidator succeeds -> CodeGenerator called
     expect(codeGenSpy).toHaveBeenCalled();
@@ -410,7 +427,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
 
-    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq);
+    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Both Header.tsx and App.tsx should be approved and generated
     expect(codeGenSpy).toHaveBeenCalled();
@@ -466,11 +483,11 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
       };
     });
 
-    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq);
+    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Rejection guarantees zero changes applied and strict failure explanation
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toContain("[Manifest Validation Failed]");
+    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
   });
 
   test("F. searchPlanHistory is populated with real tool execution records", async () => {
@@ -483,6 +500,12 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         filePath: "src/App.tsx",
         provenance: "REPO_READ",
         metadata: { details: "File read" },
+      });
+      const evi2 = store.addEvidence({
+        kind: "REFERENCE",
+        filePath: "src/App.tsx",
+        provenance: "AST_GRAPH",
+        metadata: { details: "App symbol is the active feature integration point" },
       });
 
       const historyRecords = [
@@ -500,7 +523,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
           tool: "repo_findSymbols",
           argsSummary: "query='App'",
           resultSummary: "Symbol App at src/App.tsx:1",
-          evidenceIdsAdded: [],
+          evidenceIdsAdded: [evi2.id],
           decision: "Next read App.tsx",
           readyToPlan: false,
         },
@@ -534,22 +557,38 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
       } as any;
     });
 
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-      files: [],
-      totalFiles: 0,
-      manifestVersion: "1.0.0",
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (_msg: string, ctx: any) => {
+      const store: RepositoryEvidenceStore = ctx.evidenceStore;
+      return {
+        files: [{
+          path: "src/App.tsx",
+          action: "modify" as const,
+          dependencies: [],
+          description: "Apply the investigated feature update at the verified integration point",
+          evidenceIds: store.getEvidenceForFile("src/App.tsx").map((e) => e.id),
+        }],
+        totalFiles: 1,
+        manifestVersion: "1.0.0",
+      };
     });
 
     jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
       roadmap: [],
-      changes: [],
-      explanation: "Done",
-      commitMessage: "test",
+      changes: [{
+        path: "src/App.tsx",
+        content: "import React from 'react'; export const App = () => <main>Feature updated</main>;",
+        description: "Update the verified App integration point",
+        action: "modify",
+      }],
+      explanation: "Applied the evidence-backed App update",
+      commitMessage: "feat: update app integration point",
       validationCommands: [],
     });
 
+    jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
+
     // Run the pipeline agent so RepositorySearch is executed
-    await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq);
+    await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Check captured history properties
     expect(capturedSearchHistory).toHaveLength(3);

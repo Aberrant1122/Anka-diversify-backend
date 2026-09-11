@@ -1,5 +1,6 @@
 import { AgentFileChange, ExecutionContract, FileManifest } from "../../types";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
+import { auditManifestPlan, ManifestPlanningObservation } from "../manifest/ManifestAudit";
 
 export type ScopeViolationReason =
   | "UNDECLARED_FILE"
@@ -29,6 +30,8 @@ export interface ExecutionScopeEnforcerParams {
 export interface ExecutionScopeEnforcerResult {
   valid: boolean;
   errors: ScopeViolation[];
+  /** Non-authoritative comparison retained solely for planning audit/provenance. */
+  manifestObservations: ManifestPlanningObservation[];
 }
 
 /**
@@ -49,10 +52,9 @@ export function resolveEffectiveAction(
 }
 
 /**
- * Pure deterministic gate enforcing that generated file changes strictly adhere to:
- * 1. Approved FileManifest (declared paths and actions: create | modify | delete).
- * 2. Actual repository state (cannot create existing, cannot modify/delete missing).
- * 3. ExecutionContract bounds (maxFiles, targetPaths) without broad-task bypass.
+ * Pure deterministic gate enforcing actual repository state and the trusted
+ * execution contract. Manifest differences are returned as non-authoritative
+ * audit observations and never affect `valid`.
  */
 export function enforceExecutionScope(
   params: ExecutionScopeEnforcerParams
@@ -62,7 +64,7 @@ export function enforceExecutionScope(
   const errors: ScopeViolation[] = [];
 
   if (!Array.isArray(proposedChanges) || proposedChanges.length === 0) {
-    return { valid: true, errors: [] };
+    return { valid: true, errors: [], manifestObservations: [] };
   }
 
   // 1. Max Files Check (defense in depth)
@@ -88,20 +90,6 @@ export function enforceExecutionScope(
     }
   }
 
-  // Build normalized manifest lookup
-  const manifestLookup = new Map<
-    string,
-    { path: string; action: "create" | "modify" | "delete" }
-  >();
-  if (manifest && Array.isArray(manifest.files)) {
-    for (const fileDecl of manifest.files) {
-      if (fileDecl && typeof fileDecl.path === "string") {
-        const norm = normalizeRepoPath(fileDecl.path);
-        manifestLookup.set(norm, fileDecl);
-      }
-    }
-  }
-
   // Target paths check helper
   const targetPaths = (contract?.targetPaths || []).map(normalizeRepoPath).filter(Boolean);
 
@@ -112,39 +100,7 @@ export function enforceExecutionScope(
     const exists = existingSet.has(normPath);
     const effectiveAction = resolveEffectiveAction(change, exists);
 
-    // Rule 1: Manifest Declaration Check (Primary Authority)
-    if (manifest && Array.isArray(manifest.files)) {
-      const decl = manifestLookup.get(normPath);
-      if (!decl) {
-        errors.push({
-          path: change.path,
-          reason: "UNDECLARED_FILE",
-          message: `File "${normPath}" was generated but not declared in the approved manifest.`,
-          actualAction: effectiveAction,
-        });
-      } else if (isRepair) {
-        // In repair mode, any manifest-declared file can be repaired (modified/re-created), unless declared for deletion
-        if (decl.action === "delete" && effectiveAction !== "delete") {
-          errors.push({
-            path: change.path,
-            reason: "ACTION_MISMATCH",
-            message: `File "${normPath}" was declared for deletion in the manifest, but repair attempted "${effectiveAction}".`,
-            expectedAction: "delete",
-            actualAction: effectiveAction,
-          });
-        }
-      } else if (decl.action !== effectiveAction) {
-        errors.push({
-          path: change.path,
-          reason: "ACTION_MISMATCH",
-          message: `File "${normPath}" was declared in manifest with action "${decl.action}", but generated change attempted action "${effectiveAction}".`,
-          expectedAction: decl.action,
-          actualAction: effectiveAction,
-        });
-      }
-    }
-
-    // Rule 2: Actual Repository State Verification
+    // Rule 1: Actual Repository State Verification
     if (!isRepair) {
       if (effectiveAction === "create" && exists) {
         errors.push({
@@ -169,9 +125,8 @@ export function enforceExecutionScope(
         });
       }
     } else {
-      // In repair mode: files created in initial generation or existing on disk can be modified.
-      // Only forbid modifying a file that doesn't exist and wasn't in the manifest.
-      if (effectiveAction === "modify" && !exists && !manifestLookup.has(normPath)) {
+      // Repair inputs must still be materialized in the supplied current-state view.
+      if (effectiveAction === "modify" && !exists) {
         errors.push({
           path: change.path,
           reason: "MODIFY_FILE_NOT_FOUND",
@@ -181,7 +136,7 @@ export function enforceExecutionScope(
       }
     }
 
-    // Rule 3: Contract Target Paths Defense-in-Depth
+    // Rule 2: Contract Target Paths Defense-in-Depth
     if (targetPaths.length > 0) {
       const inTargetPath = targetPaths.some(
         (tp) => normPath === tp || normPath.startsWith(`${tp}/`) || normPath.startsWith(tp)
@@ -190,7 +145,7 @@ export function enforceExecutionScope(
         errors.push({
           path: change.path,
           reason: "TARGET_PATH_VIOLATION",
-          message: `File "${normPath}" is outside the authorized contract targetPaths [${targetPaths.join(", ")}].`,
+          message: `File "${normPath}" is outside contract targetPaths [${targetPaths.join(", ")}].`,
           actualAction: effectiveAction,
         });
       }
@@ -200,5 +155,10 @@ export function enforceExecutionScope(
   return {
     valid: errors.length === 0,
     errors,
+    manifestObservations: auditManifestPlan(
+      proposedChanges,
+      manifest,
+      (change) => resolveEffectiveAction(change, existingSet.has(normalizeRepoPath(change.path))),
+    ),
   };
 }

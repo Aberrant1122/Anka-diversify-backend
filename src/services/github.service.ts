@@ -76,45 +76,6 @@ async function fetchGitHub(path: string, token?: string): Promise<unknown> {
   return res.json();
 }
 
-async function writeGitHub(path: string, body: unknown, token?: string): Promise<unknown> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: "PUT",
-    headers: { ...githubHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub API ${res.status}: ${path} — ${text}`);
-  }
-  return res.json();
-}
-
-async function postGitHub(path: string, body: unknown, token?: string): Promise<unknown> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: "POST",
-    headers: { ...githubHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub API ${res.status}: ${path} — ${text}`);
-  }
-  return res.json();
-}
-
-async function patchGitHub(path: string, body: unknown, token?: string): Promise<unknown> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: "PATCH",
-    headers: { ...githubHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub API ${res.status}: ${path} — ${text}`);
-  }
-  return res.json();
-}
-
 function shouldSkip(filePath: string): boolean {
   const lower = filePath.toLowerCase();
   if (SKIP_DIRS.some((d) => lower.startsWith(`${d}/`) || lower.includes(`/${d}/`))) return true;
@@ -274,81 +235,12 @@ export class ProjectGitHubService {
     token?: string,
     branch?: string,
   ): Promise<{ sha: string; url: string }> {
-    const parsed = parseGithubUrl(githubUrl);
-    if (!parsed) throw new Error("Invalid GitHub URL");
-    const { owner, repo } = parsed;
-
-    // 1. Get the latest commit SHA on the branch, if it exists yet.
-    // A freshly created, empty repo has no commits — GitHub returns 409 for
-    // the ref lookup in that case — so this becomes the repo's first commit.
-    const repoData = await fetchGitHub(`/repos/${owner}/${repo}`, token) as any;
-    const defaultBranch = branch || repoData.default_branch || "main";
-
-    let latestCommitSha: string | null = null;
-    let baseTreeSha: string | undefined;
-    try {
-      const refData = await fetchGitHub(`/repos/${owner}/${repo}/git/ref/heads/${defaultBranch}`, token) as any;
-      latestCommitSha = refData.object.sha;
-      const commitData = await fetchGitHub(`/repos/${owner}/${repo}/git/commits/${latestCommitSha}`, token) as any;
-      baseTreeSha = commitData.tree.sha;
-    } catch (err) {
-      if (!(err instanceof Error && err.message.includes("409"))) throw err;
-    }
-
-    // The Git Data API (blobs/trees/commits) needs at least one commit to
-    // already exist — a truly empty repo has no git object database yet, so
-    // even blob creation 409s. Initialize it via the Contents API instead;
-    // the first PUT creates the branch and the repo's initial commit.
-    if (!latestCommitSha) {
-      let lastSha = "";
-      for (const { path, content } of changes) {
-        const result = await writeGitHub(`/repos/${owner}/${repo}/contents/${path}`, {
-          message: commitMessage,
-          content: Buffer.from(content).toString("base64"),
-          branch: defaultBranch,
-        }, token) as any;
-        lastSha = result.commit.sha;
-      }
-      return {
-        sha: lastSha,
-        url: `https://github.com/${owner}/${repo}/commit/${lastSha}`,
-      };
-    }
-
-    // 2. Create blobs for each changed file
-    const treeItems = await Promise.all(
-      changes.map(async ({ path, content }) => {
-        const blob = await postGitHub(`/repos/${owner}/${repo}/git/blobs`, {
-          content: Buffer.from(content).toString("base64"),
-          encoding: "base64",
-        }, token) as any;
-        return { path, mode: "100644", type: "blob", sha: blob.sha };
-      })
-    );
-
-    // 3. Create a new tree on top of the base tree
-    const newTree = await postGitHub(`/repos/${owner}/${repo}/git/trees`, {
-      base_tree: baseTreeSha,
-      tree: treeItems,
-    }, token) as any;
-
-    // 4. Create the commit
-    const newCommit = await postGitHub(`/repos/${owner}/${repo}/git/commits`, {
-      message: commitMessage,
-      tree: newTree.sha,
-      parents: [latestCommitSha],
-    }, token) as any;
-
-    // 5. Update the branch ref
-    await patchGitHub(`/repos/${owner}/${repo}/git/refs/heads/${defaultBranch}`, {
-      sha: newCommit.sha,
-      force: false,
-    }, token);
-
-    return {
-      sha: newCommit.sha,
-      url: `https://github.com/${owner}/${repo}/commit/${newCommit.sha}`,
-    };
+    void githubUrl;
+    void changes;
+    void commitMessage;
+    void token;
+    void branch;
+    throw new Error("GIT_WORKFLOW_REQUIRED: Commits must be created from verified isolated-worktree disk reality.");
   }
 
   static async listCommits(githubUrl: string, branch?: string, token?: string): Promise<GitCommitItem[]> {

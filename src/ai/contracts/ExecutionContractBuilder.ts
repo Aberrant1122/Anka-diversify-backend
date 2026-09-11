@@ -1,5 +1,6 @@
 import path from "path";
 import { ExecutionContract, TaskClassificationResult, TaskType } from "../shared/types";
+import { FileActionObligation } from "../shared/TaskExecutionPlan";
 import { routeTask } from "../../services/task-router.engine";
 import { TargetPathExtractor } from "./TargetPathExtractor";
 import { TargetScopeExpander } from "./TargetScopeExpander";
@@ -436,15 +437,16 @@ export function buildPolicyContract(
 }
 
 /**
- * Builds the final ExecutionContract strictly bound to the authorized write paths
- * resolved by EvidenceBoundWriteSetResolver.
+ * Builds an execution-planning contract from policy and deterministically
+ * grounded candidate paths. CapabilityGuard remains mutation authority.
  */
 export function buildFinalExecutionContract(
   policy: PolicyContract,
-  authorizedTargetPaths: string[],
-  repoFileNames: string[] = []
+  plannedTargetPaths: string[],
+  repoFileNames: string[] = [],
+  actionObligations?: FileActionObligation[]
 ): ExecutionContract {
-  const searchScope = authorizedTargetPaths
+  const searchScope = plannedTargetPaths
     .map((tp) => {
       if (/\.[\w]+$/.test(tp)) {
         const dir = path.dirname(tp);
@@ -454,10 +456,10 @@ export function buildFinalExecutionContract(
     })
     .filter(Boolean);
 
-  const contextScope = resolveContextScope(policy.taskType, authorizedTargetPaths, repoFileNames);
+  const contextScope = resolveContextScope(policy.taskType, plannedTargetPaths, repoFileNames);
   const targetProvenance: Record<string, string> = {};
-  for (const tp of authorizedTargetPaths) {
-    targetProvenance[tp] = "EVIDENCE_BOUND_AUTHORITY";
+  for (const tp of plannedTargetPaths) {
+    targetProvenance[tp] = "EVIDENCE_BOUND_PLAN";
   }
 
   return {
@@ -470,7 +472,7 @@ export function buildFinalExecutionContract(
     repositoryRequired: policy.repositoryRequired,
     expectedFiles: policy.expectedFiles,
     validationType: policy.validationType,
-    targetPaths: authorizedTargetPaths,
+    targetPaths: plannedTargetPaths,
     contextScope,
     searchScope,
     allowedActions: policy.allowedActions,
@@ -478,5 +480,6 @@ export function buildFinalExecutionContract(
     maxFiles: policy.maxFiles,
     diffCriticEnabled: policy.diffCriticEnabled,
     targetProvenance,
+    actionObligations,
   };
 }

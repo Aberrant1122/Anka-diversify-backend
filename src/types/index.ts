@@ -1,4 +1,6 @@
-import { TaskExecutionPlan } from "../ai/shared/TaskExecutionPlan";
+import { TaskExecutionPlan, FileActionObligation } from "../ai/shared/TaskExecutionPlan";
+import type { TaskRuntimeSnapshot } from "../ai/runtime/TaskRuntime";
+export { FileActionObligation };
 
 export interface User {
   id: string;
@@ -166,7 +168,7 @@ export interface PRReview {
 }
 
 export interface AIAction {
-  type: 'project_created' | 'document_proposed' | 'document_saved';
+  type: 'project_proposed' | 'project_created' | 'document_proposed' | 'document_saved';
   data: Record<string, unknown>;
 }
 
@@ -334,7 +336,39 @@ export interface AgentFileChange {
   // Which ProjectRepository this change targets, for multi-repo coordinated changes.
   // Undefined = the project's primary/legacy repo (unchanged single-repo behavior).
   repositoryId?: string;
+  /**
+   * Deterministic mutation instruction consumed only by the guarded filesystem
+   * boundary. Planning/model output cannot execute this instruction directly.
+   */
+  editPrimitive?: FileEditingPrimitive;
 }
+
+export interface FileEditBase {
+  path: string;
+  description: string;
+  expectedSourceFingerprint?: string;
+}
+
+export type FileEditingPrimitive =
+  | (FileEditBase & { type: "CREATE_FILE"; content: string })
+  | (FileEditBase & { type: "REPLACE_FILE"; content: string })
+  | (FileEditBase & { type: "DELETE_FILE" })
+  | (FileEditBase & {
+      type: "EXACT_REPLACE";
+      oldText: string;
+      newText: string;
+      expectedOccurrenceCount?: number;
+    })
+  | (FileEditBase & {
+      type: "INSERT_BEFORE" | "INSERT_AFTER";
+      anchor: string;
+      content: string;
+      expectedOccurrenceCount?: number;
+    })
+  | (FileEditBase & {
+      type: "PATCH_HUNK";
+      edits: ReadonlyArray<{ readonly oldText: string; readonly newText: string }>;
+    });
 
 export interface RoadmapStep {
   phase: number;
@@ -385,6 +419,8 @@ export interface TaskClassificationResult {
     targetPath?: string;
     dependsOn?: string[];
   }>;
+  outcome?: "SUCCESS" | "CLARIFICATION_NEEDED" | "TECHNICAL_FAILURE" | "POLICY_BLOCKED" | "BUDGET_EXHAUSTED";
+  technicalError?: Error;
 }
 
 export type PipelineMode =
@@ -448,8 +484,10 @@ export interface ExecutionContract {
   contextScope: string[];
   /** Whether the Diff Critic stage should run */
   diffCriticEnabled: boolean;
-  /** Authority provenance mapping: why each path in targetPaths is authorized */
+  /** Planning provenance mapping; this does not grant a filesystem capability. */
   targetProvenance?: Record<string, string>;
+  /** Deterministic file action obligations (create / modify / delete) */
+  actionObligations?: FileActionObligation[];
 }
 
 
@@ -483,7 +521,7 @@ export interface AgentResponse {
   reason?: string;
   status?: string;
   verificationChecklist?: ChecklistItem[];
-  lifecycleStage?: "Done" | "BuildFailed" | "ManifestValidationFailed" | "WriteAuthorityRejected" | "InsufficientRepositoryEvidence" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
+  lifecycleStage?: "Done" | "BuildFailed" | "ManifestValidationFailed" | "WriteAuthorityRejected" | "InsufficientRepositoryEvidence" | "ManifestActionMismatch" | "CodegenManifestActionViolation" | "TargetAmbiguous" | "Verify" | "Run App" | "Wire Everything" | "Generate Files" | "Determine Completion" | "Understand Goal" | "Task";
   errorCode?: string;
   pipelineMeasurementText?: string;
   patchCorrectionAttempted?: boolean;
@@ -496,6 +534,13 @@ export interface AgentResponse {
   failedStage?: string;
   dependentStagesSkipped?: string[];
   checkpointId?: string;
+  actionGroupId?: string;
+  checkpointJournal?: ReadonlyArray<{
+    journalId: string;
+    sequence: number;
+    actionGroupId: string;
+    status: "VERIFIED" | "ROLLED_BACK";
+  }>;
   baseCommitSha?: string;
   validationCommands?: string[];
   dependencyPreparationAttempted?: boolean;
@@ -538,6 +583,50 @@ export interface AgentResponse {
   patchesAppliedCount?: number;
   buildAttemptsCount?: number;
   visualVerification?: VisualVerificationResult;
+  taskRuntime?: TaskRuntimeSnapshot;
+  gitShipping?: {
+    readonly baseRevision: string;
+    readonly taskHeadRevision: string;
+    readonly finalVerifiedRevision: string;
+    readonly taskBranch: string;
+    readonly commitCreated: boolean;
+    readonly commitSha?: string;
+    readonly changedPaths: readonly string[];
+    readonly remote?: string;
+    readonly pushed: boolean;
+    readonly provider?: "GITHUB" | "GITLAB";
+    readonly reviewId?: string;
+    readonly reviewUrl?: string;
+    readonly ciStatus: "NOT_REQUESTED" | "PENDING" | "PASSED" | "FAILED" | "UNKNOWN";
+  };
+  agentLoop?: {
+    outcome: "AWAITING_COMPLETION_EVALUATION" | "CLARIFICATION_REQUIRED" | "TECHNICAL_FAILURE" | "AUTHORIZATION_DENIED" | "VALIDATION_FAILURE" | "BUDGET_EXHAUSTED" | "MAX_ITERATIONS_REACHED";
+    iterations: number;
+    workingPlanId: string;
+    workingPlanRevision: number;
+    verifiedCheckpointIds: readonly string[];
+    failureCode?: string;
+  };
+  completionEvaluation?: {
+    outcome: "COMPLETE" | "INCOMPLETE" | "BLOCKED" | "CLARIFICATION_REQUIRED" | "TECHNICAL_FAILURE";
+    code: string;
+    category?: string;
+    message?: string;
+    question?: string;
+    reason?: string;
+    satisfiedRequirementIds?: readonly string[];
+  };
+  manifestAudit?: {
+    role: "PLANNING_AUDIT";
+    requestedFiles: readonly { path: string; action: "create" | "modify" | "delete"; description?: string }[];
+    observations: readonly {
+      path: string;
+      reason: "UNPLANNED_PATH" | "PLANNED_ACTION_DIFFERED";
+      message: string;
+      plannedAction?: "create" | "modify" | "delete";
+      actualAction: "create" | "modify" | "delete";
+    }[];
+  };
 }
 
 export interface BaselineDiagnostic {

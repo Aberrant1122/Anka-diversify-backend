@@ -3,6 +3,7 @@ import path from "path";
 import crypto from "crypto";
 import OpenAI from "openai";
 import { WasmASTParserEngine } from "./ast-parser.engine";
+import { EmbeddingGateway } from "../ai/gateway/EmbeddingGateway";
 
 // ─── Interfaces & Types ───────────────────────────────────────────────────────
 
@@ -264,21 +265,20 @@ export class OpenAIEmbeddingProvider implements IEmbeddingProvider {
   }
 
   async embedQuery(text: string): Promise<number[]> {
-    const res = await this.client.embeddings.create({
+    const res = await EmbeddingGateway.getInstance().embedQuery(text, {
       model: "text-embedding-3-small",
-      input: text.slice(0, 8000),
+      openaiClient: this.client,
     });
-    return res.data[0]?.embedding || new Array(this.dimension).fill(0);
+    return res.data;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
     if (!texts.length) return [];
-    const sliced = texts.map((t) => t.slice(0, 8000));
-    const res = await this.client.embeddings.create({
+    const res = await EmbeddingGateway.getInstance().embedBatch(texts, {
       model: "text-embedding-3-small",
-      input: sliced,
+      openaiClient: this.client,
     });
-    return res.data.map((d) => d.embedding);
+    return res.data;
   }
 }
 

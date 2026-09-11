@@ -98,10 +98,10 @@ describe("Compound Task Execution Plan & Clarification Sequencing (Pass 1)", () 
     expect(reorderedPlan.stages[0].intent.taskType).toBe("BUG_FIX");
     expect(reorderedPlan.stages[0].dependsOn).toEqual([]);
 
-    // Stage 2 must be CREATE / NEW_FEATURE and depend on Stage 1
+    // Stage 2 must remain CREATE / NEW_FEATURE without inventing a new dependency edge.
     expect(reorderedPlan.stages[1].id).toBe("stage-feat");
     expect(reorderedPlan.stages[1].intent.taskType).toBe("NEW_FEATURE");
-    expect(reorderedPlan.stages[1].dependsOn).toEqual(["stage-fix"]);
+    expect(reorderedPlan.stages[1].dependsOn).toEqual([]);
     expect(reorderedPlan.stages[1].status).toBe("PENDING");
   });
 

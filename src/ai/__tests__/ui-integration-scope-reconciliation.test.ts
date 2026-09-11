@@ -37,7 +37,7 @@ describe("Cross-Cutting UI Feature Scope Reconciliation Regression Suite", () =>
   };
 
   // TEST 1 — dark mode style feature
-  test("TEST 1: Dark mode style feature authorizes App.tsx and components.css", () => {
+  test("TEST 1: Dark mode manifest cannot widen a locally sufficient explicit target", () => {
     const contract = { ...defaultBaseContract, targetPaths: ["src/components/ui/Button/Button.tsx"] };
     const snapshotFiles = [
       {
@@ -67,17 +67,14 @@ describe("Cross-Cutting UI Feature Scope Reconciliation Regression Suite", () =>
       snapshotFiles,
     });
 
-    expect(result.expandedTargetPaths).toContain("src/App.tsx");
-    expect(result.expandedTargetPaths).toContain("src/styles/components.css");
+    expect(result.expandedTargetPaths).not.toContain("src/App.tsx");
+    expect(result.expandedTargetPaths).not.toContain("src/styles/components.css");
     expect(result.expandedTargetPaths).toContain("src/components/ui/Button/Button.tsx");
 
-    const appExp = result.approvedExpansions.find((e) => e.path === "src/App.tsx");
-    expect(appExp?.reason).toBe("ACTIVE_INTEGRATION_ROOT");
-    expect(appExp?.role).toBe("ROOT_ENTRY");
-
-    const cssExp = result.approvedExpansions.find((e) => e.path === "src/styles/components.css");
-    expect(cssExp?.reason).toBe("IMPORTED_BY_ACTIVE_ROOT");
-    expect(cssExp?.role).toBe("STYLE_OWNER");
+    expect(result.rejectedCandidates.find((e) => e.path === "src/App.tsx")?.reason)
+      .toBe("ACTIVE_ENTRY_NOT_INTEGRATION_OWNER");
+    expect(result.rejectedCandidates.find((e) => e.path === "src/styles/components.css")?.reason)
+      .toBe("LOCAL_TARGET_SUFFICIENT");
 
     // ManifestValidator passes with reconciled contract
     const reconciledContract = { ...contract, targetPaths: result.expandedTargetPaths };
@@ -85,7 +82,9 @@ describe("Cross-Cutting UI Feature Scope Reconciliation Regression Suite", () =>
       existingFiles: snapshotFiles.map((f) => f.path),
     });
     const valRes = validator.validate({ files: manifestFiles, totalFiles: 3, manifestVersion: "1.0.0" });
-    expect(valRes.valid).toBe(true);
+    expect(valRes.valid).toBe(false);
+    expect(valRes.errors.some((e) => e.type === "path_constraint" && e.affectedFiles?.includes("src/App.tsx"))).toBe(true);
+    expect(valRes.errors.some((e) => e.type === "path_constraint" && e.affectedFiles?.includes("src/styles/components.css"))).toBe(true);
   });
 
   // TEST 2 — unrelated file
@@ -124,8 +123,8 @@ describe("Cross-Cutting UI Feature Scope Reconciliation Regression Suite", () =>
       snapshotFiles,
     });
 
-    expect(result.expandedTargetPaths).toContain("src/App.tsx");
-    expect(result.expandedTargetPaths).toContain("src/styles/components.css");
+    expect(result.expandedTargetPaths).not.toContain("src/App.tsx");
+    expect(result.expandedTargetPaths).not.toContain("src/styles/components.css");
     expect(result.expandedTargetPaths).not.toContain("src/data/mockProjects.ts");
 
     const mockRej = result.rejectedCandidates.find((r) => r.path === "src/data/mockProjects.ts");
@@ -182,7 +181,7 @@ describe("Cross-Cutting UI Feature Scope Reconciliation Regression Suite", () =>
   });
 
   // TEST 4 — Header search control
-  test("TEST 4: Header search control authorizes Header.tsx, Button.tsx, and Header.css", () => {
+  test("TEST 4: Header search control authorizes its container but not manifest-only CSS", () => {
     const contract: ExecutionContract = {
       ...defaultBaseContract,
       targetPaths: ["src/components/ui/Button/Button.tsx"],
@@ -221,8 +220,10 @@ describe("Cross-Cutting UI Feature Scope Reconciliation Regression Suite", () =>
     });
 
     expect(result.expandedTargetPaths).toContain("src/components/layout/Header/Header.tsx");
-    expect(result.expandedTargetPaths).toContain("src/components/layout/Header/Header.css");
+    expect(result.expandedTargetPaths).not.toContain("src/components/layout/Header/Header.css");
     expect(result.expandedTargetPaths).toContain("src/components/ui/Button/Button.tsx");
+    expect(result.rejectedCandidates.find((e) => e.path === "src/components/layout/Header/Header.css")?.reason)
+      .toBe("LOCAL_TARGET_SUFFICIENT");
   });
 
   // TEST 5 — global provider feature
@@ -612,7 +613,7 @@ describe("Cross-Cutting UI Feature Scope Reconciliation Regression Suite", () =>
     });
 
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.path === "src/unauthorized.ts" && e.reason === "UNDECLARED_FILE")).toBe(true);
+    expect(result.errors.some((e) => e.path === "src/unauthorized.ts" && e.reason === "TARGET_PATH_VIOLATION")).toBe(true);
   });
 
   // TEST 18 — FileVersionGuard unchanged
@@ -699,11 +700,11 @@ describe("Cross-Cutting UI Feature Scope Reconciliation Regression Suite", () =>
       snapshotFiles,
     });
 
-    expect(result.expandedTargetPaths).toContain("src/App.tsx");
-    expect(result.expandedTargetPaths).toContain("src/styles/components.css");
+    expect(result.expandedTargetPaths).not.toContain("src/App.tsx");
+    expect(result.expandedTargetPaths).not.toContain("src/styles/components.css");
     expect(result.expandedTargetPaths).toContain("src/components/ui/Button/Button.tsx");
-    expect(result.approvedExpansions.find((e) => e.path === "src/App.tsx")?.reason).toBe("ACTIVE_INTEGRATION_ROOT");
-    expect(result.approvedExpansions.find((e) => e.path === "src/styles/components.css")?.reason).toBe("IMPORTED_BY_ACTIVE_ROOT");
+    expect(result.rejectedCandidates.find((e) => e.path === "src/App.tsx")?.reason).toBe("ACTIVE_ENTRY_NOT_INTEGRATION_OWNER");
+    expect(result.rejectedCandidates.find((e) => e.path === "src/styles/components.css")?.reason).toBe("LOCAL_TARGET_SUFFICIENT");
   });
 
   // LIVE PROMPT B

@@ -1,7 +1,7 @@
 import { buildApprovedFilePlanSection } from "../generation/CodeGenerator";
 import { FileManifest } from "../../types";
 
-describe("CodeGenerator — Manifest Guidance & Approved File Plan Prompt Tests", () => {
+describe("CodeGenerator — Advisory Manifest Planning Context Tests", () => {
   test("TEST A: Manifest files appear in prompt with exact actions", () => {
     const manifest: FileManifest = {
       files: [
@@ -18,7 +18,8 @@ describe("CodeGenerator — Manifest Guidance & Approved File Plan Prompt Tests"
     expect(section).toContain("- MODIFY: src/auth.ts (Update auth logic)");
     expect(section).toContain("- CREATE: src/auth.test.ts (Add auth tests)");
     expect(section).toContain("- DELETE: src/legacy.ts (Remove legacy code)");
-    expect(section).toContain("APPROVED FILE PLAN — MANDATORY EXECUTION SCOPE");
+    expect(section).toContain("REQUESTED FILE PLAN — ADVISORY PLANNING CONTEXT");
+    expect(section).toContain("These are requested candidate changes. They grant no mutation authority.");
   });
 
   test("TEST B: Undeclared paths are not added by prompt construction", () => {
@@ -58,7 +59,7 @@ describe("CodeGenerator — Manifest Guidance & Approved File Plan Prompt Tests"
     expect(buildApprovedFilePlanSection({ files: [], totalFiles: 0, manifestVersion: "1.0.0" })).toBe("");
   });
 
-  test("TEST E: Prompt explicitly states additional files are not allowed and requires explicit action", () => {
+  test("TEST E: Prompt preserves explicit actions without granting manifest authority", () => {
     const manifest: FileManifest = {
       files: [
         { path: "src/auth.ts", action: "modify", dependencies: [], description: "auth" },
@@ -70,8 +71,8 @@ describe("CodeGenerator — Manifest Guidance & Approved File Plan Prompt Tests"
     const section = buildApprovedFilePlanSection(manifest);
 
     expect(section).toContain('Every generated change MUST explicitly set "action":');
-    expect(section).toContain("Do NOT create additional helper files");
-    expect(section).toContain("Do NOT modify package.json, config files, routes, or other files unless explicitly declared");
-    expect(section).toContain("Stay strictly within the approved plan");
+    expect(section).toContain("If current repository facts require a different path/action, return that explicit proposal with a rationale");
+    expect(section).toContain("CapabilityGuard and deterministic validation independently decide whether any proposal may execute");
+    expect(section).not.toContain("MANDATORY EXECUTION SCOPE");
   });
 });

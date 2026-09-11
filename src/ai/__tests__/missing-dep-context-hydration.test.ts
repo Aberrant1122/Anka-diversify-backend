@@ -1,3 +1,4 @@
+import { AuthorizedCapabilityScope, CapabilityGrant, CapabilityGuard } from "../runtime/CapabilityGuard";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -16,6 +17,28 @@ jest.mock("../shared/utils", () => {
     getOpenAI: jest.fn(),
   };
 });
+
+
+function createScopedFsManager(
+  worktree: string,
+  stageId: string,
+  grants: readonly CapabilityGrant[],
+): FileSystemStateManager {
+  const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+    workspaceRoot: worktree,
+    authorityId: stageId,
+    grants,
+  });
+  if (!authorizedScope) {
+    throw new Error(`Failed to create AuthorizedCapabilityScope for ${stageId}`);
+  }
+  const guard = CapabilityGuard.create({
+    workspaceRoot: worktree,
+    scopeId: stageId,
+    authorizedScope,
+  });
+  return new FileSystemStateManager(guard, stageId);
+}
 
 describe("MISSING_DEP Repair Context Hydration for Dynamically Authorized Files", () => {
   const liveAppTsContent = `import React from 'react';
@@ -150,15 +173,13 @@ export { app, port };
             return {
               choices: [
                 {
+                  finish_reason: "stop",
+                  index: 0,
                   message: {
                     content: JSON.stringify({
-                      repaired: true,
-                      patchExplanation: "Removed express and exported standard app handlers",
                       changes: [
                         {
                           path: "src/index.ts",
-                          action: "modify",
-                          description: "Clean up missing express dependency",
                           content: "export * from './app';\n",
                         },
                       ],
@@ -174,7 +195,7 @@ export { app, port };
 
     (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = createScopedFsManager(tempDir, "missing-dep-g", [{ path: "src/app.ts", action: "FILE_MODIFY" }, { path: "src/index.ts", action: "FILE_MODIFY" }]);
     await fsManager.snapshot(initialChanges, tempDir);
 
     const result = await SelfHealingEngine.runSelfHealingLoop(
@@ -294,14 +315,13 @@ export { app, port };
             return {
               choices: [
                 {
+                  finish_reason: "stop",
+                  index: 0,
                   message: {
                     content: JSON.stringify({
-                      repaired: true,
                       changes: [
                         {
                           path: "src/index.ts",
-                          action: "modify",
-                          description: "Clean up express",
                           content: "export const v = 2;\n",
                         },
                       ],
@@ -317,7 +337,7 @@ export { app, port };
 
     (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = createScopedFsManager(tempDir, "missing-dep-h", [{ path: "src/index.ts", action: "FILE_MODIFY" }]);
     await fsManager.snapshot(initialChanges, tempDir);
 
     const result = await SelfHealingEngine.runSelfHealingLoop(
@@ -411,8 +431,10 @@ export { app, port };
             return {
               choices: [
                 {
+                  finish_reason: "stop",
+                  index: 0,
                   message: {
-                    content: JSON.stringify({ repaired: false, changes: [] }),
+                    content: JSON.stringify({ changes: [{ path: "src/app.ts", content: liveAppTsContent }] }),
                   },
                 },
               ],
@@ -424,7 +446,7 @@ export { app, port };
 
     (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = createScopedFsManager(tempDir, "missing-dep-i", [{ path: "src/app.ts", action: "FILE_MODIFY" }]);
     await fsManager.snapshot(initialChanges, tempDir);
 
     const result = await SelfHealingEngine.runSelfHealingLoop(
@@ -513,7 +535,11 @@ export { app, port };
               } catch {}
             }
             return {
-              choices: [{ message: { content: JSON.stringify({ repaired: false, changes: [] }) } }],
+              choices: [
+                {
+                  finish_reason: "stop",
+                  index: 0,
+                  message: { content: JSON.stringify({ changes: [{ path: "src/index.ts", content: liveIndexTsContent }] }) } }],
             };
           }),
         },
@@ -522,7 +548,7 @@ export { app, port };
 
     (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = createScopedFsManager(tempDir, "missing-dep-j1", [{ path: "src/index.ts", action: "FILE_MODIFY" }]);
     await fsManager.snapshot(initialChanges, tempDir);
 
     await SelfHealingEngine.runSelfHealingLoop(
@@ -591,7 +617,7 @@ export { app, port };
       repositoryRequired: true,
       expectedFiles: ["src/app.ts"],
       validationType: "TYPESCRIPT_BUILD",
-      targetPaths: ["src/app.ts"],
+      targetPaths: ["src/app.ts", "src/index.ts"],
       allowedActions: ["modify"],
       forbiddenActions: [],
       maxFiles: 5,
@@ -641,16 +667,14 @@ export { app, port };
               // MISSING_DEP bounded correction: removes express, retains import { App } from './app'
               return {
                 choices: [
-                  {
-                    message: {
+                {
+                  finish_reason: "stop",
+                  index: 0,
+                  message: {
                       content: JSON.stringify({
-                        repaired: true,
-                        patchExplanation: "Removed express, keeping App import",
                         changes: [
                           {
                             path: "src/index.ts",
-                            action: "modify",
-                            description: "Remove express",
                             content: "import { App } from './app';\nexport default App;\n",
                           },
                         ],
@@ -664,6 +688,8 @@ export { app, port };
             return {
               choices: [
                 {
+                  finish_reason: "stop",
+                  index: 0,
                   message: {
                     content: JSON.stringify({
                       repaired: true,
@@ -672,6 +698,7 @@ export { app, port };
                         {
                           path: "src/index.ts",
                           action: "modify",
+                          description: "Fix default import of App",
                           edits: [
                             {
                               oldText: "import { App } from './app';",
@@ -692,7 +719,7 @@ export { app, port };
 
     (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = createScopedFsManager(tempDir, "missing-dep-j2", [{ path: "src/app.ts", action: "FILE_MODIFY" }, { path: "src/index.ts", action: "FILE_MODIFY" }]);
     await fsManager.snapshot(initialChanges, tempDir);
 
     const result = await SelfHealingEngine.runSelfHealingLoop(
@@ -786,15 +813,14 @@ export { app, port };
         completions: {
           create: jest.fn().mockResolvedValue({
             choices: [
-              {
-                message: {
+                {
+                  finish_reason: "stop",
+                  index: 0,
+                  message: {
                   content: JSON.stringify({
-                    repaired: true,
                     changes: [
                       {
                         path: "src/index.ts",
-                        action: "modify",
-                        description: "Attempted change",
                         content: liveIndexTsContent,
                       },
                     ],
@@ -809,7 +835,7 @@ export { app, port };
 
     (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = createScopedFsManager(tempDir, "missing-dep-k", [{ path: "src/app.ts", action: "FILE_MODIFY" }, { path: "src/index.ts", action: "FILE_MODIFY" }]);
     await fsManager.snapshot(initialChanges, tempDir);
 
     const result = await SelfHealingEngine.runSelfHealingLoop(
@@ -928,15 +954,14 @@ export { app, port };
             if (completionCount === 1) {
               return {
                 choices: [
-                  {
-                    message: {
+                {
+                  finish_reason: "stop",
+                  index: 0,
+                  message: {
                       content: JSON.stringify({
-                        repaired: true,
                         changes: [
                           {
                             path: "src/index.ts",
-                            action: "modify",
-                            description: "Remove express",
                             content: "export default null;\n",
                           },
                         ],
@@ -949,14 +974,13 @@ export { app, port };
             return {
               choices: [
                 {
+                  finish_reason: "stop",
+                  index: 0,
                   message: {
                     content: JSON.stringify({
-                      repaired: true,
                       changes: [
                         {
                           path: "src/index.ts",
-                          action: "modify",
-                          description: "Remove legacy-pkg",
                           content: "export default null;\n",
                         },
                       ],
@@ -972,7 +996,7 @@ export { app, port };
 
     (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = createScopedFsManager(tempDir, "missing-dep-l", [{ path: "src/app.ts", action: "FILE_MODIFY" }, { path: "src/index.ts", action: "FILE_MODIFY" }]);
     await fsManager.snapshot(initialChanges, tempDir);
 
     const result = await SelfHealingEngine.runSelfHealingLoop(

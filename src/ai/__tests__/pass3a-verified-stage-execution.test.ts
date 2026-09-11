@@ -4,6 +4,7 @@ import os from "os";
 import { StageExecutionTransaction, StageVerificationGate } from "../orchestration/StageExecutionTransaction";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { TaskClassificationResult, AgentFileChange } from "../../types";
+import { AuthorizedCapabilityScope, CapabilityAction, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoint Rollback", () => {
   let tempDir: string;
@@ -17,6 +18,24 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  function authorizedTransaction(stageId: string, root: string, changes: AgentFileChange[]) {
+    const grants = changes.map((change) => ({
+      path: change.path,
+      action: (change.action === "delete" || change.isDeleted
+        ? "FILE_DELETE"
+        : change.action === "create"
+          ? "FILE_CREATE"
+          : "FILE_MODIFY") as CapabilityAction,
+    }));
+    const scope = AuthorizedCapabilityScope.fromBackendConfiguration({ workspaceRoot: root, authorityId: `pass3a:${stageId}`, grants });
+    if (!scope) throw new Error("test capability scope must be valid");
+    return StageExecutionTransaction.startTransaction(
+      stageId,
+      root,
+      CapabilityGuard.create({ workspaceRoot: root, scopeId: stageId, authorizedScope: scope }),
+    );
+  }
 
   // Test 1: Only active stage executes
   test("1. Only active stage executes with its own intent", () => {
@@ -184,8 +203,6 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, "const Page = () => 'original';", "utf8");
 
-    const transaction = await StageExecutionTransaction.startTransaction("stage-1", tempDir);
-
     // Apply modification
     const change: AgentFileChange = {
       path: "app/page.tsx",
@@ -193,6 +210,7 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
       action: "modify",
       description: "modify page",
     };
+    const transaction = await authorizedTransaction("stage-1", tempDir, [change]);
     await transaction.apply([change]);
 
     expect(fs.readFileSync(filePath, "utf8")).toBe("const Page = () => 'broken modification';");
@@ -206,8 +224,6 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
 
   // Test 6: Exact rollback removes created file
   test("6. Exact rollback removes newly created file", async () => {
-    const transaction = await StageExecutionTransaction.startTransaction("stage-1", tempDir);
-
     const createdPath = path.join(tempDir, "components/Calculator.tsx");
     const change: AgentFileChange = {
       path: "components/Calculator.tsx",
@@ -215,6 +231,7 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
       action: "create",
       description: "create calculator",
     };
+    const transaction = await authorizedTransaction("stage-1", tempDir, [change]);
     await transaction.apply([change]);
 
     expect(fs.existsSync(createdPath)).toBe(true);
@@ -232,15 +249,16 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
     fs.writeFileSync(pageFile, "const Page = () => 'v0-initial';", "utf8");
 
     // Stage 1 executes and modifies app/page.tsx
-    const tx1 = await StageExecutionTransaction.startTransaction("stage-1", tempDir);
-    await tx1.apply([
+    const stage1Changes: AgentFileChange[] = [
       {
         path: "app/page.tsx",
         content: "const Page = () => 'v1-stage1-verified';",
         action: "modify",
         description: "stage 1 repair",
       },
-    ]);
+    ];
+    const tx1 = await authorizedTransaction("stage-1", tempDir, stage1Changes);
+    await tx1.apply(stage1Changes);
 
     // Stage 1 passes verification
     const gate1 = StageVerificationGate.evaluate({
@@ -254,16 +272,17 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
     expect(fs.readFileSync(pageFile, "utf8")).toBe("const Page = () => 'v1-stage1-verified';");
 
     // Stage 2 executes: creates Calculator.tsx and attempts another edit
-    const tx2 = await StageExecutionTransaction.startTransaction("stage-2", tempDir);
     const calcFile = path.join(tempDir, "components/Calculator.tsx");
-    await tx2.apply([
+    const stage2Changes: AgentFileChange[] = [
       {
         path: "components/Calculator.tsx",
         content: "export const Calculator = () => <div>calc</div>;",
         action: "create",
         description: "stage 2 create calculator",
       },
-    ]);
+    ];
+    const tx2 = await authorizedTransaction("stage-2", tempDir, stage2Changes);
+    await tx2.apply(stage2Changes);
 
     expect(fs.existsSync(calcFile)).toBe(true);
 
@@ -290,17 +309,18 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, "export const a = 1;", "utf8");
 
-    const tx = await StageExecutionTransaction.startTransaction("stage-crash", tempDir);
+    const crashChanges: AgentFileChange[] = [
+      {
+        path: "src/temp.ts",
+        content: "export const a = 999;",
+        action: "modify",
+        description: "crash attempt",
+      },
+    ];
+    const tx = await authorizedTransaction("stage-crash", tempDir, crashChanges);
 
     try {
-      await tx.apply([
-        {
-          path: "src/temp.ts",
-          content: "export const a = 999;",
-          action: "modify",
-          description: "crash attempt",
-        },
-      ]);
+      await tx.apply(crashChanges);
       throw new Error("UNEXPECTED_PIPELINE_CRASH");
     } catch {
       await tx.rollback();
@@ -317,21 +337,23 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
     fs.writeFileSync(existingFile, "console.log('init');", "utf8");
 
     // Attempt 1: fails
-    const txAttempt1 = await StageExecutionTransaction.startTransaction("stage-1", tempDir);
-    await txAttempt1.apply([
+    const attempt1Changes: AgentFileChange[] = [
       { path: "src/index.ts", content: "console.log('bad');", action: "modify", description: "bad mod" },
       { path: "src/orphan.ts", content: "export const orphan = true;", action: "create", description: "bad orphan" },
-    ]);
+    ];
+    const txAttempt1 = await authorizedTransaction("stage-1", tempDir, attempt1Changes);
+    await txAttempt1.apply(attempt1Changes);
     await txAttempt1.rollback();
 
     expect(fs.readFileSync(existingFile, "utf8")).toBe("console.log('init');");
     expect(fs.existsSync(path.join(tempDir, "src/orphan.ts"))).toBe(false);
 
     // Attempt 2 (retry): succeeds cleanly
-    const txAttempt2 = await StageExecutionTransaction.startTransaction("stage-1", tempDir);
-    await txAttempt2.apply([
+    const attempt2Changes: AgentFileChange[] = [
       { path: "src/index.ts", content: "console.log('good');", action: "modify", description: "good mod" },
-    ]);
+    ];
+    const txAttempt2 = await authorizedTransaction("stage-1", tempDir, attempt2Changes);
+    await txAttempt2.apply(attempt2Changes);
     await txAttempt2.commit();
 
     expect(fs.readFileSync(existingFile, "utf8")).toBe("console.log('good');");
@@ -380,11 +402,13 @@ describe("Strict Implementation Pass 3A — Verified Stage Execution + Checkpoin
     fs.writeFileSync(fileA, "content A original", "utf8");
     fs.writeFileSync(fileB, "content B original", "utf8");
 
-    const txA = await StageExecutionTransaction.startTransaction("stage-a", repoA);
-    const txB = await StageExecutionTransaction.startTransaction("stage-b", repoB);
+    const changesA: AgentFileChange[] = [{ path: "serviceA.ts", content: "content A modified", action: "modify", description: "repo A mod" }];
+    const changesB: AgentFileChange[] = [{ path: "serviceB.ts", content: "content B modified", action: "modify", description: "repo B mod" }];
+    const txA = await authorizedTransaction("stage-a", repoA, changesA);
+    const txB = await authorizedTransaction("stage-b", repoB, changesB);
 
-    await txA.apply([{ path: "serviceA.ts", content: "content A modified", action: "modify", description: "repo A mod" }]);
-    await txB.apply([{ path: "serviceB.ts", content: "content B modified", action: "modify", description: "repo B mod" }]);
+    await txA.apply(changesA);
+    await txB.apply(changesB);
 
     // Rollback Repo A only
     await txA.rollback();

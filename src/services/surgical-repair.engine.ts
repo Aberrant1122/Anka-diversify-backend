@@ -278,26 +278,21 @@ export class SurgicalPatchEngine {
     originalContent: string,
     patch: SurgicalPatchChunk,
   ): { newContent: string; linesChanged: number; patchSizePct: number } {
-    const lines = originalContent.split("\n");
-    const totalLines = lines.length || 1;
-
-    const startIdx = Math.max(0, patch.startLine - 1);
-    const endIdx = Math.min(lines.length, patch.endLine);
-
-    const before = lines.slice(0, startIdx);
-    const after = lines.slice(endIdx);
-    const replacementLines = patch.replacementContent === "" ? [] : patch.replacementContent.split("\n");
-
-    const newLines = [...before, ...replacementLines, ...after];
-    const newContent = newLines.join("\n");
-
-    const linesRemoved = endIdx - startIdx;
-    const linesAdded = replacementLines.length;
+    const result = applyPatchToFile(originalContent, [{
+      oldText: patch.targetContent,
+      newText: patch.replacementContent,
+    }]);
+    if (!result.success) {
+      throw new Error(`[${result.error.code}] ${result.error.message}`);
+    }
+    const totalLines = originalContent.split("\n").length || 1;
+    const linesRemoved = patch.targetContent === "" ? 0 : patch.targetContent.split("\n").length;
+    const linesAdded = patch.replacementContent === "" ? 0 : patch.replacementContent.split("\n").length;
     const linesChanged = Math.max(linesAdded, linesRemoved);
     const patchSizePct = parseFloat(((linesChanged / totalLines) * 100).toFixed(2));
 
     return {
-      newContent,
+      newContent: result.content,
       linesChanged,
       patchSizePct,
     };

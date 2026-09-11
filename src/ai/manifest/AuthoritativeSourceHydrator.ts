@@ -21,17 +21,16 @@ export interface ManifestSourceHydrationResult {
 
 export class AuthoritativeSourceHydrator {
   /**
-   * Hydrates authoritative file contents for every approved manifest entry where action === "modify".
-   * Reads from the active execution worktree (effectiveLocalPath).
+   * Uses manifest modify requests to select context, then hydrates source bytes
+   * from current materialized disk reality.
    *
    * Invariant:
-   * EVERY approved manifest MODIFY target must have an authoritative hydrated source
-   * before code generation proceeds.
+   * A semantic snapshot is only a fallback when no materialized repository is available.
    */
   public static hydrateModifySources(
     manifest: FileManifest | null | undefined,
     effectiveLocalPath: string | null | undefined,
-    canonicalExistingFiles: string[] = [],
+    _canonicalExistingFiles: string[] = [],
     semanticFileContext: Record<string, string> = {},
   ): ManifestSourceHydrationResult {
     const authoritativeModifySources: Record<string, HydratedSource> = {};
@@ -49,10 +48,6 @@ export class AuthoritativeSourceHydrator {
     }
 
     const modifyEntries = manifest.files.filter((f) => f && (f.action || "modify").toLowerCase() === "modify");
-    const normalizedCanonical = new Set(
-      canonicalExistingFiles.map((f) => f.replace(/\\/g, "/").replace(/^\.\//, ""))
-    );
-
     let missingCount = 0;
 
     for (const entry of modifyEntries) {
@@ -75,12 +70,12 @@ export class AuthoritativeSourceHydrator {
         }
       }
 
-      // 2. Fallback: If not accessible on disk but already present in semanticFileContext or snapshot
-      if (fileContent === null && typeof semanticFileContext[normPath] === "string") {
+      // A snapshot must not override current materialized disk reality.
+      if (!effectiveLocalPath && fileContent === null && typeof semanticFileContext[normPath] === "string") {
         fileContent = semanticFileContext[normPath];
       }
 
-      // If source still cannot be found/read for an approved MODIFY action, fail closed
+      // Current disk says the planned MODIFY source is absent; never resurrect it from stale context.
       if (fileContent === null) {
         missingCount++;
         console.error(
@@ -93,7 +88,7 @@ export class AuthoritativeSourceHydrator {
           modifyTargetsCount: modifyEntries.length,
           hydratedCount: Object.keys(authoritativeModifySources).length,
           missingCount,
-          error: `[MANIFEST_SOURCE_HYDRATION_FAILED] Cannot hydrate authoritative source for approved modify target "${normPath}". The file does not exist or is unreadable in the active worktree.`,
+          error: `[MANIFEST_SOURCE_HYDRATION_FAILED] Cannot hydrate current disk source for planned modify target "${normPath}". The file does not exist or is unreadable in the active worktree.`,
         };
       }
 

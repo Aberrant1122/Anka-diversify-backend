@@ -131,8 +131,8 @@ describe("Pipeline Patch Resolution Integration Tests", () => {
     sessionId: "sess-1",
   };
 
-  // ── CHANGE 10: Valid patch resolves through pipeline ──
-  test("CHANGE 10: Valid MODIFY patch resolves and reaches ExecutionScopeEnforcer as normal AgentFileChange", async () => {
+  // ── CHANGE 10: Clean repair baseline returns a deterministic no-op ──
+  test("CHANGE 10: Clean repair baseline returns ALREADY_SATISFIED before proposed mutation", async () => {
     const approvedManifest = {
       files: [{ path: "src/auth.ts", action: "modify" as const, dependencies: [], description: "update config" }],
       totalFiles: 1,
@@ -153,7 +153,7 @@ describe("Pipeline Patch Resolution Integration Tests", () => {
     } as any);
 
     // Mock CodeGenerator to simulate the full resolution path
-    jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
+    const codeGenSpy = jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
       roadmap: [],
       changes: [
         {
@@ -170,11 +170,10 @@ describe("Pipeline Patch Resolution Integration Tests", () => {
 
     const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
 
-    expect(response.changes).toHaveLength(1);
-    expect(response.changes[0].content).toContain("const timeout = 10000;");
-    expect(response.changes[0].content).toContain("import bcrypt from 'bcrypt';");
-    expect(response.changes[0].content).toContain("const retries = 3;");
-    expect(response.changes[0].content).toContain("export function auth()");
+    expect(response.changes).toHaveLength(0);
+    expect(response.explanation).toContain("ALREADY_SATISFIED");
+    expect(codeGenSpy).not.toHaveBeenCalled();
+    expect(fs.readFileSync(targetFilePath, "utf8")).toBe(AUTH_FILE_ORIGINAL);
   });
 
   // ── CHANGE 11: Patch resolution failure halts pipeline ──

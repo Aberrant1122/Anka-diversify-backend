@@ -51,7 +51,8 @@ describe("Pipeline & SelfHealingEngine Progress Events (Phase 6C)", () => {
 
   it("AgentPipeline source should emit step 9 SECURITY_AUDIT and step 10 MEMORY_PERSISTENCE", () => {
     const pipelinePath = path.join(__dirname, "..", "orchestration", "AgentPipeline.ts");
-    const content = fs.readFileSync(pipelinePath, "utf8");
+    const coordinatorPath = path.join(__dirname, "..", "orchestration", "ValidationCoordinator.ts");
+    const content = fs.readFileSync(pipelinePath, "utf8") + fs.readFileSync(coordinatorPath, "utf8");
 
     expect(content).toContain('stageName: "SECURITY_AUDIT"');
     expect(content).toContain("step: 9");

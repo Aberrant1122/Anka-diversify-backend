@@ -1,7 +1,8 @@
 import { PrismaClient } from "@prisma/client";
-import { getOpenAI } from "../shared/utils";
 import { AiChatSession } from "../shared/types";
 import { MEMORY_PERSISTENCE_PROMPT } from "../prompts/coding";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
 
 const prisma = new PrismaClient();
 
@@ -21,19 +22,37 @@ export class MemoryPersistence {
 
   static async persistProjectMemory(projectId: string, userMessage: string, auditResult: any): Promise<void> {
     try {
-      const openai = getOpenAI();
-      const memoryCompletion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+      const memoryCompletion = await LLMGateway.getInstance().callStructured<{ summaryEntry: string; keyDecisions: string[] }>({
+        stage: PipelineStages.SUMMARIZATION,
         messages: [
           { role: "system", content: MEMORY_PERSISTENCE_PROMPT },
           { role: "user", content: `USER TASK: ${userMessage}\nAUDIT SUMMARY: ${auditResult.summary}` },
         ],
         temperature: 0.2,
-        response_format: { type: "json_object" },
+        schema: {
+          name: "MemoryPersistenceSchema",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["summaryEntry", "keyDecisions"],
+            properties: {
+              summaryEntry: { type: "string", minLength: 1, maxLength: 500 },
+              keyDecisions: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 300 } },
+            },
+          },
+          validate: (value: unknown) => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Memory result must be an object"] };
+            const result = value as Record<string, unknown>;
+            if (Object.keys(result).some((key) => !["summaryEntry", "keyDecisions"].includes(key))) return { valid: false, errors: ["Memory result contains unknown fields"] };
+            if (typeof result.summaryEntry !== "string" || result.summaryEntry.trim().length === 0 || result.summaryEntry.length > 500) return { valid: false, errors: ["Invalid summary entry"] };
+            if (!Array.isArray(result.keyDecisions) || result.keyDecisions.length > 10 || result.keyDecisions.some((item) => typeof item !== "string" || item.trim().length === 0 || item.length > 300)) return { valid: false, errors: ["Invalid key decisions"] };
+            return { valid: true, data: result as unknown as { summaryEntry: string; keyDecisions: string[] } };
+          },
+        },
       });
 
-      const parsed = JSON.parse(memoryCompletion.choices[0]?.message?.content || "{}");
-      const note = parsed.summaryEntry || `Updated code and structure for: ${userMessage.slice(0, 100)}`;
+      const note = memoryCompletion.content.summaryEntry;
       await this.recordAgentMemory(projectId, note);
     } catch {
       await this.recordAgentMemory(projectId, `Executed task: ${userMessage.slice(0, 100)}`);

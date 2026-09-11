@@ -160,7 +160,7 @@ describe("Verified Build Baseline Before Agent Generation (Steps A-K)", () => {
     });
 
     // Pipeline succeeds on healthy baseline
-    jest.spyOn(AgentPipeline, "runCodingAgent").mockResolvedValue({
+    const pipelineSpy = jest.spyOn(AgentPipeline, "runCodingAgent").mockResolvedValue({
       explanation: "Added backspace button to Calculator.tsx",
       changes: [{ path: "src/Calculator.tsx", content: "export function Calc() {}", action: "modify", description: "Calculator" }],
       commitMessage: "feat: add backspace button",
@@ -174,6 +174,7 @@ describe("Verified Build Baseline Before Agent Generation (Steps A-K)", () => {
       repositoryPath: tempDir,
       runId: "run-repaired-baseline",
       request: { message: "Fix missing baseline dependencies and restore package build: @tailwindcss/postcss and mathjs" },
+      authorizedCapabilities: [{ path: "src/Calculator.tsx", action: "FILE_MODIFY" }],
     });
 
     expect(summary.validationPassed).toBe(true);
@@ -181,6 +182,16 @@ describe("Verified Build Baseline Before Agent Generation (Steps A-K)", () => {
     expect(summary.agentResponse.buildReady).toBe(true);
     expect(summary.agentResponse.baselineBuild).toBe("PASS");
     expect(summary.agentResponse.baselineDependencyInstall).toBe("PASS");
+
+    const pipelineOptions = pipelineSpy.mock.calls[0]?.[4];
+    const productionScope = pipelineOptions?.authorizedCapabilityScope;
+    if (!productionScope) throw new Error("Production run must bind explicit task capabilities to its worktree");
+    expect(productionScope.mode.grants).toEqual([
+      { path: "src/Calculator.tsx", action: "FILE_MODIFY" },
+    ]);
+    expect(productionScope.mode.grants).not.toContainEqual(
+      { path: "src/Unrequested.tsx", action: "FILE_MODIFY" },
+    );
   });
 
   test("E2. BaselineRepairCoordinator unit test: adds missing packages to package.json and regenerates lockfile", async () => {

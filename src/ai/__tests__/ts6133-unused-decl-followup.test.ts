@@ -1,3 +1,4 @@
+import { AuthorizedCapabilityScope, CapabilityGrant, CapabilityGuard } from "../runtime/CapabilityGuard";
 import { ErrorDiagnosticsParser } from "../../services/surgical-repair.engine";
 import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
@@ -276,6 +277,28 @@ describe("TS6133 Diagnostic Fidelity & Authorized Repair Follow-Up Causality", (
   // Section 3: Exact Full Live Self-Healing Regression Test
   // =========================================================================
 
+
+function createScopedFsManager(
+  worktree: string,
+  stageId: string,
+  grants: readonly CapabilityGrant[],
+): FileSystemStateManager {
+  const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+    workspaceRoot: worktree,
+    authorityId: stageId,
+    grants,
+  });
+  if (!authorizedScope) {
+    throw new Error(`Failed to create AuthorizedCapabilityScope for ${stageId}`);
+  }
+  const guard = CapabilityGuard.create({
+    workspaceRoot: worktree,
+    scopeId: stageId,
+    authorizedScope,
+  });
+  return new FileSystemStateManager(guard, stageId);
+}
+
   describe("Section 3: Exact Full Live Self-Healing Regression Test", () => {
     test("Live Multi-Cycle Flow: Express removed -> TS2614 fixed -> TS6133 port cleaned up -> clean build", async () => {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-ts6133-"));
@@ -320,7 +343,7 @@ describe("TS6133 Diagnostic Fidelity & Authorized Repair Follow-Up Causality", (
         repositoryRequired: true,
         expectedFiles: ["src/app.ts"],
         validationType: "TYPESCRIPT_BUILD",
-        targetPaths: ["src/app.ts"],
+        targetPaths: ["src/app.ts", "src/index.ts"],
         allowedActions: ["modify"],
         forbiddenActions: [],
         maxFiles: 5,
@@ -375,6 +398,8 @@ describe("TS6133 Diagnostic Fidelity & Authorized Repair Follow-Up Causality", (
                 return {
                   choices: [
                     {
+                      finish_reason: "stop",
+                      index: 0,
                       message: {
                         content: JSON.stringify({
                           changes: [
@@ -394,6 +419,8 @@ describe("TS6133 Diagnostic Fidelity & Authorized Repair Follow-Up Causality", (
                 return {
                   choices: [
                     {
+                      finish_reason: "stop",
+                      index: 0,
                       message: {
                         content: JSON.stringify({
                           repaired: true,
@@ -402,6 +429,7 @@ describe("TS6133 Diagnostic Fidelity & Authorized Repair Follow-Up Causality", (
                             {
                               path: "src/index.ts",
                               action: "modify",
+                              description: "Fix default import of App",
                               edits: [
                                 {
                                   oldText: "import { App } from './app';",
@@ -419,8 +447,10 @@ describe("TS6133 Diagnostic Fidelity & Authorized Repair Follow-Up Causality", (
               // Cycle 3 normal repair: removes unused port
               return {
                 choices: [
-                  {
-                    message: {
+                    {
+                      finish_reason: "stop",
+                      index: 0,
+                      message: {
                       content: JSON.stringify({
                         repaired: true,
                         patchExplanation: "Remove unused port declaration",
@@ -428,6 +458,7 @@ describe("TS6133 Diagnostic Fidelity & Authorized Repair Follow-Up Causality", (
                           {
                             path: "src/index.ts",
                             action: "modify",
+                            description: "Fix import or declaration",
                             edits: [
                               {
                                 oldText: "const port = process.env.PORT || 3000;\n\n",
@@ -448,7 +479,7 @@ describe("TS6133 Diagnostic Fidelity & Authorized Repair Follow-Up Causality", (
 
       (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-      const fsManager = new FileSystemStateManager();
+      const fsManager = createScopedFsManager(tempDir, "ts6133-stage", [{ path: "src/app.ts", action: "FILE_MODIFY" }, { path: "src/index.ts", action: "FILE_MODIFY" }]);
       await fsManager.snapshot(
         [
           { path: "src/app.ts", content: initialAppContent, action: "modify", description: "App" },

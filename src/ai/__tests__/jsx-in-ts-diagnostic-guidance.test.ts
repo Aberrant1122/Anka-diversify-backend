@@ -1,3 +1,4 @@
+import { AuthorizedCapabilityScope, CapabilityGrant, CapabilityGuard } from "../runtime/CapabilityGuard";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -17,6 +18,27 @@ jest.mock("../shared/utils", () => {
     getOpenAI: jest.fn(),
   };
 });
+
+function createScopedFsManager(
+  worktree: string,
+  stageId: string,
+  grants: readonly CapabilityGrant[],
+): FileSystemStateManager {
+  const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+    workspaceRoot: worktree,
+    authorityId: stageId,
+    grants,
+  });
+  if (!authorizedScope) {
+    throw new Error(`Failed to create AuthorizedCapabilityScope for ${stageId}`);
+  }
+  const guard = CapabilityGuard.create({
+    workspaceRoot: worktree,
+    scopeId: stageId,
+    authorizedScope,
+  });
+  return new FileSystemStateManager(guard, stageId);
+}
 
 describe("JSX-in-.TS Diagnostic Guidance for Self-Healing", () => {
   const liveAppTsContent = `import React from 'react';
@@ -229,6 +251,8 @@ export default function Page() {
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
+                index: 0,
                 message: {
                   content: JSON.stringify({
                     repaired: true,
@@ -276,7 +300,7 @@ export default function Page() {
       },
     ];
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = createScopedFsManager(tempDir, "jsx-stage", [{ path: "src/app.ts", action: "FILE_MODIFY" }]);
     await fsManager.snapshot(initialChanges, tempDir);
 
     const result = await SelfHealingEngine.runSelfHealingLoop(

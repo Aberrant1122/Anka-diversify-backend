@@ -3,7 +3,8 @@ import { RepositoryEvidenceStore, RepositoryEvidence } from "./RepositoryEvidenc
 import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { RepositoryArchitectureSummary } from "../planning/RepositoryArchitectureDetector";
 import { normalizeRepoPath } from "./SemanticContextResolver";
-import { getOpenAI } from "../shared/utils";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { PipelineStages } from "../gateway/PipelineStage";
 
 export interface InvestigationToolCall {
   tool: string;
@@ -39,6 +40,68 @@ export interface RepositoryInvestigationOptions {
   architectureSummary?: RepositoryArchitectureSummary;
   localPath?: string | null;
   openaiClient?: any;
+}
+
+interface InvestigationDecision {
+  readyToPlan: boolean;
+  reason: string;
+  toolCalls: InvestigationToolCall[];
+}
+
+function isSafeOptionalRepoPath(value: unknown): boolean {
+  if (typeof value !== "string" || !value || value !== value.trim() || value.includes("\0")) return false;
+  const normalized = value.replace(/\\/g, "/");
+  return !normalized.startsWith("/") && !/^[A-Za-z]:\//.test(normalized) && normalized.split("/").every((part) => part && part !== "." && part !== "..");
+}
+
+function normalizeExactRepositoryTarget(value: unknown): string | null {
+  if (typeof value !== "string" || !value || value !== value.trim() || value.includes("\0")) return null;
+  const slashNormalized = value.replace(/\\/g, "/");
+  if (slashNormalized.startsWith("/") || /^[A-Za-z]:\//.test(slashNormalized)) return null;
+  const normalized = normalizeRepoPath(slashNormalized);
+  if (!normalized || normalized.endsWith("/") || normalized.split("/").some((part) => !part || part === "." || part === "..")) {
+    return null;
+  }
+  return normalized;
+}
+
+function isMaterializedRepositoryEvidence(evidence: RepositoryEvidence): boolean {
+  return evidence.provenance !== "SEMANTIC_SEARCH" && normalizeExactRepositoryTarget(evidence.filePath) !== null;
+}
+
+function validateInvestigationToolParams(tool: string, params: Record<string, unknown>): boolean {
+  const allowedByTool: Record<string, string[]> = {
+    repo_readFile: ["filePath", "startLine", "endLine"],
+    repo_findRoute: ["pathPattern", "httpMethod"],
+    repo_findComponent: ["componentName", "searchScope"],
+    repo_findService: ["serviceName", "domain"],
+    repo_findAPI: ["endpointPattern", "method"],
+    repo_findModel: ["modelName"],
+    repo_findReferences: ["symbolName", "sourceFilePath"],
+    repo_searchArchitecture: ["query", "layer"],
+    repo_semanticSearch: ["query", "limit", "fileExtensions"],
+    repo_grepSearch: ["pattern", "caseSensitive", "limit"],
+  };
+  const allowed = allowedByTool[tool];
+  if (!allowed || Object.keys(params).some((key) => !allowed.includes(key))) return false;
+  const nonEmptyString = (key: string) => typeof params[key] === "string" && (params[key] as string).trim().length > 0;
+  const optionalString = (key: string) => params[key] === undefined || nonEmptyString(key);
+  const optionalLimit = () => params.limit === undefined || (Number.isInteger(params.limit) && (params.limit as number) > 0 && (params.limit as number) <= 100);
+
+  switch (tool) {
+    case "repo_readFile":
+      return isSafeOptionalRepoPath(params.filePath) && ["startLine", "endLine"].every((key) => params[key] === undefined || (Number.isInteger(params[key]) && (params[key] as number) > 0));
+    case "repo_findRoute": return nonEmptyString("pathPattern") && optionalString("httpMethod");
+    case "repo_findComponent": return nonEmptyString("componentName") && (params.searchScope === undefined || isSafeOptionalRepoPath(params.searchScope));
+    case "repo_findService": return nonEmptyString("serviceName") && optionalString("domain");
+    case "repo_findAPI": return nonEmptyString("endpointPattern") && optionalString("method");
+    case "repo_findModel": return nonEmptyString("modelName");
+    case "repo_findReferences": return nonEmptyString("symbolName") && (params.sourceFilePath === undefined || isSafeOptionalRepoPath(params.sourceFilePath));
+    case "repo_searchArchitecture": return nonEmptyString("query") && ["presentation", "business", "data", "middleware"].includes(String(params.layer));
+    case "repo_semanticSearch": return nonEmptyString("query") && optionalLimit() && (params.fileExtensions === undefined || (Array.isArray(params.fileExtensions) && params.fileExtensions.every((ext) => typeof ext === "string" && /^[A-Za-z0-9]+$/.test(ext))));
+    case "repo_grepSearch": return nonEmptyString("pattern") && (params.caseSensitive === undefined || typeof params.caseSensitive === "boolean") && optionalLimit();
+    default: return false;
+  }
 }
 
 /**
@@ -115,9 +178,13 @@ export class RepositoryInvestigationAgent {
       const nextActions = await this.decideNextToolCalls(roundNumber, executedHashes);
 
       if (nextActions.readyToPlan) {
-        readyToPlan = true;
-        console.log(`[INVESTIGATION] round=${roundNumber} readyToPlan=true reason="${nextActions.reason || "Sufficient evidence discovered"}"`);
-        break;
+        const stopCheck = this.evaluateStopConditions();
+        if (stopCheck.ready) {
+          readyToPlan = true;
+          console.log(`[INVESTIGATION] round=${roundNumber} readyToPlan=true reason="Deterministic evidence sufficiency satisfied"`);
+          break;
+        }
+        missingEvidence = stopCheck.missing;
       }
 
       if (!nextActions.toolCalls || nextActions.toolCalls.length === 0) {
@@ -169,7 +236,7 @@ export class RepositoryInvestigationAgent {
     const evidenceIds = allEvidence.map((e) => e.id);
 
     return {
-      readyToPlan: readyToPlan || evidenceIds.length > 0,
+      readyToPlan,
       evidenceIds,
       missingEvidence,
       roundsExecuted: Math.min(roundNumber, this.maxRounds),
@@ -201,7 +268,6 @@ export class RepositoryInvestigationAgent {
     ];
 
     try {
-      const openai = this.openaiClient || getOpenAI();
       const prompt = `You are a Repository Investigation Agent for an AI Coding Assistant.
 TASK GOAL: "${this.intentSpec.goal}"
 TASK TYPE: ${this.intentSpec.taskType}
@@ -233,22 +299,59 @@ INSTRUCTIONS:
   ]
 }`;
 
-      const completion = await openai.chat.completions.create({
-        model: process.env.OPENAI_AGENT_MODEL || "gpt-4o",
+      const result = await LLMGateway.getInstance().callStructured<InvestigationDecision>({
+        stage: PipelineStages.REPOSITORY_REASONING,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.1,
-        response_format: { type: "json_object" },
+        openaiClient: this.openaiClient,
+        schema: {
+          name: "RepositoryInvestigationDecisionSchema",
+          strict: false,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["readyToPlan", "reason", "toolCalls"],
+            properties: {
+              readyToPlan: { type: "boolean" },
+              reason: { type: "string" },
+              toolCalls: {
+                type: "array",
+                maxItems: 4,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["tool", "params", "reason"],
+                  properties: {
+                    tool: { type: "string", enum: availableTools },
+                    params: { type: "object" },
+                    reason: { type: "string", minLength: 1 },
+                  },
+                },
+              },
+            },
+          },
+          validate: (value: unknown) => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Decision must be an object"] };
+            const decision = value as Record<string, unknown>;
+            const allowedKeys = new Set(["readyToPlan", "reason", "toolCalls"]);
+            if (Object.keys(decision).some((key) => !allowedKeys.has(key))) return { valid: false, errors: ["Decision contains unknown fields"] };
+            if (typeof decision.readyToPlan !== "boolean" || typeof decision.reason !== "string" || !Array.isArray(decision.toolCalls) || decision.toolCalls.length > 4) {
+              return { valid: false, errors: ["Decision fields are invalid"] };
+            }
+            for (const call of decision.toolCalls) {
+              if (!call || typeof call !== "object" || Array.isArray(call)) return { valid: false, errors: ["Tool call must be an object"] };
+              const candidate = call as Record<string, unknown>;
+              const callKeys = new Set(["tool", "params", "reason"]);
+              if (Object.keys(candidate).some((key) => !callKeys.has(key))) return { valid: false, errors: ["Tool call contains unknown fields"] };
+              if (typeof candidate.tool !== "string" || !availableTools.includes(candidate.tool) || !candidate.params || typeof candidate.params !== "object" || Array.isArray(candidate.params) || !validateInvestigationToolParams(candidate.tool, candidate.params as Record<string, unknown>) || typeof candidate.reason !== "string" || candidate.reason.trim().length === 0) {
+                return { valid: false, errors: ["Tool call fields are invalid"] };
+              }
+            }
+            return { valid: true, data: decision as unknown as InvestigationDecision };
+          },
+        },
       });
-
-      const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}");
-      if (typeof parsed.readyToPlan === "boolean") {
-        const calls = Array.isArray(parsed.toolCalls) ? parsed.toolCalls : [];
-        return {
-          readyToPlan: parsed.readyToPlan,
-          toolCalls: calls.filter((c: any) => c && typeof c.tool === "string" && availableTools.includes(c.tool)),
-          reason: parsed.reason,
-        };
-      }
+      return result.content;
     } catch {
       // Fall through to deterministic investigation strategy
     }
@@ -462,13 +565,46 @@ INSTRUCTIONS:
       return { ready: false, missing };
     }
 
+    const materializedEvidencePaths = new Set(
+      allEvidence
+        .filter(isMaterializedRepositoryEvidence)
+        .map((e) => normalizeExactRepositoryTarget(e.filePath))
+        .filter((path): path is string => path !== null),
+    );
+    const normalizedExplicitPaths = this.intentSpec.explicitUserPaths.map(normalizeExactRepositoryTarget);
+    if (normalizedExplicitPaths.some((path) => path === null)) {
+      missing.push("Explicit repository target identity is missing or ambiguous after safe normalization.");
+      return { ready: false, missing };
+    }
+    const missingExplicitPaths = normalizedExplicitPaths
+      .filter((path): path is string => path !== null)
+      .filter((path) => !materializedEvidencePaths.has(path));
+    if (missingExplicitPaths.length > 0) {
+      missing.push(`Explicit repository target(s) lack materialized evidence: ${missingExplicitPaths.join(", ")}`);
+      return { ready: false, missing };
+    }
+
     if (this.intentSpec.destructive) {
-      // Destructive task requires target file evidence
-      const hasTargetEvidence = allEvidence.some(
-        (e) => e.kind === "FILE" || e.kind === "SYMBOL" || e.kind === "ENTRY_POINT"
-      );
-      if (!hasTargetEvidence) {
-        missing.push("Destructive target existence not yet proven by evidence.");
+      const obligationTargets = (this.intentSpec.resolvedTarget?.actionObligations || [])
+        .filter((obligation) => obligation.requiredAction === "delete")
+        .map((obligation) => obligation.path);
+      const representedTargets = obligationTargets.length > 0
+        ? obligationTargets
+        : this.intentSpec.resolvedTarget?.candidatePaths?.length
+          ? this.intentSpec.resolvedTarget.candidatePaths
+          : this.intentSpec.explicitUserPaths;
+      const normalizedTargets = representedTargets.map(normalizeExactRepositoryTarget);
+
+      if (normalizedTargets.length === 0 || normalizedTargets.some((target) => target === null)) {
+        missing.push("Destructive target identity is missing or ambiguous; target-bound evidence cannot be established.");
+        return { ready: false, missing };
+      }
+
+      const missingDestructiveTargets = normalizedTargets
+        .filter((target): target is string => target !== null)
+        .filter((target) => !materializedEvidencePaths.has(target));
+      if (missingDestructiveTargets.length > 0) {
+        missing.push(`Destructive repository target(s) lack exact materialized evidence: ${missingDestructiveTargets.join(", ")}`);
         return { ready: false, missing };
       }
     }

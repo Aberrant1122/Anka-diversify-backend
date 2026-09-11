@@ -7,7 +7,8 @@ import { generatePresignedUrl, generateDownloadUrl, deleteFromS3, detectType } f
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
-import { RepositoryMaterializationService } from "../services/repository-materialization.service";
+import { AuthorizedCapabilityScope } from "../ai/runtime/CapabilityGuard";
+import { ValidationCoordinator } from "../ai/orchestration/ValidationCoordinator";
 const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
@@ -262,29 +263,12 @@ export class ProjectController {
   }
 
   async saveRepoFile(req: Request, res: Response) {
-    try {
-      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
-      if (!project?.githubUrl) {
-        return res.status(400).json({ success: false, error: "No GitHub repository connected" });
-      }
-      const { path: filePath, content, commitMessage } = req.body;
-      if (!filePath || content === undefined) {
-        return res.status(400).json({ success: false, error: "path and content required" });
-      }
-
-      // Decrypt the GitHub token
-      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
-
-      const message = commitMessage || `edit: update ${filePath}`;
-      const result = await ProjectGitHubService.pushChanges(project.githubUrl, [{ path: filePath, content }], message, token);
-      if (result?.sha) {
-        await RepositoryMaterializationService.syncManagedCloneToCommit(param(req, "id"), result.sha);
-      }
-      res.json({ success: true, data: result });
-    } catch (error) {
-      console.error("Error saving repo file:", error);
-      res.status(500).json({ success: false, error: "Failed to save file" });
-    }
+    void req;
+    return res.status(409).json({
+      success: false,
+      error: "GIT_WORKFLOW_REQUIRED",
+      message: "Repository edits must be applied through CP10 and shipped from a verified isolated task branch.",
+    });
   }
 
   async applyLocalChanges(req: Request, res: Response) {
@@ -293,23 +277,42 @@ export class ProjectController {
       if (!project?.localPath) {
         return res.status(400).json({ success: false, error: "No local path configured for this project" });
       }
+      const localPath = project.localPath;
 
       const { changes } = req.body as { changes: { path: string; content: string }[] };
       if (!changes?.length) {
         return res.status(400).json({ success: false, error: "No changes provided" });
       }
 
-      const written: string[] = [];
-      for (const change of changes) {
-        const abs = path.join(project.localPath, change.path);
-        // Prevent path traversal outside localPath
-        if (!abs.startsWith(path.resolve(project.localPath))) {
-          return res.status(400).json({ success: false, error: `Invalid path: ${change.path}` });
-        }
-        await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-        await fs.promises.writeFile(abs, change.content, "utf8");
-        written.push(change.path);
+      const capabilityScopeId = `project:${param(req, "id")}`;
+      const authorizedCapabilityScope = AuthorizedCapabilityScope.fromAuthenticatedProject({
+        workspaceRoot: localPath,
+        authorityId: `authenticated-local-edit:${capabilityScopeId}`,
+        grants: changes.map((change) => ({
+          path: change.path,
+          action: fs.existsSync(path.resolve(localPath, change.path))
+            ? "FILE_MODIFY" as const
+            : "FILE_CREATE" as const,
+        })),
+      });
+      const groupedChanges = changes.map((change) => ({
+        ...change,
+        action: fs.existsSync(path.resolve(localPath, change.path)) ? "modify" as const : "create" as const,
+        description: "Authenticated local edit",
+      }));
+      if (!authorizedCapabilityScope) {
+        throw new Error("Authenticated local edit capability scope could not be established");
       }
+      const outcome = await ValidationCoordinator.applyLocalActionGroup({
+        stageId: capabilityScopeId,
+        localPath,
+        authorizedCapabilityScope,
+        changes: groupedChanges,
+      });
+      if (outcome.journalEntry.status !== "VERIFIED") {
+        throw new Error("Authenticated local write failed deterministic validation");
+      }
+      const written = changes.map((change) => change.path);
 
       res.json({ success: true, data: { written } });
     } catch (error) {

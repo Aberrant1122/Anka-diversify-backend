@@ -3,9 +3,16 @@ import path from "path";
 import crypto from "crypto";
 import { ChatRequest, AgentResponse, AgentProgressEvent } from "../shared/types";
 import { AgentPipeline } from "../orchestration/AgentPipeline";
-import { GitWorktreeService } from "../../services/git-worktree.service";
+import { GitWorktreeService, RepositoryRunSummary, RepositoryShippingPolicy } from "../../services/git-worktree.service";
 import { RepositoryMaterializationService } from "../../services/repository-materialization.service";
 import { prisma } from "../../services/database";
+import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
+import { TaskRuntime } from "../runtime/TaskRuntime";
+import { runWithTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
+import { AuthorizedCapabilityScope, CapabilityGrant } from "../runtime/CapabilityGuard";
+import { NodeGitCommandExecutor } from "../../services/git-command";
+
+const git = new NodeGitCommandExecutor();
 
 export interface CodingAgentInternalOptions {
   /**
@@ -19,6 +26,13 @@ export interface CodingAgentInternalOptions {
    * Internal-only override path for trusted execution harnesses.
    */
   effectiveLocalPath?: string;
+  /**
+   * Explicit task write authority supplied by trusted backend code. This is a
+   * separate argument so ChatRequest/model data cannot create or widen it.
+   */
+  authorizedCapabilities?: readonly CapabilityGrant[];
+  /** Trusted backend shipping policy; never read from ChatRequest/model output. */
+  shipping?: RepositoryShippingPolicy;
 }
 
 export class CodingAgent {
@@ -42,8 +56,16 @@ export class CodingAgent {
 
     // 1. Trusted internal-only direct execution path (used by EvalRunner and explicit test fixtures)
     if (internalOptions?.allowDirectExecution || internalOptions?.effectiveLocalPath) {
+      const directScope = internalOptions.effectiveLocalPath && internalOptions.authorizedCapabilities
+        ? AuthorizedCapabilityScope.fromBackendConfiguration({
+            workspaceRoot: internalOptions.effectiveLocalPath,
+            authorityId: `trusted-direct-execution:${projectId}`,
+            grants: internalOptions.authorizedCapabilities,
+          }) ?? undefined
+        : undefined;
       return AgentPipeline.runCodingAgent(userId, projectId, request, onProgress, {
         effectiveLocalPath: internalOptions.effectiveLocalPath,
+        authorizedCapabilityScope: directScope,
       });
     }
 
@@ -120,10 +142,8 @@ export class CodingAgent {
     const headSha = await GitWorktreeService.getHeadCommitSha(gitRoot);
     let trackedFilesCount = 0;
     try {
-      const ls = fs.readFileSync(path.join(gitRoot, ".git", "index"), "utf8"); // or exec git ls-files
-      const { execSync } = require("child_process");
-      const out = execSync("git ls-files", { cwd: gitRoot, encoding: "utf8" });
-      trackedFilesCount = out.split("\n").filter((f: string) => f.trim().length > 0).length;
+      const { stdout } = await git.run(gitRoot, ["ls-files"]);
+      trackedFilesCount = stdout.split("\n").filter((file) => file.trim().length > 0).length;
     } catch {}
 
     console.log(`[REPO_READY] project=${projectId}`);
@@ -133,18 +153,91 @@ export class CodingAgent {
 
     // 8. Execute strictly through GitWorktreeService against the canonical Git repository root
     const runId = crypto.randomUUID().slice(0, 8);
-    const summary = await GitWorktreeService.runIsolatedAgent({
-      userId,
+    const initialWorkspace = AgentWorkspaceState.create({
       projectId,
-      repositoryPath: gitRoot,
-      runId,
-      request,
-      onProgress,
+      ...(request.repositoryId ? { repositoryId: request.repositoryId } : {}),
+      root: gitRoot,
+      revision: headSha,
+      constraints: [
+        { id: "isolated-execution", description: "Repository changes must execute in an isolated Git worktree." },
+        { id: "deterministic-completion", description: "Only deterministic validation may complete the task runtime." },
+      ],
+    }).withEvidence({
+      id: `git-head:${headSha}`,
+      kind: "MATERIALIZED_REPOSITORY",
+      description: "Git resolved the source repository HEAD before isolated execution.",
+      revision: headSha,
     });
+    const runtime = TaskRuntime.create({
+      taskId: runId,
+      originalGoal: request.message,
+      workspace: initialWorkspace,
+      runtimeScopeId: runId,
+      metadata: { projectId, executionBoundary: "CodingAgent.runCodingAgent" },
+    });
+    runtime.start();
+
+    let summary: RepositoryRunSummary;
+    try {
+      summary = await runWithTaskRuntimeScope(runtime.snapshot().runtimeScope, () =>
+        GitWorktreeService.runIsolatedAgent({
+          userId,
+          projectId,
+          repositoryPath: gitRoot,
+          runId,
+          request,
+          authorizedCapabilities: internalOptions?.authorizedCapabilities,
+          taskRuntime: runtime,
+          shipping: internalOptions?.shipping,
+          onProgress,
+        })
+      );
+    } catch (error) {
+      if (runtime.snapshot().status !== "FAILED" && runtime.snapshot().status !== "COMPLETED") {
+        runtime.fail({
+          failureType: "TECHNICAL_FAILURE",
+          code: "ISOLATED_EXECUTION_FAILED",
+          message: error instanceof Error ? error.message : "Unknown isolated execution failure",
+        });
+      }
+      throw error;
+    }
+
+    let finalWorkspace = runtime.workspaceState().withRelevantPaths([
+      ...runtime.workspaceState().snapshot().relevantPaths,
+      ...summary.changedFiles,
+    ]);
+    if (summary.validationCommands.length > 0) {
+      finalWorkspace = finalWorkspace.withValidationFact({
+        id: "isolated-run-validation",
+        command: summary.validationCommands.join(" && "),
+        passed: summary.validationPassed,
+        source: "DETERMINISTIC_TOOL",
+      });
+    }
+    if (summary.diagnosticComparison) {
+      finalWorkspace = finalWorkspace.withDiagnosticComparison(summary.diagnosticComparison);
+    }
+    if (runtime.snapshot().status === "RUNNING") runtime.updateWorkspace(finalWorkspace);
+
+    if (summary.agentResponse.needsClarification && runtime.snapshot().status === "RUNNING") {
+      runtime.requestClarification({
+        question: summary.agentResponse.question || "Additional user input is required.",
+        reason: summary.agentResponse.reason || "The task cannot proceed deterministically without clarification.",
+      });
+    } else if (!summary.validationPassed && runtime.snapshot().status === "RUNNING") {
+      runtime.fail({
+        failureType: "VALIDATION_FAILURE",
+        code: summary.agentResponse.errorCode || "DETERMINISTIC_VALIDATION_FAILED",
+        message: summary.agentResponse.reason || summary.validationErrors || "Deterministic validation did not pass.",
+      });
+    }
 
     return {
       ...summary.agentResponse,
       visualVerification: summary.visualVerification || summary.agentResponse?.visualVerification,
+      taskRuntime: runtime.snapshot(),
+      ...(summary.shipping ? { gitShipping: summary.shipping } : {}),
     };
   }
 

@@ -1,3 +1,4 @@
+import { AuthorizedCapabilityScope, CapabilityGrant, CapabilityGuard } from "../runtime/CapabilityGuard";
 import { ErrorDiagnosticsParser } from "../../services/surgical-repair.engine";
 import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
@@ -308,6 +309,28 @@ describe("TS2614 Diagnostic Fidelity & Immutable Baseline Import/Export Proof", 
   // Section 3: Full End-to-End Live Self-Healing Regression
   // =========================================================================
 
+
+function createScopedFsManager(
+  worktree: string,
+  stageId: string,
+  grants: readonly CapabilityGrant[],
+): FileSystemStateManager {
+  const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+    workspaceRoot: worktree,
+    authorityId: stageId,
+    grants,
+  });
+  if (!authorizedScope) {
+    throw new Error(`Failed to create AuthorizedCapabilityScope for ${stageId}`);
+  }
+  const guard = CapabilityGuard.create({
+    workspaceRoot: worktree,
+    scopeId: stageId,
+    authorizedScope,
+  });
+  return new FileSystemStateManager(guard, stageId);
+}
+
   describe("Section 3: Live Self-Healing Regression Test", () => {
     test("Full flow: TS2307 Express -> Express removed -> TS2614 App -> REVEALED_BASELINE -> import repaired -> build passes", async () => {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-ts2614-"));
@@ -352,7 +375,7 @@ describe("TS2614 Diagnostic Fidelity & Immutable Baseline Import/Export Proof", 
         repositoryRequired: true,
         expectedFiles: ["src/app.ts"],
         validationType: "TYPESCRIPT_BUILD",
-        targetPaths: ["src/app.ts"],
+        targetPaths: ["src/app.ts", "src/index.ts"],
         allowedActions: ["modify"],
         forbiddenActions: [],
         maxFiles: 5,
@@ -400,6 +423,8 @@ describe("TS2614 Diagnostic Fidelity & Immutable Baseline Import/Export Proof", 
                 return {
                   choices: [
                     {
+                      finish_reason: "stop",
+                      index: 0,
                       message: {
                         content: JSON.stringify({
                           changes: [
@@ -417,8 +442,10 @@ describe("TS2614 Diagnostic Fidelity & Immutable Baseline Import/Export Proof", 
               // Cycle 2 normal repair: fixes TS2614 import { App } -> import App
               return {
                 choices: [
-                  {
-                    message: {
+                    {
+                      finish_reason: "stop",
+                      index: 0,
+                      message: {
                       content: JSON.stringify({
                         repaired: true,
                         patchExplanation: "Fix default import of App",
@@ -426,6 +453,7 @@ describe("TS2614 Diagnostic Fidelity & Immutable Baseline Import/Export Proof", 
                           {
                             path: "src/index.ts",
                             action: "modify",
+                            description: "Fix import or declaration",
                             edits: [
                               {
                                 oldText: "import { App } from './app';",
@@ -446,7 +474,7 @@ describe("TS2614 Diagnostic Fidelity & Immutable Baseline Import/Export Proof", 
 
       (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-      const fsManager = new FileSystemStateManager();
+      const fsManager = createScopedFsManager(tempDir, "ts2614-stage", [{ path: "src/app.ts", action: "FILE_MODIFY" }, { path: "src/index.ts", action: "FILE_MODIFY" }]);
       await fsManager.snapshot(
         [
           { path: "src/app.ts", content: initialAppContent, action: "modify", description: "App" },

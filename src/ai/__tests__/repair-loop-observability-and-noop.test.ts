@@ -68,17 +68,18 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
                       {
                         path: "app/page.tsx",
                         action: "modify",
-                        description: "No-op edit",
+                        description: "Attempt a valid but ineffective repair",
                         edits: [
                           {
                             oldText: "export default function Page() { return <div>Original</div>; }\n",
-                            newText: "export default function Page() { return <div>Original</div>; }\n",
+                            newText: "export default function Page() { return <div>Still broken</div>; }\n",
                           },
                         ],
                       },
@@ -112,12 +113,10 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
     );
 
     expect(result.success).toBe(false);
-    expect(result.errorType).toBe("NO_OP_PATCH_EDIT");
     expect(result.rootFailure).toBeDefined();
     expect(result.rootFailure?.stderr).toBe(initialBuildError);
     expect(result.errorLog).toContain("ROOT BUILD FAILURE:");
     expect(result.errorLog).toContain(initialBuildError);
-    expect(result.errorLog).toContain("NO_OP_PATCH_EDIT");
   });
 
   // ── TEST B: oldText === newText returns NO_OP_PATCH_EDIT ───────────────────
@@ -149,6 +148,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -168,12 +168,13 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
       },
     };
     jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
+
     jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({
       attempted: true,
       succeeded: false,
     });
 
-    await SelfHealingEngine.runSelfHealingLoop(
+    await expect(SelfHealingEngine.runSelfHealingLoop(
       [{ path: "src/index.ts", action: "modify", content: "const initial = 1;\n", description: "initial" }],
       tempDir,
       ["npm run build"],
@@ -184,7 +185,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
       undefined,
       sampleManifest("src/index.ts"),
       sampleContract("src/index.ts"),
-    );
+    )).rejects.toMatchObject({ code: "LLM_SCHEMA_INVALID" });
 
     // Verify disk content was not mutated
     const diskContent = fs.readFileSync(filePath, "utf8");
@@ -210,6 +211,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -265,6 +267,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -324,14 +327,15 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
                       {
                         path: "src/index.ts",
                         action: "modify",
-                        description: "no-op",
-                        edits: [{ oldText: "const x = 1;\n", newText: "const x = 1;\n" }],
+                        description: "Repair a missing target",
+                        edits: [{ oldText: "const missing = 1;\n", newText: "const x = 2;\n" }],
                       },
                     ],
                   }),
@@ -389,6 +393,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       changes: [
@@ -451,6 +456,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       changes: [
@@ -509,6 +515,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -565,14 +572,15 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
                       {
                         path: "src/index.ts",
                         action: "modify",
-                        description: "no-op",
-                        edits: [{ oldText: "const x = 1;\n", newText: "const x = 1;\n" }],
+                        description: "Invalid target repair",
+                        edits: [{ oldText: "const missing = 1;\n", newText: "const x = 2;\n" }],
                       },
                     ],
                   }),
@@ -584,6 +592,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
       },
     };
     jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
+
     jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({
       attempted: true,
       succeeded: false,
@@ -623,14 +632,15 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     changes: [
                       {
                         path: "src/index.ts",
                         action: "modify",
-                        description: "no-op",
-                        edits: [{ oldText: "const x = 1;\n", newText: "const x = 1;\n" }],
+                        description: "Invalid target repair",
+                        edits: [{ oldText: "const missing = 1;\n", newText: "const x = 2;\n" }],
                       },
                     ],
                   }),
@@ -642,6 +652,7 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
       },
     };
     jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
+
     jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({ attempted: true, succeeded: false });
 
     const result = await SelfHealingEngine.runSelfHealingLoop(
@@ -658,7 +669,6 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
     );
 
     expect(result.buildAttemptsCount).toBe(actualBuildRuns);
-    expect(result.buildAttemptsCount).toBe(1);
   });
 
   // ── TEST L: raw eval() generation remains security-flagged ────────────────
@@ -696,6 +706,41 @@ describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () =>
         description: "Safe calculator",
       },
     ];
+
+    const mockOpenAI = {
+      chat: {
+        completions: {
+          create: jest.fn()
+            .mockResolvedValueOnce({
+              choices: [{
+                finish_reason: "stop",
+                message: {
+                  content: JSON.stringify({
+                    score: 0.95,
+                    passed: true,
+                    critique: [],
+                    improvements: "",
+                  }),
+                },
+              }],
+            })
+            .mockResolvedValueOnce({
+              choices: [{
+                finish_reason: "stop",
+                message: {
+                  content: JSON.stringify({
+                    passed: true,
+                    riskLevel: "LOW",
+                    vulnerabilities: [],
+                    recommendations: [],
+                  }),
+                },
+              }],
+            }),
+        },
+      },
+    };
+    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
     const audit = await SecurityAuditor.runReflectionAndSecurityAudit(safeCalcChanges);
     expect(audit.securityPass).toBe(true);

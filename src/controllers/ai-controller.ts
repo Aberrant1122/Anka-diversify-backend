@@ -5,12 +5,52 @@ import { ChatRequest } from "../types";
 import { PrismaClient } from "@prisma/client";
 import { decrypt } from "../utils/encryption";
 import { listActiveReservations } from "../services/file-reservation-service";
-import { RepositoryMaterializationService } from "../services/repository-materialization.service";
 import { MultiRepoCoordinator } from "../ai/coordination/MultiRepoCoordinator";
+import { CapabilityAction, CapabilityGrant } from "../ai/runtime/CapabilityGuard";
 
 const prisma = new PrismaClient();
 
 const aiService = AiService.getInstance();
+
+const CAPABILITY_ACTIONS = new Set<CapabilityAction>(["FILE_CREATE", "FILE_MODIFY", "FILE_DELETE"]);
+
+interface CodingAgentInvocation {
+  request: ChatRequest;
+  authorizedCapabilities?: readonly CapabilityGrant[];
+}
+
+function parseCodingAgentInvocation(body: unknown): CodingAgentInvocation | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const input = body as Record<string, unknown>;
+  if (typeof input.message !== "string" || input.message.trim().length === 0) return null;
+
+  let authorizedCapabilities: CapabilityGrant[] | undefined;
+  if (input.authorizedCapabilities !== undefined) {
+    if (!Array.isArray(input.authorizedCapabilities)) return null;
+    authorizedCapabilities = [];
+    for (const value of input.authorizedCapabilities) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const grant = value as Record<string, unknown>;
+      if (
+        typeof grant.path !== "string"
+        || grant.path.trim().length === 0
+        || typeof grant.action !== "string"
+        || !CAPABILITY_ACTIONS.has(grant.action as CapabilityAction)
+      ) {
+        return null;
+      }
+      authorizedCapabilities.push({ path: grant.path, action: grant.action as CapabilityAction });
+    }
+  }
+
+  const request: ChatRequest = { message: input.message };
+  if (typeof input.sessionId === "string") request.sessionId = input.sessionId;
+  if (typeof input.repositoryId === "string") request.repositoryId = input.repositoryId;
+  if (input.context && typeof input.context === "object" && !Array.isArray(input.context)) {
+    request.context = input.context as Record<string, unknown>;
+  }
+  return { request, authorizedCapabilities };
+}
 
 export class AiController {
   // General Assistant Routes
@@ -366,11 +406,20 @@ export class AiController {
       if (!userId) return res.status(401).json({ error: "Authentication required" });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
+      const invocation = parseCodingAgentInvocation(req.body);
+      if (!invocation) return res.status(400).json({ error: "A valid message and authorizedCapabilities are required" });
+
       if (req.headers.accept?.includes("text/event-stream") || req.query.stream === "true") {
         return this.streamAgent(req, res);
       }
 
-      const result = await aiService.runCodingAgent(userId, projectId, req.body);
+      const result = await aiService.runCodingAgent(
+        userId,
+        projectId,
+        invocation.request,
+        undefined,
+        invocation.authorizedCapabilities,
+      );
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Agent run error:", error);
@@ -388,6 +437,9 @@ export class AiController {
       if (!userId) return res.status(401).json({ error: "Authentication required" });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
+      const invocation = parseCodingAgentInvocation(req.body);
+      if (!invocation) return res.status(400).json({ error: "A valid message and authorizedCapabilities are required" });
+
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -402,10 +454,11 @@ export class AiController {
       const result = await aiService.runCodingAgent(
         userId,
         projectId,
-        req.body,
+        invocation.request,
         (progressEvent: any) => {
           sendEvent("progress", progressEvent);
-        }
+        },
+        invocation.authorizedCapabilities,
       );
 
       sendEvent("complete", result);
@@ -480,78 +533,11 @@ export class AiController {
   }
 
   async pushAgentChanges(req: Request, res: Response) {
-    try {
-      const userId = req.user?.userId as string | undefined;
-      const { projectId } = req.params;
-      if (!userId) return res.status(401).json({ error: "Authentication required" });
-      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
-
-      const { changes, commitMessage } = req.body as {
-        changes: { path: string; content: string; repositoryId?: string }[];
-        commitMessage: string;
-      };
-
-      if (!changes?.length) {
-        return res.status(400).json({ error: "No changes provided" });
-      }
-
-      // Get the project and decrypt the GitHub token
-      const project = await prisma.project.findUnique({ where: { id: projectId } });
-      if (!project?.githubUrl) {
-        return res.status(400).json({ error: "No GitHub repository connected to this project" });
-      }
-
-      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
-      if (!token) {
-        return res.status(400).json({ error: "No GitHub token configured for this project. Please add your GitHub token in the project settings." });
-      }
-
-      // Group changes by target repository. Changes with no repositoryId (the
-      // single-repo case, and every existing caller) go to the project's primary
-      // repo — unchanged from before this grouping existed.
-      const primaryChanges = changes.filter((c) => !c.repositoryId);
-      const secondaryChangesByRepo = new Map<string, { path: string; content: string }[]>();
-      for (const c of changes) {
-        if (c.repositoryId) {
-          const list = secondaryChangesByRepo.get(c.repositoryId) || [];
-          list.push({ path: c.path, content: c.content });
-          secondaryChangesByRepo.set(c.repositoryId, list);
-        }
-      }
-
-      const pushes: Array<{ repositoryId: string | null; name: string; sha: string; url: string }> = [];
-
-      if (primaryChanges.length > 0) {
-        const result = await ProjectGitHubService.pushChanges(project.githubUrl, primaryChanges, commitMessage, token);
-        pushes.push({ repositoryId: null, name: "primary", ...result });
-        if (result?.sha) {
-          await RepositoryMaterializationService.syncManagedCloneToCommit(projectId, result.sha);
-        }
-      }
-
-      for (const [repositoryId, repoChanges] of secondaryChangesByRepo.entries()) {
-        const repo = await prisma.projectRepository.findFirst({ where: { id: repositoryId, projectId } });
-        if (!repo) {
-          return res.status(400).json({ error: `Repository ${repositoryId} not found on this project` });
-        }
-        const repoToken = repo.githubToken ? decrypt(repo.githubToken) : undefined;
-        if (!repoToken) {
-          return res.status(400).json({ error: `No GitHub token configured for repository "${repo.name}"` });
-        }
-        const result = await ProjectGitHubService.pushChanges(repo.githubUrl, repoChanges, commitMessage, repoToken, repo.defaultBranch);
-        pushes.push({ repositoryId: repo.id, name: repo.name, ...result });
-      }
-
-      // Top-level sha/url mirror the first push for existing callers that expect a
-      // single { sha, url } shape; `pushes` carries the full multi-repo breakdown.
-      res.json({ success: true, data: { ...pushes[0], pushes } });
-    } catch (error) {
-      console.error("Agent push error:", error);
-      res.status(500).json({
-        error: "Push failed",
-        message: error instanceof Error ? error.message : "Unknown error",
-      });
-    }
+    void req;
+    return res.status(409).json({
+      error: "GIT_WORKFLOW_REQUIRED",
+      message: "Agent changes can only ship from the verified isolated-worktree workflow after deterministic completion.",
+    });
   }
 
   async getProjectHealth(req: Request, res: Response) {
@@ -672,11 +658,13 @@ export class AiController {
   async approveManifest(req: Request, res: Response) {
     try {
       const { id } = req.params;
+      // Compatibility endpoint: approval is human planning-workflow metadata.
+      // It is never consumed as mutation, validation, checkpoint, or completion authority.
       const updated = await prisma.agentManifest.update({
         where: { id: String(id) },
         data: { validationStatus: "approved", approvedAt: new Date() },
       });
-      res.json({ success: true, data: updated });
+      res.json({ success: true, role: "PLANNING_WORKFLOW_ONLY", data: updated });
     } catch (error) {
       console.error("Approve manifest error:", error);
       res.status(500).json({ error: "Failed to approve manifest", message: error instanceof Error ? error.message : "Unknown error" });
@@ -690,7 +678,7 @@ export class AiController {
         where: { id: String(id) },
         data: { validationStatus: "rejected" },
       });
-      res.json({ success: true, data: updated });
+      res.json({ success: true, role: "PLANNING_WORKFLOW_ONLY", data: updated });
     } catch (error) {
       console.error("Reject manifest error:", error);
       res.status(500).json({ error: "Failed to reject manifest", message: error instanceof Error ? error.message : "Unknown error" });

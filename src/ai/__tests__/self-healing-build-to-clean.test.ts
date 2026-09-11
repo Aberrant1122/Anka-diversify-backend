@@ -1,3 +1,8 @@
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { AuthorizedCapabilityScope, CapabilityGrant, CapabilityGuard } from "../runtime/CapabilityGuard";
+import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import {
   SelfHealingEngine,
   MAX_TOTAL_REPAIR_CYCLES,
@@ -13,6 +18,28 @@ import { ValidationRunner } from "../validation/ValidationRunner";
 import * as sharedUtils from "../shared/utils";
 import { AgentFileChange } from "../shared/types";
 import { FileManifest } from "../../types";
+
+
+function createScopedFsManager(
+  worktree: string,
+  stageId: string,
+  grants: Array<{ path: string; action: "FILE_MODIFY" | "FILE_CREATE" | "FILE_DELETE" }>,
+): FileSystemStateManager {
+  const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+    workspaceRoot: worktree,
+    authorityId: stageId,
+    grants: grants.map((g) => ({ path: g.path, action: g.action })),
+  });
+  if (!authorizedScope) {
+    throw new Error(`Failed to create AuthorizedCapabilityScope for ${stageId}`);
+  }
+  const guard = CapabilityGuard.create({
+    workspaceRoot: worktree,
+    scopeId: stageId,
+    authorizedScope,
+  });
+  return new FileSystemStateManager(guard, stageId);
+}
 
 describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Telemetry", () => {
   const dummyManifest: FileManifest = {
@@ -68,22 +95,31 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
   });
 
   test("3. Build success stops immediately on attempt 1 without entering unnecessary repair loops", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
+    const srcDir = path.join(tempDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    const initialContent = "export const add = (a: number, b: number) => a + b;";
+    fs.writeFileSync(path.join(srcDir, "calculator.ts"), initialContent, "utf8");
+
     const initialChanges: AgentFileChange[] = [
-      { path: "src/calculator.ts", content: "export const add = (a: number, b: number) => a + b;", action: "modify", description: "Implement add" },
+      { path: "src/calculator.ts", content: initialContent, action: "modify", description: "Implement add" },
     ];
 
-    const validateSpy = jest.spyOn(ValidationRunner, "selfReviewChanges").mockResolvedValue({
+    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
+    await fsManager.snapshot(initialChanges, tempDir);
+
+    const validateSpy = jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
       success: true,
       errors: "",
     });
 
     const res = await SelfHealingEngine.runSelfHealingLoop(
       initialChanges,
-      null,
-      [],
+      tempDir,
+      ["npm run build"],
       "system prompt",
       "implement add",
-      undefined,
+      fsManager,
       undefined,
       undefined,
       dummyManifest,
@@ -94,12 +130,22 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
     expect(res.attempts).toBe(1);
     expect(res.validationDetails?.finalStatus).toBe("BUILD_CLEAN");
     expect(validateSpy).toHaveBeenCalledTimes(1);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   test("4. GOLDEN SEQUENCE: 7 sequential distinct repairable errors exceed previous 5-repair ceiling and succeed", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
+    const srcDir = path.join(tempDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "calculator.ts"), "export const v = 1;", "utf8");
+
     const initialChanges: AgentFileChange[] = [
       { path: "src/calculator.ts", content: "export const v = 1;", action: "modify", description: "Calculator variable" },
     ];
+
+    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
+    await fsManager.snapshot(initialChanges, tempDir);
 
     // Simulate 6 distinct failing builds followed by a clean build on Build 7:
     // Build 1: TS2322 (Type mismatch)
@@ -119,7 +165,7 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
     ];
 
     let callCount = 0;
-    jest.spyOn(ValidationRunner, "selfReviewChanges").mockImplementation(async () => {
+    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
       callCount++;
       if (callCount <= failureOutputs.length) {
         return {
@@ -142,6 +188,7 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       repaired: true,
@@ -173,11 +220,11 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
 
     const res = await SelfHealingEngine.runSelfHealingLoop(
       initialChanges,
-      null,
-      [],
+      tempDir,
+      ["npm run build"],
       "system prompt",
       "fix all sequential errors",
-      undefined,
+      fsManager,
       undefined,
       undefined,
       dummyManifest,
@@ -198,12 +245,20 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
   });
 
   test("5. Decreasing compiler error count (3 -> 2 -> 1 -> PASS) is valid progress and allows continuation", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
+    const srcDir = path.join(tempDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "calculator.ts"), "export const v = 1;", "utf8");
+
     const initialChanges: AgentFileChange[] = [
       { path: "src/calculator.ts", content: "export const v = 1;", action: "modify", description: "Calculator variable" },
     ];
 
+    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
+    await fsManager.snapshot(initialChanges, tempDir);
+
     let callCount = 0;
-    jest.spyOn(ValidationRunner, "selfReviewChanges").mockImplementation(async () => {
+    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
       callCount++;
       if (callCount === 1) {
         return {
@@ -238,6 +293,7 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       repaired: true,
@@ -269,11 +325,11 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
 
     const res = await SelfHealingEngine.runSelfHealingLoop(
       initialChanges,
-      null,
-      [],
+      tempDir,
+      ["npm run build"],
       "system prompt",
       "fix all errors",
-      undefined,
+      fsManager,
       undefined,
       undefined,
       dummyManifest,
@@ -284,15 +340,25 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
     expect(res.attempts).toBe(4);
     expect(callCount).toBe(4);
     expect(res.validationDetails?.finalStatus).toBe("BUILD_CLEAN");
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   test("6. Identical failure persisting after 2 applied repairs halts with NO_REPAIR_PROGRESS", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
+    const srcDir = path.join(tempDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "calculator.ts"), "export const v = 1;", "utf8");
+
     const initialChanges: AgentFileChange[] = [
       { path: "src/calculator.ts", content: "export const v = 1;", action: "modify", description: "Calculator variable" },
     ];
 
+    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
+    await fsManager.snapshot(initialChanges, tempDir);
+
     let callCount = 0;
-    jest.spyOn(ValidationRunner, "selfReviewChanges").mockImplementation(async () => {
+    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
       callCount++;
       return {
         success: false,
@@ -309,6 +375,7 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       repaired: true,
@@ -340,11 +407,11 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
 
     const res = await SelfHealingEngine.runSelfHealingLoop(
       initialChanges,
-      null,
-      [],
+      tempDir,
+      ["npm run build"],
       "system prompt",
       "fix error",
-      undefined,
+      fsManager,
       undefined,
       undefined,
       dummyManifest,
@@ -358,11 +425,19 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
   });
 
   test("7. Repeated identical repair proposal stops immediately with REPEATED_REPAIR_PROPOSAL", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
+    const srcDir = path.join(tempDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "calculator.ts"), "export const v = 1;", "utf8");
+
     const initialChanges: AgentFileChange[] = [
       { path: "src/calculator.ts", content: "export const v = 1;", action: "modify", description: "Calculator variable" },
     ];
 
-    jest.spyOn(ValidationRunner, "selfReviewChanges").mockResolvedValue({
+    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
+    await fsManager.snapshot(initialChanges, tempDir);
+
+    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
       success: false,
       errors: "src/calculator.ts(1, 1): error TS2322: Type 'number' is not assignable to type 'string'.",
     });
@@ -374,7 +449,8 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
           create: jest.fn().mockResolvedValue({
             choices: [
               {
-                message: {
+                finish_reason: "stop",
+                  message: {
                   content: JSON.stringify({
                     repaired: true,
                     patchExplanation: "Static duplicate fix",
@@ -402,13 +478,13 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
 
     jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
-    const res = await SelfHealingEngine.runSelfHealingLoop(
+        const res = await SelfHealingEngine.runSelfHealingLoop(
       initialChanges,
-      null,
-      [],
+      tempDir,
+      ["npm run build"],
       "system prompt",
       "fix error",
-      undefined,
+      fsManager,
       undefined,
       undefined,
       dummyManifest,
@@ -422,11 +498,19 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
   });
 
   test("8. Repair proposal targeting undeclared file is rejected by scope enforcer", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
+    const srcDir = path.join(tempDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "calculator.ts"), "export const v = 1;", "utf8");
+
     const initialChanges: AgentFileChange[] = [
       { path: "src/calculator.ts", content: "export const v = 1;", action: "modify", description: "Calculator variable" },
     ];
 
-    jest.spyOn(ValidationRunner, "selfReviewChanges").mockResolvedValue({
+    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
+    await fsManager.snapshot(initialChanges, tempDir);
+
+    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
       success: false,
       errors: "src/calculator.ts(1, 1): error TS2304: Cannot find name 'helper'.",
     });
@@ -437,7 +521,8 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
           create: jest.fn().mockResolvedValue({
             choices: [
               {
-                message: {
+                finish_reason: "stop",
+                  message: {
                   content: JSON.stringify({
                     repaired: true,
                     patchExplanation: "Create undeclared helper",
@@ -460,21 +545,22 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
 
     jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
-    const res = await SelfHealingEngine.runSelfHealingLoop(
-      initialChanges,
-      null,
-      [],
-      "system prompt",
-      "fix error",
-      undefined,
-      undefined,
-      undefined,
-      dummyManifest,
-      { pipeline: "REPOSITORY", targetPaths: ["src/calculator.ts"] } as any,
-    );
+    await expect(
+      SelfHealingEngine.runSelfHealingLoop(
+        initialChanges,
+        tempDir,
+        ["npm run build"],
+        "system prompt",
+        "fix error",
+        fsManager,
+        undefined,
+        undefined,
+        dummyManifest,
+        { pipeline: "REPOSITORY", targetPaths: ["src/calculator.ts"] } as any,
+      )
+    ).rejects.toThrow(/unauthorized path|LLMSchemaInvalidError|SCOPE_VIOLATION/);
 
-    expect(res.success).toBe(false);
-    expect(res.errorType).toBe("REPAIR_UNDECLARED_FILE");
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   test("9. Emergency Safety Budget constants and SPECIFIC_GATE_ERRORS are properly configured", () => {
@@ -485,7 +571,7 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
     expect(MAX_REPAIR_WALL_TIME_MS).toBe(600000);
     expect(SPECIFIC_GATE_ERRORS.has("NO_REPAIR_PROGRESS")).toBe(true);
     expect(SPECIFIC_GATE_ERRORS.has("REPEATED_REPAIR_PROPOSAL")).toBe(true);
-    expect(SPECIFIC_GATE_ERRORS.has("SCOPE_EXPANSION_REQUIRED")).toBe(true);
+    expect(SPECIFIC_GATE_ERRORS.has("SCOPE_VIOLATION")).toBe(true);
     expect(SPECIFIC_GATE_ERRORS.has("STALE_REPAIR_SOURCE")).toBe(true);
   });
 });

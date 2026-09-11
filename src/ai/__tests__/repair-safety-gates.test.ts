@@ -12,6 +12,7 @@ import { BuildErrorRepair } from "../repair/BuildErrorRepair";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import * as utils from "../shared/utils";
+import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
 
 describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", () => {
   let tempDir: string;
@@ -26,6 +27,20 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  function authorizedModifyManager(relativePath: string): FileSystemStateManager {
+    const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "repair-test-configuration",
+      grants: [{ path: relativePath, action: "FILE_MODIFY" }],
+    });
+    return new FileSystemStateManager(
+      authorizedScope
+        ? CapabilityGuard.create({ workspaceRoot: tempDir, scopeId: "repair-test", authorizedScope })
+        : CapabilityGuard.denyAll(),
+      "repair-test",
+    );
+  }
 
   // ── TEST A: Approved structured MODIFY repair succeeds ────────────────────
   test("TEST A: Approved structured MODIFY repair succeeds", () => {
@@ -217,7 +232,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
       diffCriticEnabled: false,
     };
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedModifyManager("src/auth.ts");
     await fsManager.snapshot([{ path: "src/auth.ts", content: "const state = 'initial';\n", description: "init", action: "modify" }], tempDir);
 
     // Initial validation fails
@@ -237,6 +252,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       repaired: true,
@@ -317,7 +333,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
       diffCriticEnabled: false,
     };
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedModifyManager("src/auth.ts");
     await fsManager.snapshot([{ path: "src/auth.ts", content: "const step = 1;\n", description: "init", action: "modify" }], tempDir);
 
     let valAttempts = 0;
@@ -342,6 +358,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
                         repaired: true,
@@ -365,6 +382,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
                         repaired: true,
@@ -383,7 +401,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
               };
             }
 
-            return { choices: [{ message: { content: "{}" } }] };
+            return { choices: [{ finish_reason: "stop", message: { content: "{}" } }] };
           }),
         },
       },
@@ -441,7 +459,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
       diffCriticEnabled: false,
     };
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedModifyManager("src/auth.ts");
     await fsManager.snapshot([{ path: "src/auth.ts", content: "const step = 1;\n", description: "init", action: "modify" }], tempDir);
 
     jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
@@ -460,6 +478,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
               return {
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
                         repaired: true,
@@ -481,6 +500,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
             return {
               choices: [
                 {
+                  finish_reason: "stop",
                   message: {
                     content: JSON.stringify({
                       repaired: true,
@@ -503,7 +523,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
     };
     jest.spyOn(utils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
-    const result = await SelfHealingEngine.runSelfHealingLoop(
+    await expect(SelfHealingEngine.runSelfHealingLoop(
       [{ path: "src/auth.ts", content: "const step = 1;\n", description: "init", action: "modify" }],
       tempDir,
       ["npm run build"],
@@ -514,10 +534,8 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
       undefined,
       manifest,
       contract,
-    );
+    )).rejects.toMatchObject({ code: "LLM_SCHEMA_INVALID" });
 
-    expect(result.success).toBe(false);
-    expect(result.errorType).toBe("REPAIR_UNDECLARED_FILE");
     // package.json was never created or written to disk
     expect(fs.existsSync(path.join(tempDir, "package.json"))).toBe(false);
   });
@@ -558,7 +576,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
     const ORIGINAL_CONTENT = "export const timeout = 1000;\n";
     fs.writeFileSync(filePath, ORIGINAL_CONTENT, "utf8");
 
-    const fsManager = new FileSystemStateManager();
+    const fsManager = authorizedModifyManager("src/config.ts");
     // Snapshot initial pre-run state
     await fsManager.snapshot([{ path: "src/config.ts", content: ORIGINAL_CONTENT, description: "orig", action: "modify" }], tempDir);
 

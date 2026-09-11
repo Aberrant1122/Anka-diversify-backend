@@ -154,6 +154,7 @@ describe("AI Step 16 — Framework-Aware Router Constraints & Deterministic Mani
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     files: [
@@ -193,12 +194,10 @@ describe("AI Step 16 — Framework-Aware Router Constraints & Deterministic Mani
       mockOpenAI
     );
 
-    expect(corrected).not.toBeNull();
+    // Without an explicitly bounded replacement target, correction must fail closed
+    // instead of letting the model replace the rejected path with unrelated files.
+    expect(corrected).toBeNull();
     expect(mockOpenAI.chat.completions.create).toHaveBeenCalledTimes(1);
-
-    const validator = new ManifestValidator(dummyContract, nextJsAppRouterFiles);
-    const reval = validator.validate(corrected!);
-    expect(reval.valid).toBe(true);
   });
 
   test("I. Second invalid correction fails closed", async () => {
@@ -208,6 +207,7 @@ describe("AI Step 16 — Framework-Aware Router Constraints & Deterministic Mani
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
                     files: [

@@ -214,6 +214,8 @@ describe("Dependency-Aware Generation and Missing-Dependency Routing (Section J)
           create: jest.fn().mockResolvedValue({
             choices: [
               {
+                finish_reason: "stop",
+                index: 0,
                 message: {
                   content: JSON.stringify({
                     changes: [
@@ -255,6 +257,8 @@ describe("Dependency-Aware Generation and Missing-Dependency Routing (Section J)
   test("TEST 13: SelfHealing prompt receives current errorLog, not stale root error", async () => {
     const pkgPath = path.join(tempDir, "package.json");
     fs.writeFileSync(pkgPath, JSON.stringify({ dependencies: { react: "^18.0.0" } }));
+    fs.mkdirSync(path.join(tempDir, "app"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, "app", "page.tsx"), "const a: string = foo;\n");
 
     let buildCalls = 0;
     jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
@@ -272,6 +276,8 @@ describe("Dependency-Aware Generation and Missing-Dependency Routing (Section J)
             return {
               choices: [
                 {
+                  finish_reason: "stop",
+                  index: 0,
                   message: {
                     content: JSON.stringify({
                       changes: [

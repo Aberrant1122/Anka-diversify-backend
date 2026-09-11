@@ -142,7 +142,7 @@ describe("Target Authority and HTTP Route Grounding (Cluster A Fix)", () => {
   });
 
   describe("Part H, I, O: Layered API Architecture Authority Expansion", () => {
-    it("9. layered user service/controller/route chain gets narrow authority when task explicitly requires API exposure", () => {
+    it("9. architecture wording alone does not grant layered service/controller/route authority", () => {
       const message = "Add a service method for retrieving active users and expose it through the existing API architecture.";
       const contract = buildExecutionContract(
         { ...baseClassification, taskType: "NEW_FEATURE" },
@@ -150,13 +150,10 @@ describe("Target Authority and HTTP Route Grounding (Cluster A Fix)", () => {
         sampleRepoFiles
       );
 
-      expect(contract.targetPaths).toContain("src/services/user.service.ts");
-      expect(contract.targetPaths).toContain("src/controllers/user.controller.ts");
-      expect(contract.targetPaths).toContain("src/routes/user.routes.ts");
-
-      expect(contract.targetProvenance?.["src/services/user.service.ts"]).toBe("DETERMINISTIC_ARCHITECTURE_DEPENDENCY");
-      expect(contract.targetProvenance?.["src/controllers/user.controller.ts"]).toBe("DETERMINISTIC_ARCHITECTURE_DEPENDENCY");
-      expect(contract.targetProvenance?.["src/routes/user.routes.ts"]).toBe("DETERMINISTIC_ARCHITECTURE_DEPENDENCY");
+      expect(contract.targetPaths).toEqual([]);
+      expect(contract.targetProvenance?.["src/services/user.service.ts"]).toBeUndefined();
+      expect(contract.targetProvenance?.["src/controllers/user.controller.ts"]).toBeUndefined();
+      expect(contract.targetProvenance?.["src/routes/user.routes.ts"]).toBeUndefined();
     });
 
     it("10. unrelated route/controller/service files are not authorized", () => {
@@ -174,7 +171,7 @@ describe("Target Authority and HTTP Route Grounding (Cluster A Fix)", () => {
       expect(contract.targetPaths).not.toContain("src/controllers/health.controller.ts");
     });
 
-    it("resolves GET /health/details layered architecture without malforming paths", () => {
+    it("does not turn GET /health/details text into file authority or malformed paths", () => {
       const message = "Add a GET /health/details endpoint using the existing route, controller, and service architecture.";
       const contract = buildExecutionContract(
         { ...baseClassification, taskType: "NEW_FEATURE" },
@@ -184,9 +181,10 @@ describe("Target Authority and HTTP Route Grounding (Cluster A Fix)", () => {
 
       expect(contract.targetPaths).not.toContain("health/details");
       expect(contract.targetPaths).not.toContain("/health/details");
-      expect(contract.targetPaths).toContain("src/routes/health.routes.ts");
-      expect(contract.targetPaths).toContain("src/controllers/health.controller.ts");
-      expect(contract.targetPaths).toContain("src/services/health.service.ts");
+      expect(contract.targetPaths).toEqual([]);
+      expect(contract.targetProvenance?.["src/routes/health.routes.ts"]).toBeUndefined();
+      expect(contract.targetProvenance?.["src/controllers/health.controller.ts"]).toBeUndefined();
+      expect(contract.targetProvenance?.["src/services/health.service.ts"]).toBeUndefined();
     });
   });
 

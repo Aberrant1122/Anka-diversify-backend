@@ -1,8 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { exec, execSync } from "child_process";
-import { promisify } from "util";
+import crypto from "crypto";
 import { AgentPipeline } from "../ai/orchestration/AgentPipeline";
 import { AgentFileChange, AgentProgressEvent, AgentResponse, ChatRequest, BaselineDiagnostic } from "../types";
 import { WorktreeDependencyService, DependencyPreparationResult } from "./worktree-dependency.service";
@@ -17,8 +16,41 @@ import { RepositoryCacheManager } from "./repository-cache.manager";
 import { VisualVerifierService } from "./visual-verifier.service";
 import { detectRepositoryArchitecture } from "../ai/planning/RepositoryArchitectureDetector";
 import { VisualVerificationResult } from "../types";
+import {
+  BaselineDiagnosticVerifier,
+  DiagnosticBaselineComparison,
+  DiagnosticValidationSnapshot,
+} from "../ai/runtime/BaselineDiagnosticVerifier";
+import { AuthorizedCapabilityScope, CapabilityGrant } from "../ai/runtime/CapabilityGuard";
+import type { TaskRuntime } from "../ai/runtime/TaskRuntime";
+import { CompletionEvaluationResult, CompletionEvaluator } from "../ai/runtime/CompletionEvaluator";
+import { VerifiedCheckpointJournal } from "../ai/runtime/VerifiedCheckpointJournal";
+import { RepositoryObserver } from "../ai/orchestration/RepositoryObserver";
+import { NodeGitCommandExecutor } from "./git-command";
+import { GitShippingMode, GitShippingResult, GitWorkflowService } from "./git-workflow.service";
+import type { CodeReviewProvider } from "./code-review-provider";
 
-const execAsync = promisify(exec);
+const git = new NodeGitCommandExecutor();
+
+interface RunOwnershipRecord {
+  readonly runId: string;
+  readonly repositoryRoot: string;
+  readonly worktreePath: string;
+  readonly branchName: string;
+}
+
+function publicCompletionResult(result: CompletionEvaluationResult): NonNullable<AgentResponse["completionEvaluation"]> {
+  if (result.outcome === "COMPLETE") {
+    return { outcome: result.outcome, code: result.code, satisfiedRequirementIds: result.satisfiedRequirementIds };
+  }
+  if (result.outcome === "CLARIFICATION_REQUIRED") {
+    return { outcome: result.outcome, code: result.code, question: result.question, reason: result.reason };
+  }
+  if (result.outcome === "BLOCKED" || result.outcome === "INCOMPLETE") {
+    return { outcome: result.outcome, code: result.code, category: result.category, message: result.message };
+  }
+  return { outcome: result.outcome, code: result.code, message: result.message };
+}
 
 export interface PrepareRepositoryRunOptions {
   repositoryPath: string;
@@ -49,8 +81,20 @@ export interface RepositoryRunSummary {
   validationPassed: boolean;
   validationCommands: string[];
   validationErrors?: string;
+  diagnosticComparison?: DiagnosticBaselineComparison;
   visualVerification?: VisualVerificationResult;
   agentResponse: AgentResponse;
+  shipping?: GitShippingResult;
+}
+
+export interface RepositoryShippingPolicy {
+  readonly shippingId: string;
+  readonly mode: GitShippingMode;
+  readonly targetBranch: string;
+  readonly trustedTargetRevision: string;
+  readonly remote?: string;
+  readonly expectedRepositoryIdentity?: string;
+  readonly reviewProvider?: CodeReviewProvider;
 }
 
 export interface RunIsolatedAgentOptions {
@@ -59,6 +103,9 @@ export interface RunIsolatedAgentOptions {
   repositoryPath: string;
   runId: string;
   request: ChatRequest;
+  authorizedCapabilities?: readonly CapabilityGrant[];
+  taskRuntime?: TaskRuntime;
+  shipping?: RepositoryShippingPolicy;
   onProgress?: (event: AgentProgressEvent) => void;
 }
 
@@ -80,6 +127,23 @@ export class GitWorktreeService {
   }
 
   /**
+   * Binds independently supplied task grants to the deterministic isolated
+   * worktree boundary. Containment alone never creates write authority.
+   */
+  public static createIsolatedCapabilityScope(
+    worktreePath: string,
+    runId: string,
+    authorizedCapabilities?: readonly CapabilityGrant[],
+  ): AuthorizedCapabilityScope | null {
+    if (!authorizedCapabilities || authorizedCapabilities.length === 0) return null;
+    return AuthorizedCapabilityScope.fromIsolatedWorktree({
+      workspaceRoot: worktreePath,
+      authorityId: `isolated-worktree:${runId}`,
+      grants: authorizedCapabilities,
+    });
+  }
+
+  /**
    * Returns root directory for disposable run worktrees.
    * Default: os.tmpdir()/anka/runs, overrideable via ANKA_RUNS_DIR.
    */
@@ -87,6 +151,42 @@ export class GitWorktreeService {
     return process.env.ANKA_RUNS_DIR
       ? path.resolve(process.env.ANKA_RUNS_DIR)
       : path.join(os.tmpdir(), "anka", "runs");
+  }
+
+  private static validateRunId(runId: string): void {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(runId)) {
+      throw new Error("INVALID_RUN_ID: runId must be a backend-safe identifier.");
+    }
+  }
+
+  private static ownershipPath(runId: string): string {
+    return path.join(this.getRunsRoot(), ".owners", `${runId}.json`);
+  }
+
+  private static async writeOwnership(record: RunOwnershipRecord): Promise<void> {
+    const marker = this.ownershipPath(record.runId);
+    await fs.promises.mkdir(path.dirname(marker), { recursive: true });
+    await fs.promises.writeFile(marker, JSON.stringify(record), { encoding: "utf8", flag: "wx" });
+  }
+
+  private static async readOwnership(runId: string): Promise<RunOwnershipRecord | null> {
+    try {
+      const value: unknown = JSON.parse(await fs.promises.readFile(this.ownershipPath(runId), "utf8"));
+      if (!value || typeof value !== "object") return null;
+      const record = value as Partial<RunOwnershipRecord>;
+      if (record.runId !== runId || typeof record.repositoryRoot !== "string"
+        || typeof record.worktreePath !== "string" || typeof record.branchName !== "string") return null;
+      const expectedPath = path.resolve(this.getRunsRoot(), runId);
+      if (path.resolve(record.worktreePath) !== expectedPath || !record.branchName.startsWith("anka/run-")) return null;
+      return Object.freeze({
+        runId,
+        repositoryRoot: path.resolve(record.repositoryRoot),
+        worktreePath: expectedPath,
+        branchName: record.branchName,
+      });
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -108,7 +208,7 @@ export class GitWorktreeService {
     }
 
     try {
-      const { stdout } = await execAsync("git rev-parse --show-toplevel", { cwd: resolvedPath });
+      const { stdout } = await git.run(resolvedPath, ["rev-parse", "--show-toplevel"]);
       const root = stdout.trim();
       return path.resolve(root);
     } catch (err: any) {
@@ -133,7 +233,7 @@ export class GitWorktreeService {
    */
   static async getHeadCommitSha(repositoryRoot: string): Promise<string> {
     try {
-      const { stdout } = await execAsync("git rev-parse HEAD", { cwd: repositoryRoot });
+      const { stdout } = await git.run(repositoryRoot, ["rev-parse", "HEAD"]);
       const sha = stdout.trim();
       if (!sha || sha.length < 7) {
         throw new Error("Unable to resolve valid Git HEAD commit SHA.");
@@ -150,7 +250,7 @@ export class GitWorktreeService {
    */
   static async assertCleanWorkingTree(repositoryRoot: string): Promise<void> {
     try {
-      const { stdout } = await execAsync("git status --porcelain", { cwd: repositoryRoot });
+      const { stdout } = await git.run(repositoryRoot, ["status", "--porcelain"]);
       if (stdout.trim().length > 0) {
         throw new Error(
           `SOURCE_REPOSITORY_DIRTY: Source repository at "${repositoryRoot}" contains uncommitted changes. ANKA requires a clean repository state before creating an isolated execution worktree.`
@@ -170,9 +270,8 @@ export class GitWorktreeService {
    */
   static async prepareRepositoryRun(options: PrepareRepositoryRunOptions): Promise<PreparedRepositoryRun> {
     const { repositoryPath, runId } = options;
-    if (!runId || typeof runId !== "string") {
-      throw new Error("INVALID_RUN_ID: runId must be a non-empty string.");
-    }
+    if (!runId || typeof runId !== "string") throw new Error("INVALID_RUN_ID: runId must be a non-empty string.");
+    this.validateRunId(runId);
 
     // Verify runtime tools before executing
     await RuntimePreflightService.verifyTools(["git", "node", "npm"]);
@@ -184,39 +283,29 @@ export class GitWorktreeService {
     const branchName = `anka/run-${runId}`;
     const worktreePath = path.resolve(this.getRunsRoot(), runId);
 
-    // Track active run in memory
-    this.activeRuns.add(runId);
-
     // Ensure parent temp directory exists
     await fs.promises.mkdir(path.dirname(worktreePath), { recursive: true });
 
-    // Clean prior stale worktree path if present
-    if (fs.existsSync(worktreePath)) {
-      try {
-        await execAsync(`git worktree remove --force "${worktreePath}"`, { cwd: repositoryRoot });
-      } catch {}
-      try {
-        await fs.promises.rm(worktreePath, { recursive: true, force: true });
-      } catch {}
+    // A collision is never treated as authority to delete an existing path or branch.
+    if (fs.existsSync(worktreePath) || fs.existsSync(this.ownershipPath(runId))) {
+      throw new Error(`WORKTREE_COLLISION: Refusing to replace existing run path or ownership record for "${runId}".`);
     }
-
-    // Prune stale worktree registrations
-    try {
-      await execAsync("git worktree prune", { cwd: repositoryRoot });
-    } catch {}
-
-    // Delete existing branch with identical name if leftover
-    try {
-      await execAsync(`git branch -D "${branchName}"`, { cwd: repositoryRoot });
-    } catch {}
+    const branchExists = await git.run(repositoryRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`])
+      .then(() => true, () => false);
+    if (branchExists) throw new Error(`WORKTREE_COLLISION: Refusing to delete existing branch "${branchName}".`);
 
     // Create branch and worktree from base commit SHA
     try {
-      await execAsync(`git worktree add -b "${branchName}" "${worktreePath}" ${baseCommitSha}`, {
-        cwd: repositoryRoot,
-      });
+      await git.run(repositoryRoot, ["worktree", "add", "-b", branchName, worktreePath, baseCommitSha]);
+      await this.writeOwnership({ runId, repositoryRoot, worktreePath, branchName });
+      this.activeRuns.add(runId);
     } catch (err: any) {
       this.activeRuns.delete(runId);
+      // This path/branch was created by the immediately preceding command, so
+      // cleanup remains bounded even if ownership-record persistence failed.
+      try { await git.run(repositoryRoot, ["worktree", "remove", "--force", worktreePath]); } catch {}
+      try { await git.run(repositoryRoot, ["branch", "-D", branchName]); } catch {}
+      try { await fs.promises.rm(this.ownershipPath(runId), { force: true }); } catch {}
       throw new Error(
         `WORKTREE_CREATION_FAILED: Failed creating isolated worktree at "${worktreePath}": ${err?.message || err}`
       );
@@ -236,7 +325,7 @@ export class GitWorktreeService {
    */
   static async getWorktreeDiff(worktreePath: string, baseCommitSha: string): Promise<WorktreeDiffResult> {
     try {
-      const { stdout: statusOut } = await execAsync("git status --porcelain", { cwd: worktreePath });
+      const { stdout: statusOut } = await git.run(worktreePath, ["status", "--porcelain"]);
       const changedFiles = statusOut
         .split("\n")
         .map((line) => {
@@ -246,7 +335,7 @@ export class GitWorktreeService {
         })
         .filter(Boolean);
 
-      const { stdout: diffOut } = await execAsync(`git diff ${baseCommitSha}`, { cwd: worktreePath });
+      const { stdout: diffOut } = await git.run(worktreePath, ["diff", baseCommitSha]);
 
       const diffLines = diffOut.split("\n");
       const summaryLines = diffLines.filter((l) => l.startsWith("diff --git") || l.startsWith("+++") || l.startsWith("---"));
@@ -271,9 +360,14 @@ export class GitWorktreeService {
    */
   static async rollbackWorktree(worktreePath: string, baseCommitSha: string): Promise<void> {
     if (!worktreePath || !fs.existsSync(worktreePath)) return;
+    const runId = path.basename(path.resolve(worktreePath));
+    const ownership = await this.readOwnership(runId);
+    if (!ownership || ownership.worktreePath !== path.resolve(worktreePath)) {
+      throw new Error("WORKTREE_OWNERSHIP_REQUIRED: Refusing rollback outside an ANKA-owned run worktree.");
+    }
     try {
-      await execAsync(`git reset --hard ${baseCommitSha}`, { cwd: worktreePath });
-      await execAsync("git clean -fd", { cwd: worktreePath });
+      await git.run(worktreePath, ["reset", "--hard", baseCommitSha]);
+      await git.run(worktreePath, ["clean", "-fd"]);
     } catch (err) {
       console.error(`[GitWorktreeService] Failed to rollback worktree at "${worktreePath}":`, err);
     }
@@ -288,29 +382,21 @@ export class GitWorktreeService {
     branchName?: string,
     runId?: string
   ): Promise<void> {
-    if (runId) {
-      this.activeRuns.delete(runId);
+    const effectiveRunId = runId ?? path.basename(path.resolve(worktreePath));
+    const ownership = await this.readOwnership(effectiveRunId);
+    if (!ownership || ownership.worktreePath !== path.resolve(worktreePath)) return;
+    if (repositoryRoot && path.resolve(repositoryRoot) !== ownership.repositoryRoot) return;
+    if (branchName && branchName !== ownership.branchName) return;
+    this.activeRuns.delete(effectiveRunId);
+    if (fs.existsSync(ownership.repositoryRoot)) {
+      try { await git.run(ownership.repositoryRoot, ["worktree", "remove", "--force", ownership.worktreePath]); } catch {}
+      try { await git.run(ownership.repositoryRoot, ["worktree", "prune"]); } catch {}
+      try { await git.run(ownership.repositoryRoot, ["branch", "-D", ownership.branchName]); } catch {}
     }
-
-    if (repositoryRoot && fs.existsSync(repositoryRoot)) {
-      try {
-        await execAsync(`git worktree remove --force "${worktreePath}"`, { cwd: repositoryRoot });
-      } catch {}
-      try {
-        await execAsync("git worktree prune", { cwd: repositoryRoot });
-      } catch {}
-      if (branchName) {
-        try {
-          await execAsync(`git branch -D "${branchName}"`, { cwd: repositoryRoot });
-        } catch {}
-      }
+    if (fs.existsSync(ownership.worktreePath)) {
+      try { await fs.promises.rm(ownership.worktreePath, { recursive: true, force: true }); } catch {}
     }
-
-    if (fs.existsSync(worktreePath)) {
-      try {
-        await fs.promises.rm(worktreePath, { recursive: true, force: true });
-      } catch {}
-    }
+    try { await fs.promises.rm(this.ownershipPath(effectiveRunId), { force: true }); } catch {}
   }
 
   /**
@@ -332,18 +418,20 @@ export class GitWorktreeService {
         for (const entry of entries) {
           if (entry.isDirectory()) {
             const runId = entry.name;
+            if (runId === ".owners") continue;
             if (this.activeRuns.has(runId)) {
               continue;
             }
 
             const fullPath = path.join(rootDir, runId);
             try {
-              if (fs.existsSync(fullPath)) {
+              const ownership = rootDir === runsRoot ? await this.readOwnership(runId) : null;
+              if (ownership && fs.existsSync(fullPath)) {
                 const stat = await fs.promises.stat(fullPath);
                 const age = now - stat.mtimeMs;
                 if (age >= maxAgeMs) {
-                  await fs.promises.rm(fullPath, { recursive: true, force: true });
-                  cleanedCount++;
+                  await this.cleanupWorktree(fullPath, ownership.repositoryRoot, ownership.branchName, runId);
+                  if (!fs.existsSync(fullPath)) cleanedCount++;
                 }
               }
             } catch {}
@@ -366,6 +454,7 @@ export class GitWorktreeService {
     return RepositoryCacheManager.withLease(projectId, async () => {
       const prepared = await this.prepareRepositoryRun({ repositoryPath, runId });
       console.log(`[ANKA_EXEC] worktree=${prepared.worktreePath}`);
+      let preserveForShippingRetry = false;
 
       try {
         // 2. Prepare dependencies inside isolated worktree
@@ -527,6 +616,7 @@ export class GitWorktreeService {
       let baselineBuildErrors: string | undefined;
       let baselineRepairedChanges: AgentFileChange[] = [];
       let baselineDiagnostics: BaselineDiagnostic[] = [];
+      let baselineValidationSnapshot: DiagnosticValidationSnapshot | null = null;
       let targetedBaselineDiagnostics: BaselineDiagnostic[] = [];
       let isBaselineDeltaTask = false;
 
@@ -623,6 +713,15 @@ export class GitWorktreeService {
             }
           }
         }
+
+        baselineValidationSnapshot = BaselineDiagnosticVerifier.capture({
+          phase: "BASELINE",
+          passed: baselineBuildPassed,
+          commands: baselineCommands,
+          diagnostics: baselineBuildPassed ? [] : baselineDiagnostics,
+          repositoryRoot: prepared.worktreePath,
+          source: "DETERMINISTIC_TOOL",
+        });
       }
 
       console.log(`[REPO_HEALTH] baselineHealthy=${baselineBuildPassed || isBaselineDeltaTask}`);
@@ -635,6 +734,7 @@ export class GitWorktreeService {
       // 4. Run AgentPipeline strictly targeting the isolated worktree
       let agentResponse: AgentResponse;
       let executionError: Error | null = null;
+      const checkpointJournal = new VerifiedCheckpointJournal();
 
       try {
         agentResponse = await AgentPipeline.runCodingAgent(
@@ -644,6 +744,11 @@ export class GitWorktreeService {
           onProgress,
           {
             effectiveLocalPath: prepared.worktreePath,
+            authorizedCapabilityScope: this.createIsolatedCapabilityScope(
+              prepared.worktreePath,
+              runId,
+              options.authorizedCapabilities,
+            ) ?? undefined,
             baselineDiagnostics,
             targetedBaselineDiagnostics,
             isBaselineDeltaTask,
@@ -653,6 +758,9 @@ export class GitWorktreeService {
             dependenciesReady: depPrep.success,
             baselineCommands,
             baselineBuildErrors,
+            taskRuntime: options.taskRuntime,
+            checkpointJournal,
+            deferCompletionToGitWorktree: Boolean(options.taskRuntime),
           }
         );
       } catch (err: any) {
@@ -660,70 +768,93 @@ export class GitWorktreeService {
         throw err;
       }
 
-      if (prepared.worktreePath && agentResponse.changes && agentResponse.changes.length > 0) {
-        const allowedPaths = new Set(agentResponse.changes.map((c) => c.path.replace(/\\/g, "/")));
-        if (!allowedPaths.has("package.json")) {
-          try {
-            await execAsync("git checkout HEAD -- package.json package-lock.json", { cwd: prepared.worktreePath });
-          } catch {}
-        }
+      let diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
+      const dependencyFiles = new Set(["package.json", "package-lock.json"]);
+      const actualDependencyDelta = diffInfo.changedFiles.some((file) => dependencyFiles.has(file.replace(/\\/g, "/")));
+      const trustedDependencyGrant = (options.authorizedCapabilities ?? []).some((grant) =>
+        dependencyFiles.has(grant.path.replace(/\\/g, "/"))
+          && (grant.action === "FILE_CREATE" || grant.action === "FILE_MODIFY"),
+      );
+      if (prepared.worktreePath && actualDependencyDelta && !trustedDependencyGrant) {
+        try {
+          await git.run(prepared.worktreePath, ["checkout", "HEAD", "--", "package.json", "package-lock.json"]);
+          diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
+        } catch {}
       }
-
-      const diffInfo = await this.getWorktreeDiff(prepared.worktreePath, prepared.baseCommitSha);
 
       let validationPassed = false;
       let deltaResult: BaselineDeltaResult | null = null;
+      let diagnosticComparison: DiagnosticBaselineComparison | undefined;
 
-      if (baselineCommands.length > 0 && isBaselineDeltaTask) {
-        if (agentResponse.taskVerified) {
-          validationPassed = true;
-          agentResponse.buildVerified = Boolean(agentResponse.repositoryClean);
-          agentResponse.healthStatus = agentResponse.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY";
-          if (!agentResponse.repositoryClean && agentResponse.deltaResult) {
-            agentResponse.explanation = BaselineDeltaVerifier.formatDeltaExplanation(agentResponse.deltaResult);
+      if (baselineCommands.length > 0 && baselineValidationSnapshot) {
+        const postBuild = await ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands);
+        const postChangeDiagnostics = BaselineDeltaVerifier.extractDiagnostics(postBuild.errors, "CURRENT_TASK");
+        const currentValidationSnapshot = BaselineDiagnosticVerifier.capture({
+          phase: "CURRENT",
+          passed: postBuild.success,
+          commands: baselineCommands,
+          diagnostics: postChangeDiagnostics,
+          repositoryRoot: prepared.worktreePath,
+          source: "DETERMINISTIC_TOOL",
+        });
+        diagnosticComparison = BaselineDiagnosticVerifier.compare(baselineValidationSnapshot, currentValidationSnapshot);
+
+        if (isBaselineDeltaTask) {
+          const currentIdentities = new Set(
+            diagnosticComparison.currentOutcomes.map((outcome) => outcome.diagnostic.identity),
+          );
+          const introducedIdentities = new Set(
+            diagnosticComparison.currentOutcomes
+              .filter((outcome) => outcome.classification === "INTRODUCED")
+              .map((outcome) => outcome.diagnostic.identity),
+          );
+          const resolvedTargetDiagnostics = targetedBaselineDiagnostics.filter((diagnostic) =>
+            !currentIdentities.has(BaselineDiagnosticVerifier.identityOf(diagnostic, prepared.worktreePath)),
+          );
+          const remainingBaselineDiagnostics = baselineDiagnostics.filter((diagnostic) =>
+            currentIdentities.has(BaselineDiagnosticVerifier.identityOf(diagnostic, prepared.worktreePath)),
+          );
+          const newTaskDiagnostics = postChangeDiagnostics.filter((diagnostic) =>
+            introducedIdentities.has(BaselineDiagnosticVerifier.identityOf(diagnostic, prepared.worktreePath)),
+          );
+          const allTargetedResolved = targetedBaselineDiagnostics.length > 0
+            && resolvedTargetDiagnostics.length === targetedBaselineDiagnostics.length;
+          const broadRepair = BaselineDeltaVerifier.isBroadBuildRepairTask(request.message);
+          const repositoryClean = postBuild.success && postChangeDiagnostics.length === 0;
+          const taskVerified = diagnosticComparison.verifiedSuccess
+            && (broadRepair ? repositoryClean : allTargetedResolved);
+
+          deltaResult = {
+            baselineDiagnosticCount: baselineDiagnostics.length,
+            targetedBaselineDiagnostics,
+            resolvedTargetDiagnostics,
+            remainingBaselineDiagnostics,
+            revealedBaselineDiagnostics: [],
+            newTaskDiagnostics,
+            taskVerified,
+            repositoryClean,
+          };
+          validationPassed = taskVerified;
+          agentResponse.buildVerified = repositoryClean;
+          agentResponse.taskVerified = taskVerified;
+          agentResponse.repositoryClean = repositoryClean;
+          agentResponse.healthStatus = repositoryClean ? "HEALTHY" : taskVerified
+            ? "TASK_VERIFIED_REPOSITORY_UNHEALTHY"
+            : "BASELINE_REPOSITORY_UNHEALTHY";
+          if (taskVerified && !repositoryClean) {
+            agentResponse.explanation = BaselineDeltaVerifier.formatDeltaExplanation(deltaResult);
           }
         } else {
-          const postBuild = await ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands);
-          const postChangeDiagnostics = BaselineDeltaVerifier.extractDiagnostics(postBuild.errors, "CURRENT_TASK");
-
-          const preTaskSourceGetter = (filePath: string) => {
-            try {
-              const absPath = path.join(prepared.worktreePath, filePath);
-              // If git show baseCommitSha is available
-              return execSync(`git show ${prepared.baseCommitSha}:${filePath}`, {
-                cwd: prepared.worktreePath,
-                encoding: "utf8",
-                stdio: ["pipe", "pipe", "ignore"],
-              });
-            } catch {
-              return null;
-            }
-          };
-
-          deltaResult = BaselineDeltaVerifier.compareBaselineVsPostChange(
-            baselineDiagnostics,
-            postChangeDiagnostics,
-            targetedBaselineDiagnostics,
-            {
-              preTaskSourceGetter,
-              changes: agentResponse.changes,
-              isBroadRepairTask: BaselineDeltaVerifier.isBroadBuildRepairTask(request.message),
-            }
+          validationPassed = Boolean(
+            agentResponse.buildVerified === true
+            && !executionError
+            && postBuild.success
+            && diagnosticComparison.verifiedSuccess,
           );
-
-          if (deltaResult.taskVerified) {
-            validationPassed = true;
-            agentResponse.buildVerified = Boolean(deltaResult.repositoryClean);
-            agentResponse.taskVerified = true;
-            agentResponse.repositoryClean = deltaResult.repositoryClean;
-            agentResponse.healthStatus = deltaResult.repositoryClean ? "HEALTHY" : "TASK_VERIFIED_REPOSITORY_UNHEALTHY";
-            if (!deltaResult.repositoryClean) {
-              agentResponse.explanation = BaselineDeltaVerifier.formatDeltaExplanation(deltaResult);
-            }
-          } else {
-            validationPassed = false;
-            agentResponse.buildVerified = false;
-          }
+          agentResponse.buildVerified = validationPassed;
+          agentResponse.taskVerified = validationPassed;
+          agentResponse.repositoryClean = validationPassed;
+          if (!validationPassed) agentResponse.healthStatus = "BASELINE_REPOSITORY_UNHEALTHY";
         }
       } else {
         validationPassed = Boolean(agentResponse.buildVerified === true && !executionError);
@@ -738,6 +869,80 @@ export class GitWorktreeService {
         if (!agentResponse.buildErrors) {
           agentResponse.buildErrors = agentResponse.explanation || "Zero changes generated without explicit verified no-op.";
         }
+      }
+
+      if (
+        options.taskRuntime
+        && options.taskRuntime.snapshot().status === "RUNNING"
+        && agentResponse.agentLoop?.outcome === "AWAITING_COMPLETION_EVALUATION"
+      ) {
+        const completionFacts = await RepositoryObserver.loadProjectFacts(projectId);
+        const completionObservation = await RepositoryObserver.observe(projectId, request, completionFacts, {
+          effectiveLocalPath: prepared.worktreePath,
+        });
+        const repositoryRevision = completionObservation.currentRevisionHash
+          ?? `unversioned-git-worktree-completion-${runId}`;
+        let completionWorkspace = options.taskRuntime.workspaceState().withRelevantPaths([
+          ...options.taskRuntime.workspaceState().snapshot().relevantPaths,
+          ...diffInfo.changedFiles,
+        ]).withEvidence({
+          id: `git-worktree-completion:${runId}:${repositoryRevision}`,
+          kind: "MATERIALIZED_REPOSITORY",
+          description: "Git worktree validation captured fresh materialized disk reality for CP8.",
+          revision: repositoryRevision,
+        });
+        if (diagnosticComparison) completionWorkspace = completionWorkspace.withDiagnosticComparison(diagnosticComparison);
+        options.taskRuntime.updateWorkspace(completionWorkspace);
+        const deterministicNoOp = agentResponse.successfulNoOp === true
+          && agentResponse.reason === "ALREADY_SATISFIED"
+          && validationPassed;
+        const completion = CompletionEvaluator.evaluate({
+          runtime: options.taskRuntime,
+          handoff: {
+            outcome: agentResponse.agentLoop.outcome,
+            workingPlanId: agentResponse.agentLoop.workingPlanId,
+            workingPlanRevision: agentResponse.agentLoop.workingPlanRevision,
+          },
+          journal: checkpointJournal,
+          repository: {
+            root: prepared.worktreePath,
+            revision: repositoryRevision,
+            changedPaths: diffInfo.changedFiles,
+            source: "MATERIALIZED_REPOSITORY",
+            coverage: "FULL_REPOSITORY_DELTA",
+            trustedChanges: baselineRepairedChanges.map((change) => ({
+              path: change.path,
+              fingerprint: change.action === "delete" || change.isDeleted
+                ? "MISSING"
+                : crypto.createHash("sha256").update(change.content).digest("hex"),
+              source: "BASELINE_REPAIR_COORDINATOR" as const,
+            })),
+          },
+          validation: {
+            passed: validationPassed,
+            repositoryRevision,
+            source: "GIT_WORKTREE_VALIDATION",
+          },
+          requirements: CompletionEvaluator.requirementsFromPlan(
+            agentResponse.taskExecutionPlan,
+            repositoryRevision,
+            checkpointJournal,
+            deterministicNoOp,
+          ),
+          diagnosticComparison,
+          diagnosticRepositoryRevision: diagnosticComparison ? repositoryRevision : undefined,
+          diagnosticsRequired: baselineCommands.length > 0,
+        });
+        if (completion.outcome === "COMPLETE") {
+          options.taskRuntime.complete(completion.receipt);
+          agentResponse.lifecycleStage = "Done";
+          agentResponse.compoundTaskStatus = "COMPLETED";
+        } else {
+          if (agentResponse.lifecycleStage === "Done") agentResponse.lifecycleStage = "Determine Completion";
+          if (agentResponse.compoundTaskStatus === "COMPLETED") agentResponse.compoundTaskStatus = "VERIFIED";
+        }
+        agentResponse.completionEvaluation = publicCompletionResult(completion);
+        agentResponse.taskRuntime = options.taskRuntime.snapshot();
       }
 
       // Step 4: Bounded Playwright Visual Verification for supported frontend apps
@@ -771,6 +976,45 @@ export class GitWorktreeService {
         }
       }
 
+      let shipping: GitShippingResult | undefined;
+      if (options.shipping) {
+        if (!options.taskRuntime) {
+          throw new Error("GIT_WORKFLOW_REQUIRED: Shipping requires the authoritative TaskRuntime.");
+        }
+        // From this point, a shipping failure must not erase already-verified task history.
+        preserveForShippingRetry = true;
+        const infrastructureChanges = baselineRepairedChanges.map((change) => {
+          const relativePath = change.path.replace(/\\/g, "/");
+          const absolutePath = path.resolve(prepared.worktreePath, relativePath);
+          return Object.freeze({
+            path: relativePath,
+            fingerprint: change.action === "delete" || change.isDeleted || !fs.existsSync(absolutePath)
+              ? "MISSING"
+              : crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex"),
+            policyAuthorized: true as const,
+          });
+        });
+        shipping = await new GitWorkflowService().ship({
+          repositoryRoot: prepared.repositoryRoot,
+          worktreePath: prepared.worktreePath,
+          baseRevision: prepared.baseCommitSha,
+          taskBranch: prepared.branchName,
+          targetBranch: options.shipping.targetBranch,
+          trustedTargetRevision: options.shipping.trustedTargetRevision,
+          shippingId: options.shipping.shippingId,
+          taskRuntime: options.taskRuntime,
+          checkpointJournal,
+          validationPassed,
+          mode: options.shipping.mode,
+          remote: options.shipping.remote,
+          expectedRepositoryIdentity: options.shipping.expectedRepositoryIdentity,
+          commitSummary: agentResponse.commitMessage,
+          trustedInfrastructureChanges: infrastructureChanges,
+          reviewProvider: options.shipping.reviewProvider,
+          validationSummary: validationPassed ? "Deterministic validation passed" : "Deterministic validation failed",
+        });
+      }
+
       return {
         runId,
         branchName: prepared.branchName,
@@ -781,7 +1025,9 @@ export class GitWorktreeService {
         validationPassed,
         validationCommands: agentResponse.validationCommands || baselineCommands,
         validationErrors: !validationPassed ? (agentResponse.buildErrors || agentResponse.explanation) : undefined,
+        diagnosticComparison,
         visualVerification,
+        ...(shipping ? { shipping } : {}),
         agentResponse: {
           ...agentResponse,
           changes: totalChanges,
@@ -799,7 +1045,9 @@ export class GitWorktreeService {
           baselineBuild: baselineBuildPassed ? "PASS" : "FAIL",
           baselineReady: baselineBuildPassed,
           buildReady: baselineBuildPassed,
-          origin: validationPassed ? (deltaResult && !deltaResult.repositoryClean ? "BASELINE" : (agentResponse.repositoryClean === false ? "BASELINE" : undefined)) : "CURRENT_TASK",
+          origin: deltaResult
+            ? (deltaResult.newTaskDiagnostics.length > 0 ? "CURRENT_TASK" : (!deltaResult.repositoryClean ? "BASELINE" : undefined))
+            : (validationPassed ? (agentResponse.repositoryClean === false ? "BASELINE" : undefined) : "CURRENT_TASK"),
           agentIntroduced: Boolean(!validationPassed && (deltaResult ? deltaResult.newTaskDiagnostics.length > 0 : !agentResponse.buildVerified)),
           taskVerified: deltaResult ? deltaResult.taskVerified : (agentResponse.taskVerified ?? validationPassed),
           repositoryClean: deltaResult ? deltaResult.repositoryClean : (agentResponse.repositoryClean ?? (agentResponse.buildVerified && validationPassed)),
@@ -813,12 +1061,16 @@ export class GitWorktreeService {
         },
       };
       } finally {
-        await this.cleanupWorktree(
-          prepared.worktreePath,
-          prepared.repositoryRoot,
-          prepared.branchName,
-          runId
-        );
+        if (!preserveForShippingRetry) {
+          await this.cleanupWorktree(
+            prepared.worktreePath,
+            prepared.repositoryRoot,
+            prepared.branchName,
+            runId
+          );
+        } else {
+          this.activeRuns.delete(runId);
+        }
       }
     });
   }

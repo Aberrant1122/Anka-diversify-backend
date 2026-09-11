@@ -16,6 +16,8 @@ import { ValidationDetector } from "../validation/ValidationDetector";
 import { ManifestGenerator } from "../../services/manifest-generator";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { ChatRequest } from "../shared/types";
+import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
+import { CompletionEvaluator } from "../runtime/CompletionEvaluator";
 
 // Mock PrismaClient to prevent DB connection attempts during integration testing
 jest.mock("@prisma/client", () => {
@@ -44,9 +46,11 @@ jest.mock("@prisma/client", () => {
 describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
   let tempDir: string;
   let targetFilePath: string;
+  let targetEvidenceId: string;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pipeline-integration-test-"));
+    jest.spyOn(process, "cwd").mockReturnValue(tempDir);
     targetFilePath = path.join(tempDir, "src", "index.ts");
     fs.mkdirSync(path.dirname(targetFilePath), { recursive: true });
     fs.writeFileSync(targetFilePath, "console.log('original');", "utf8");
@@ -77,12 +81,20 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       confidence: 0.9,
     } as any);
 
-    jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockResolvedValue({
-      optimizedContext: { fileContext: {} },
-      executionMemory: { inspectedFiles: new Set() },
-      finalConfidence: 0.9,
-      searchSummary: "ok",
-    } as any);
+    jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
+      const evidenceStore = args[7];
+      targetEvidenceId = evidenceStore.addEvidence({
+        kind: "FILE",
+        filePath: "src/index.ts",
+        provenance: "REPO_READ",
+      }).id;
+      return {
+        optimizedContext: { fileContext: {} },
+        executionMemory: { inspectedFiles: new Set(["src/index.ts"]) },
+        finalConfidence: 0.9,
+        searchSummary: "ok",
+      } as any;
+    });
 
     jest.spyOn(CodeGenerator, "buildAgentSystemPrompt").mockReturnValue("system prompt");
     jest.spyOn(CodeGenerator, "generateRoadmapAndDiffs").mockResolvedValue({
@@ -96,11 +108,11 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
     jest.spyOn(ValidationPlanner, "detectValidationCommands").mockReturnValue([]);
 
     process.env.OPENAI_API_KEY = "test-mock-api-key";
-    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockResolvedValue({
-      files: [{ path: "src/index.ts", action: "modify", dependencies: [], description: "test change" }],
+    jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async () => ({
+      files: [{ path: "src/index.ts", action: "modify", dependencies: [], description: "test change", evidenceIds: [targetEvidenceId] }],
       totalFiles: 1,
       manifestVersion: "1.0.0",
-    });
+    }));
     jest.spyOn(ManifestValidator.prototype, "validate").mockReturnValue({
       valid: true,
       errors: [],
@@ -119,6 +131,16 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
     sessionId: "sess-1",
   };
 
+  function runPipeline() {
+    const authorizedCapabilityScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: tempDir,
+      authorityId: "pipeline-transaction-integration",
+      grants: [{ path: "src/index.ts", action: "FILE_MODIFY" }],
+    });
+    if (!authorizedCapabilityScope) throw new Error("integration capability scope must be valid");
+    return AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, { authorizedCapabilityScope });
+  }
+
   it("1. SelfHealingEngine mutates workspace then throws -> AgentPipeline catches and rolls back disk", async () => {
     jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
       if (fsManager && localPath) {
@@ -128,7 +150,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       throw new Error("SelfHealingEngine runtime explosion");
     });
 
-    await expect(AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest)).rejects.toThrow("SelfHealingEngine runtime explosion");
+    await expect(runPipeline()).rejects.toThrow("SelfHealingEngine runtime explosion");
 
     // Verify ACTUAL disk state after exception: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -144,7 +166,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
 
     jest.spyOn(SecurityAuditor, "runReflectionAndSecurityAudit").mockRejectedValue(new Error("OpenAI API RateLimitError"));
 
-    await expect(AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest)).rejects.toThrow("OpenAI API RateLimitError");
+    await expect(runPipeline()).rejects.toThrow("OpenAI API RateLimitError");
 
     // Verify ACTUAL disk state after exception: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -168,7 +190,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
 
     jest.spyOn(ValidationDetector, "runFeatureValidation").mockRejectedValue(new Error("Static validation parser crash"));
 
-    await expect(AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest)).rejects.toThrow("Static validation parser crash");
+    await expect(runPipeline()).rejects.toThrow("Static validation parser crash");
 
     // Verify ACTUAL disk state after exception: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -197,12 +219,16 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       repairActions: [],
     });
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const response = await runPipeline();
 
     expect(response.buildVerified).toBe(false);
     expect(response.securityPass).toBe(false);
     expect(response.lifecycleStage).toBe("BuildFailed");
     expect(response.changes).toEqual([]);
+    expect(response.checkpointJournal).toHaveLength(2);
+    expect(response.checkpointJournal).toEqual(expect.arrayContaining([
+      expect.objectContaining({ actionGroupId: response.actionGroupId, status: "ROLLED_BACK" }),
+    ]));
 
     // Verify ACTUAL disk state: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
@@ -231,17 +257,30 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       repairActions: [],
     });
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const response = await runPipeline();
 
     expect(response.buildVerified).toBe(false);
     expect(response.lifecycleStage).toBe("BuildFailed");
     expect(response.changes).toEqual([]);
+    expect(response.checkpointJournal?.[0]).toMatchObject({
+      actionGroupId: response.actionGroupId,
+      status: "ROLLED_BACK",
+    });
 
     // Verify ACTUAL disk state: restored to original!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
   });
 
   it("6. All gates pass -> exactly one commit, changes remain on disk, response reflects success", async () => {
+    jest.spyOn(RepositoryScanner, "getEffectiveSnapshot").mockImplementation(() => {
+      const content = fs.readFileSync(targetFilePath, "utf8");
+      return {
+        keyFiles: [{ path: "src/index.ts", content }],
+        fileTree: ["src/index.ts"],
+        revision: { contentHash: `revision:${content}` },
+      } as unknown as ReturnType<typeof RepositoryScanner.getEffectiveSnapshot>;
+    });
+    const completionSpy = jest.spyOn(CompletionEvaluator, "evaluate");
     jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
       if (fsManager && localPath) {
         await fsManager.apply(changes, localPath);
@@ -264,12 +303,22 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
       repairActions: [],
     });
 
-    const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest);
+    const response = await runPipeline();
 
     expect(response.buildVerified).toBe(true);
     expect(response.securityPass).toBe(true);
     expect(response.lifecycleStage).toBe("Done");
     expect(response.changes.length).toBe(1);
+    expect(response.actionGroupId).toMatch(/^ag_[a-f0-9]{20}$/);
+    expect(response.checkpointId).toBe(response.actionGroupId);
+    expect(response.checkpointJournal?.[0]).toMatchObject({
+      actionGroupId: response.actionGroupId,
+      sequence: 1,
+      status: "VERIFIED",
+    });
+    expect(completionSpy).toHaveBeenCalledTimes(1);
+    expect(response.completionEvaluation).toMatchObject({ outcome: "COMPLETE" });
+    expect(response.taskRuntime).toMatchObject({ status: "COMPLETED" });
 
     // Verify ACTUAL disk state: changes REMAIN ON DISK!
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('mutated');");
