@@ -26,6 +26,7 @@ import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import type { RepositoryContextAssemblyResult } from "./RepositoryObserver";
 import { DestructiveTargetResolver } from "../contracts/DestructiveTargetResolver";
 import { detectCompoundIntent, buildFinalExecutionContract } from "../contracts/ExecutionContractBuilder";
+import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
 import { AuthorizedCapabilityScope, CapabilityAction, CapabilityGuard } from "../runtime/CapabilityGuard";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { ManifestGenerator } from "../generation/ManifestGenerator";
@@ -137,7 +138,12 @@ export class AgentPlanner {
       };
     }
 
-    const explicitUserPaths = intentResult.targetPath ? [intentResult.targetPath] : [];
+    // Do NOT alias model-derived classification target into explicitUserPaths.
+    // explicitUserPaths must be derived strictly and deterministically from user input.
+    const explicitUserPaths = TargetPathExtractor.extractExplicitUserPaths(
+      effectiveMessageForIntent,
+      input.canonicalExistingFiles,
+    );
     const requestContext = input.request.context as { taskExecutionPlan?: TaskExecutionPlan } | undefined;
     let taskExecutionPlan = requestContext?.taskExecutionPlan || TaskExecutionPlanManager.createTaskExecutionPlan(
       effectiveMessageForIntent,

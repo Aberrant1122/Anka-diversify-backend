@@ -204,7 +204,12 @@ export function buildExecutionContract(
   for (const info of extractedInfos) {
     targetProvenance[info.path] = info.provenance;
   }
-  let targetPaths = extractedInfos.map((i) => i.path);
+  // Model-derived classifierTarget (CLASSIFIER_HINT) carries ZERO write authority.
+  // Only EXPLICIT_USER_PATH and UNIQUE_NAMED_ENTITY may establish initial targetPaths.
+  let targetPaths = extractedInfos
+    .filter((i) => i.provenance === "EXPLICIT_USER_PATH" || i.provenance === "UNIQUE_NAMED_ENTITY")
+    .map((i) => i.path)
+    .filter((tp) => !TargetPathExtractor.isHttpRouteIdentifier(tp, message, repoFileNames));
 
   // Resolve repository-grounded targets for unique named entities if no explicit paths found,
   // or for destructive tasks with uniquely grounded targets
@@ -249,9 +254,8 @@ export function buildExecutionContract(
     authorizedDeleteTargets = targetPaths.filter(
       (tp) =>
         (targetProvenance[tp] === "EXPLICIT_USER_PATH" ||
-          targetProvenance[tp] === "UNIQUE_NAMED_ENTITY" ||
-          targetProvenance[tp] === "REPOSITORY_GROUNDED") &&
-        !TargetPathExtractor.isHttpRouteIdentifier(tp, message)
+          targetProvenance[tp] === "UNIQUE_NAMED_ENTITY") &&
+        !TargetPathExtractor.isHttpRouteIdentifier(tp, message, repoFileNames)
     );
 
     if (hasCleanupIntent && authorizedDeleteTargets.length > 0) {
@@ -343,6 +347,18 @@ export function buildExecutionContract(
       }
       return tp;
     }).filter(Boolean);
+  } else if (classification.targetPath) {
+    // Model guidance may inform searchScope as an advisory hint, carrying zero mutation authority
+    const hint = classification.targetPath.replace(/\\/g, "/").replace(/^\//, "").replace(/\/$/, "");
+    if (
+      !TargetPathExtractor.isHttpRouteIdentifier(hint, message, repoFileNames) &&
+      TargetPathExtractor.isValidPathCandidate(hint, repoFileNames, message)
+    ) {
+      const dir = /\.[\w]+$/.test(hint) ? path.dirname(hint) : hint;
+      if (dir && dir !== ".") {
+        searchScope = [dir];
+      }
+    }
   }
 
   let maxFilesCap = rules.maxFiles;
