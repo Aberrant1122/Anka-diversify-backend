@@ -159,17 +159,31 @@ export function resolveRepairProposals(
           content: proposal.content,
           description: proposal.description,
           action: "create",
+          editPrimitive: {
+            type: "CREATE_FILE",
+            path: proposal.path,
+            content: proposal.content,
+            description: proposal.description,
+          },
         });
         break;
       }
 
       case "delete": {
+        const normDeletePath = normalizeRepoPath(proposal.path);
+        const deleteSource = Object.entries(currentFileContext).find(([ctxPath]) => normalizeRepoPath(ctxPath) === normDeletePath)?.[1];
         changes.push({
           path: proposal.path,
           content: "",
           description: proposal.description,
           action: "delete",
           isDeleted: true,
+          editPrimitive: {
+            type: "DELETE_FILE",
+            path: proposal.path,
+            description: proposal.description,
+            expectedSourceFingerprint: deleteSource === undefined ? undefined : sha256(deleteSource),
+          },
         });
         break;
       }
@@ -230,6 +244,13 @@ export function resolveRepairProposals(
           content: patchResult.content,
           description: proposal.description,
           action: "modify",
+          editPrimitive: {
+            type: "PATCH_HUNK",
+            path: proposal.path,
+            description: proposal.description,
+            edits: proposal.edits,
+            expectedSourceFingerprint: expectedSourceHashes[normProposalPath],
+          },
         });
         break;
       }

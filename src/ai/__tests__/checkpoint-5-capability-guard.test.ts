@@ -249,7 +249,7 @@ describe("Checkpoint 5: CapabilityGuard", () => {
 
     await expect(manager.apply([
       { path: "src/missing.ts", action: "modify", content: "bypass", description: "action mismatch" },
-    ], workspace)).rejects.toMatchObject({ code: "CAPABILITY_ACTION_NOT_DECLARED" });
+    ], workspace)).rejects.toMatchObject({ code: "MODIFY_TARGET_MISSING" });
     expect(fs.existsSync(path.join(workspace, "src", "missing.ts"))).toBe(false);
   });
 
@@ -275,7 +275,7 @@ describe("Checkpoint 5: CapabilityGuard", () => {
       action: "shell" as never,
       content: "bypass",
       description: "unknown action",
-    }], workspace)).rejects.toMatchObject({ code: "CAPABILITY_ACTION_UNKNOWN" });
+    }], workspace)).rejects.toMatchObject({ code: "EDIT_CONFLICT" });
     expect(fs.readFileSync(path.join(workspace, "src", "declared.ts"), "utf8")).toBe("before");
   });
 
@@ -319,7 +319,7 @@ describe("Checkpoint 5: CapabilityGuard", () => {
       CapabilityGuard.create({ workspaceRoot: workspace, scopeId: "local-write", authorizedScope }),
       "local-write",
     );
-    await manager.apply([{ path: "src/local.ts", action: "modify", content: "local", description: "authenticated local edit" }], workspace);
+    await manager.apply([{ path: "src/local.ts", action: "create", content: "local", description: "authenticated local edit" }], workspace);
     expect(fs.readFileSync(path.join(workspace, "src", "local.ts"), "utf8")).toBe("local");
     await expect(manager.apply([{ path: "../outside.ts", action: "modify", content: "escape", description: "invalid" }], workspace))
       .rejects.toBeInstanceOf(RepairInfrastructureError);

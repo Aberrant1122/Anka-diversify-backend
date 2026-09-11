@@ -305,14 +305,14 @@ export class SecurityAuditor {
     // Compute llmReviewPass after provenance reconciliation
     const hasSevereLlmFindings = vulnerabilities.some(
       (v) => (v.severity === "HIGH" || v.severity === "CRITICAL") &&
-             v.provenance !== "PRE_EXISTING_BASELINE" &&
-             !v.issue.startsWith("[UNSUPPORTED_SECURITY_FINDING]") &&
-             !v.issue.startsWith("[PRE_EXISTING_BASELINE]")
+        v.provenance !== "PRE_EXISTING_BASELINE" &&
+        !v.issue.startsWith("[UNSUPPORTED_SECURITY_FINDING]") &&
+        !v.issue.startsWith("[PRE_EXISTING_BASELINE]")
     );
 
     if (!llmReviewAvailable) {
       llmReviewPass = false;
-   } else if (modelReportedSecurityFailure) {
+    } else if (modelReportedSecurityFailure) {
       llmReviewPass = false;
     } else if (!hasSevereLlmFindings) {
       llmReviewPass = true;

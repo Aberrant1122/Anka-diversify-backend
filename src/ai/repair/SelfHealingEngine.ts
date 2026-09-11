@@ -12,6 +12,7 @@ import { ErrorClassifier } from "../validation/ErrorClassifier";
 import { ErrorDiagnosticsParser, DiagnosticError, PublicContractGuard, DeterministicTs6133Repair } from "../../services/surgical-repair.engine";
 import { SurgicalPatchEngine, SurgicalPatchChunk } from "./SurgicalPatchEngine";
 import { applyPatchToFile } from "../patch/PatchApplicator";
+import { EditingConflictError } from "../editing/EditingPrimitives";
 import { LLMGateway } from "../gateway/LLMGateway";
 import { PipelineStages } from "../gateway/PipelineStage";
 
@@ -113,7 +114,7 @@ import {
   resolveRepairProposals,
 } from "./RepairProposalResolver";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
-import { verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
+import { sha256, verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { PatchCorrectionEngine } from "../generation/PatchCorrectionEngine";
 import {
@@ -276,6 +277,7 @@ export class SelfHealingEngine {
 
     const repairLoopStartTime = performance.now();
     let currentChanges = [...initialChanges];
+    let pendingChanges = [...initialChanges];
     let previousErrors = "";
     let lastErrorType = "UNKNOWN";
     let repairTrigger: "SHELL_VALIDATION_FAILURE" | "LLM_REVIEW_REJECTION" | "NONE" = "NONE";
@@ -421,16 +423,17 @@ export class SelfHealingEngine {
       } else {
         if (fsManager && localPath) {
           try {
-            await fsManager.apply(currentChanges, localPath);
+            await fsManager.apply(pendingChanges, localPath);
+            pendingChanges = [];
           } catch (err: any) {
-            if (err instanceof RepairInfrastructureError) {
+            if (err instanceof RepairInfrastructureError || err instanceof EditingConflictError) {
               return {
                 finalChanges: currentChanges,
                 attempts: attempt,
                 success: false,
                 errorLog: err.message,
                 infrastructureError: true,
-                errorType: "INFRA",
+                errorType: err instanceof EditingConflictError ? err.code : "INFRA",
                 repairTrigger,
                 repairApplied,
                 repaired: attempt > 1 || repairApplied,
@@ -856,6 +859,18 @@ export class SelfHealingEngine {
                 content: change.content,
                 action: "modify",
                 description: "Fix missing dependency",
+                editPrimitive: {
+                  type: "REPLACE_FILE",
+                  path: change.path,
+                  content: change.content,
+                  description: "Fix missing dependency",
+                  expectedSourceFingerprint: (() => {
+                    const source = effectiveRepairContextChanges.find(
+                      (candidate) => normalizeRepoPath(candidate.path) === normalizeRepoPath(change.path),
+                    )?.content;
+                    return source === undefined ? undefined : sha256(source);
+                  })(),
+                },
               }));
               const importCheck = ImportValidator.validateChangesImports(appliedDepChanges, installedPackages);
               const secCheck = SecurityPolicy.checkChanges(appliedDepChanges);
@@ -1157,9 +1172,26 @@ export class SelfHealingEngine {
           });
 
           if (deterministicPatch) {
-            const patchResult = applyPatchToFile(originalFile.content, [deterministicPatch]);
+            const sourceContent = originalFile.content;
+            const patchResult = applyPatchToFile(sourceContent, [deterministicPatch]);
             if (patchResult.success) {
               currentChanges[targetChangeIdx].content = patchResult.content;
+              currentChanges[targetChangeIdx].action = "modify";
+              const pendingIndex = pendingChanges.findIndex(
+                (change) => normalizeRepoPath(change.path) === normalizeRepoPath(originalFile.path),
+              );
+              const expectedSourceFingerprint = pendingIndex >= 0
+                ? pendingChanges[pendingIndex].editPrimitive?.expectedSourceFingerprint ?? sha256(sourceContent)
+                : sha256(sourceContent);
+              currentChanges[targetChangeIdx].editPrimitive = {
+                type: "REPLACE_FILE",
+                path: originalFile.path,
+                content: patchResult.content,
+                description: originalFile.description,
+                expectedSourceFingerprint,
+              };
+              if (pendingIndex >= 0) pendingChanges[pendingIndex] = currentChanges[targetChangeIdx];
+              else pendingChanges.push(currentChanges[targetChangeIdx]);
               const addedLines = deterministicPatch.newText ? deterministicPatch.newText.split("\n").length : 0;
               const removedLines = deterministicPatch.oldText ? deterministicPatch.oldText.split("\n").length : 0;
               patchesApplied.push({
@@ -1201,8 +1233,25 @@ export class SelfHealingEngine {
             const minPatch = SurgicalPatchEngine.generateMinimalPatch(originalFile.content, originalFile.path, diag);
 
             if (minPatch.replacementContent !== minPatch.targetContent) {
-              const res = SurgicalPatchEngine.applyPatch(originalFile.content, minPatch);
+              const sourceContent = originalFile.content;
+              const res = SurgicalPatchEngine.applyPatch(sourceContent, minPatch);
               currentChanges[targetChangeIdx].content = res.newContent;
+              currentChanges[targetChangeIdx].action = "modify";
+              const pendingIndex = pendingChanges.findIndex(
+                (change) => normalizeRepoPath(change.path) === normalizeRepoPath(originalFile.path),
+              );
+              const expectedSourceFingerprint = pendingIndex >= 0
+                ? pendingChanges[pendingIndex].editPrimitive?.expectedSourceFingerprint ?? sha256(sourceContent)
+                : sha256(sourceContent);
+              currentChanges[targetChangeIdx].editPrimitive = {
+                type: "REPLACE_FILE",
+                path: originalFile.path,
+                content: res.newContent,
+                description: originalFile.description,
+                expectedSourceFingerprint,
+              };
+              if (pendingIndex >= 0) pendingChanges[pendingIndex] = currentChanges[targetChangeIdx];
+              else pendingChanges.push(currentChanges[targetChangeIdx]);
               patchesApplied.push(minPatch);
               patchesAppliedCount++;
               totalLinesChanged += res.linesChanged;
@@ -1599,6 +1648,7 @@ export class SelfHealingEngine {
                 }
               }
               currentChanges = merged;
+              pendingChanges = [...resolution.changes];
               repairApplied = true;
               appliedPatchesInPrevCycle = true;
               patchesAppliedCount += resolution.changes.length;
@@ -1612,6 +1662,7 @@ export class SelfHealingEngine {
             } else {
               // Standalone fallback
               const legacyProposals = proposals as any[];
+              const priorChanges = [...currentChanges];
               const repairMap = new Map<string, AgentFileChange>(
                 legacyProposals.map((c: AgentFileChange) => [c.path, c]),
               );
@@ -1620,6 +1671,25 @@ export class SelfHealingEngine {
                 if (!merged.find((m) => m.path === p)) merged.push(c as AgentFileChange);
               }
               currentChanges = merged;
+              pendingChanges = legacyProposals.map((proposal: AgentFileChange) => {
+                const previous = priorChanges.find((change) => normalizeRepoPath(change.path) === normalizeRepoPath(proposal.path));
+                const action = proposal.action ?? previous?.action ?? "modify";
+                return {
+                  ...proposal,
+                  action,
+                  editPrimitive: action === "create"
+                    ? { type: "CREATE_FILE" as const, path: proposal.path, content: proposal.content, description: proposal.description }
+                    : action === "delete"
+                      ? { type: "DELETE_FILE" as const, path: proposal.path, description: proposal.description }
+                      : {
+                          type: "REPLACE_FILE" as const,
+                          path: proposal.path,
+                          content: proposal.content,
+                          description: proposal.description,
+                          expectedSourceFingerprint: previous ? sha256(previous.content) : undefined,
+                        },
+                };
+              });
               repairApplied = true;
               appliedPatchesInPrevCycle = true;
               patchesAppliedCount += legacyProposals.length;

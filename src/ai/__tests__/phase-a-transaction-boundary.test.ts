@@ -326,7 +326,7 @@ describe("Phase A Exception-Safe Transaction Boundary Invariants (TEST A - J)", 
   });
 
   it("TEST H: Rollback itself throws -> original failure remains represented, rollback failure is explicitly surfaced", async () => {
-    const changes: AgentFileChange[] = [{ path: "file.txt", content: "data", description: "test" }];
+    const changes: AgentFileChange[] = [{ path: "file.txt", action: "create", content: "data", description: "test" }];
     const fsManager = authorizedManager(changes);
 
     await fsManager.snapshot(changes, tempDir);

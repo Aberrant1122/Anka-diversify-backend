@@ -47,8 +47,8 @@ describe("FileSystemStateManager", () => {
     fs.writeFileSync(existingFile, "original content", "utf8");
 
     const changes: AgentFileChange[] = [
-      { path: "existing.txt", content: "new content", description: "test" },
-      { path: "new-file.txt", content: "brand new content", description: "test" },
+      { path: "existing.txt", action: "modify", content: "new content", description: "test" },
+      { path: "new-file.txt", action: "create", content: "brand new content", description: "test" },
     ];
 
     const manager = authorizedManager(changes);
@@ -62,8 +62,8 @@ describe("FileSystemStateManager", () => {
     fs.writeFileSync(existingFile, "original content", "utf8");
 
     const changes: AgentFileChange[] = [
-      { path: "existing.txt", content: "updated content", description: "test" },
-      { path: "created.txt", content: "hello world", description: "test" },
+      { path: "existing.txt", action: "modify", content: "updated content", description: "test" },
+      { path: "created.txt", action: "create", content: "hello world", description: "test" },
     ];
 
     const manager = authorizedManager(changes);
@@ -74,7 +74,7 @@ describe("FileSystemStateManager", () => {
   });
 
   it("should throw RepairInfrastructureError if localPath is null or invalid directory", async () => {
-    const changes: AgentFileChange[] = [{ path: "foo.txt", content: "bar", description: "test" }];
+    const changes: AgentFileChange[] = [{ path: "foo.txt", action: "create", content: "bar", description: "test" }];
     const manager = authorizedManager(changes);
 
     await expect(manager.apply(changes, null)).rejects.toThrow(RepairInfrastructureError);
@@ -87,8 +87,8 @@ describe("FileSystemStateManager", () => {
     fs.writeFileSync(existingFile, "console.log('v1');", "utf8");
 
     const changes: AgentFileChange[] = [
-      { path: "src/index.ts", content: "console.log('v2-broken');", description: "test" },
-      { path: "src/new-feature.ts", content: "export const x = 1;", description: "test" },
+      { path: "src/index.ts", action: "modify", content: "console.log('v2-broken');", description: "test" },
+      { path: "src/new-feature.ts", action: "create", content: "export const x = 1;", description: "test" },
     ];
 
     const manager = authorizedManager(changes);
@@ -106,7 +106,7 @@ describe("FileSystemStateManager", () => {
   });
 
   it("should clear snapshot state on commit", async () => {
-    const changes: AgentFileChange[] = [{ path: "file.txt", content: "data", description: "test" }];
+    const changes: AgentFileChange[] = [{ path: "file.txt", action: "create", content: "data", description: "test" }];
     const manager = authorizedManager(changes);
 
     await manager.snapshot(changes, tempDir);

@@ -5,6 +5,7 @@ import { buildSelfHealingRepairPrompt } from "../prompts/repair";
 import { LLMGateway } from "../gateway/LLMGateway";
 import { PipelineStages } from "../gateway/PipelineStage";
 import { isLLMError } from "../gateway/LLMError";
+import { sha256 } from "../validation/FileVersionGuard";
 
 interface BuildRepairPayload {
   changes: AgentFileChange[];
@@ -138,7 +139,21 @@ export class BuildErrorRepair {
       });
 
       if (result.content.changes.length > 0) {
-        const repairMap = new Map<string, AgentFileChange>(result.content.changes.map((c) => [c.path, c]));
+        const repairMap = new Map<string, AgentFileChange>(result.content.changes.map((c) => {
+          const source = allowedChanges.get(normalizeRepairPath(c.path));
+          const editPrimitive = c.action === "create"
+            ? { type: "CREATE_FILE" as const, path: c.path, content: c.content, description: c.description }
+            : c.action === "delete"
+              ? { type: "DELETE_FILE" as const, path: c.path, description: c.description, expectedSourceFingerprint: source ? sha256(source.content) : undefined }
+              : {
+                  type: "REPLACE_FILE" as const,
+                  path: c.path,
+                  content: c.content,
+                  description: c.description,
+                  expectedSourceFingerprint: source ? sha256(source.content) : undefined,
+                };
+          return [c.path, { ...c, editPrimitive }];
+        }));
         const merged: AgentFileChange[] = changes.map((c) => repairMap.get(c.path) || c);
         for (const [p, c] of repairMap) {
           if (!merged.find((m) => m.path === p)) merged.push(c as AgentFileChange);

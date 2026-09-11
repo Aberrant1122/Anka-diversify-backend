@@ -27,6 +27,7 @@ import {
 } from "../planning/RepositoryArchitectureDetector";
 import { LLMGateway } from "../gateway/LLMGateway";
 import { PipelineStages } from "../gateway/PipelineStage";
+import { sha256 } from "../validation/FileVersionGuard";
 
 type ModelChangeAction = "create" | "modify" | "delete";
 
@@ -68,6 +69,28 @@ type ExecuteChangesPayload = ExecuteGenerationPayload | ClarificationPayload;
 
 interface ContentRepairPayload {
   content: string;
+}
+
+function bindWholeFilePrimitive(change: AgentFileChange): void {
+  if (change.action === "create") {
+    change.editPrimitive = {
+      type: "CREATE_FILE",
+      path: change.path,
+      content: change.content,
+      description: change.description,
+    };
+    return;
+  }
+  if (change.action === "modify" || change.action === undefined) {
+    change.action = "modify";
+    change.editPrimitive = {
+      type: "REPLACE_FILE",
+      path: change.path,
+      content: change.content,
+      description: change.description,
+      expectedSourceFingerprint: change.editPrimitive?.expectedSourceFingerprint,
+    };
+  }
 }
 
 const MODEL_CHANGE_PROPERTIES = {
@@ -928,7 +951,54 @@ When using an existing local component, conform to its authoritative exported pr
       expectedSourceHashes = resolution.expectedSourceHashes;
     } else {
       // Legacy path: standalone/delete/no-manifest — full-content changes
-      changes = rawChanges as AgentFileChange[];
+      expectedSourceHashes = {};
+      changes = rawChanges.map((raw): AgentFileChange => {
+        const normalizedPath = normalizeRepoPath(raw.path);
+        const currentSource = Object.entries(effectiveResolutionSourceMap)
+          .find(([sourcePath]) => normalizeRepoPath(sourcePath) === normalizedPath)?.[1];
+        const action = raw.action ?? (currentSource === undefined ? "create" : "modify");
+        const description = raw.description || `${action} ${raw.path}`;
+        if (action === "delete") {
+          if (currentSource !== undefined) expectedSourceHashes![normalizedPath] = sha256(currentSource);
+          return {
+            path: raw.path,
+            content: "",
+            description,
+            action,
+            isDeleted: true,
+            editPrimitive: {
+              type: "DELETE_FILE",
+              path: raw.path,
+              description,
+              expectedSourceFingerprint: currentSource === undefined ? undefined : sha256(currentSource),
+            },
+          };
+        }
+        if (action === "create") {
+          return {
+            path: raw.path,
+            content: raw.content || "",
+            description,
+            action,
+            editPrimitive: { type: "CREATE_FILE", path: raw.path, content: raw.content || "", description },
+          };
+        }
+        if (currentSource !== undefined) expectedSourceHashes![normalizedPath] = sha256(currentSource);
+        return {
+          path: raw.path,
+          content: raw.content || "",
+          description,
+          action: "modify",
+          editPrimitive: {
+            type: "REPLACE_FILE",
+            path: raw.path,
+            content: raw.content || "",
+            description,
+            expectedSourceFingerprint: currentSource === undefined ? undefined : sha256(currentSource),
+          },
+        };
+      });
+      if (Object.keys(expectedSourceHashes).length === 0) expectedSourceHashes = undefined;
     }
 
     if (approvedManifest && Array.isArray(approvedManifest.files)) {
@@ -948,12 +1018,21 @@ When using an existing local component, conform to its authoritative exported pr
       const existingPathsInChanges = new Set(changes.map((c) => c.path.replace(/\\/g, "/").replace(/\/$/, "")));
       for (const targetPath of contract.targetPaths) {
         if (!existingPathsInChanges.has(targetPath)) {
+          const normalizedTarget = normalizeRepoPath(targetPath);
+          const currentSource = Object.entries(effectiveResolutionSourceMap)
+            .find(([sourcePath]) => normalizeRepoPath(sourcePath) === normalizedTarget)?.[1];
           changes.push({
             path: targetPath,
             content: "",
             description: `Delete ${targetPath}`,
             action: "delete",
             isDeleted: true,
+            editPrimitive: {
+              type: "DELETE_FILE",
+              path: targetPath,
+              description: `Delete ${targetPath}`,
+              expectedSourceFingerprint: currentSource === undefined ? undefined : sha256(currentSource),
+            },
           });
         }
       }
@@ -962,6 +1041,15 @@ When using an existing local component, conform to its authoritative exported pr
           change.action = "delete";
           change.isDeleted = true;
           change.content = "";
+          const normalizedTarget = normalizeRepoPath(change.path);
+          const currentSource = Object.entries(effectiveResolutionSourceMap)
+            .find(([sourcePath]) => normalizeRepoPath(sourcePath) === normalizedTarget)?.[1];
+          change.editPrimitive = {
+            type: "DELETE_FILE",
+            path: change.path,
+            description: change.description || `Delete ${change.path}`,
+            expectedSourceFingerprint: currentSource === undefined ? undefined : sha256(currentSource),
+          };
           if (!change.description || change.description.includes("edits")) {
             change.description = `Delete ${change.path}`;
           }
@@ -1009,6 +1097,7 @@ When using an existing local component, conform to its authoritative exported pr
             const recheck = SecurityPolicy.checkCode(parsedSec.content, change.path);
             if (recheck.safe) {
               change.content = parsedSec.content;
+              bindWholeFilePrimitive(change);
             } else {
               throw new Error(`[UNSAFE_DYNAMIC_CODE_EXECUTION] Generated code in "${change.path}" violated security policy: ${recheck.violations.map((v) => v.message).join("; ")}`);
             }
@@ -1033,6 +1122,7 @@ When using an existing local component, conform to its authoritative exported pr
         if (usesClientHooks && !hasClientDirective) {
           console.log(`[CodeGenerator] Auto-adding "use client" directive to "${change.path}" (uses client React hooks in App Router).`);
           change.content = `"use client";\n\n` + change.content;
+          bindWholeFilePrimitive(change);
         }
       }
     }
@@ -1073,6 +1163,7 @@ When using an existing local component, conform to its authoritative exported pr
               const recheck = ImportValidator.validateCodeImports(parsedDep.content, change.path, installedPackages);
               if (recheck.valid) {
                 change.content = parsedDep.content;
+                bindWholeFilePrimitive(change);
               } else {
                 throw new Error(`[UNDECLARED_EXTERNAL_DEPENDENCY] Generated code in "${change.path}" imported uninstalled package: ${recheck.errors.map((e) => e.message).join("; ")}`);
               }

@@ -336,7 +336,39 @@ export interface AgentFileChange {
   // Which ProjectRepository this change targets, for multi-repo coordinated changes.
   // Undefined = the project's primary/legacy repo (unchanged single-repo behavior).
   repositoryId?: string;
+  /**
+   * Deterministic mutation instruction consumed only by the guarded filesystem
+   * boundary. Planning/model output cannot execute this instruction directly.
+   */
+  editPrimitive?: FileEditingPrimitive;
 }
+
+export interface FileEditBase {
+  path: string;
+  description: string;
+  expectedSourceFingerprint?: string;
+}
+
+export type FileEditingPrimitive =
+  | (FileEditBase & { type: "CREATE_FILE"; content: string })
+  | (FileEditBase & { type: "REPLACE_FILE"; content: string })
+  | (FileEditBase & { type: "DELETE_FILE" })
+  | (FileEditBase & {
+      type: "EXACT_REPLACE";
+      oldText: string;
+      newText: string;
+      expectedOccurrenceCount?: number;
+    })
+  | (FileEditBase & {
+      type: "INSERT_BEFORE" | "INSERT_AFTER";
+      anchor: string;
+      content: string;
+      expectedOccurrenceCount?: number;
+    })
+  | (FileEditBase & {
+      type: "PATCH_HUNK";
+      edits: ReadonlyArray<{ readonly oldText: string; readonly newText: string }>;
+    });
 
 export interface RoadmapStep {
   phase: number;
