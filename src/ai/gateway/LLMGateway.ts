@@ -10,7 +10,7 @@ import {
   estimateMessageTokens,
 } from "../context/ContextManager";
 import { ContextPackerParams } from "../context/ContextPacker";
-import { PipelineStage, isValidPipelineStage } from "./PipelineStage";
+import { PipelineStage, PipelineStages, isValidPipelineStage } from "./PipelineStage";
 import {
   LLMError,
   LLMTimeoutError,
@@ -232,7 +232,7 @@ export class LLMGateway {
       repositoryEvidence: options.repositoryEvidence,
       repositoryFiles: options.repositoryFiles,
     });
-    const preparedOptions: LLMInvocationOptions = {
+    let preparedOptions: LLMInvocationOptions = {
       ...options,
       messages: managedContext.messages,
       maxTokens,
@@ -344,9 +344,46 @@ export class LLMGateway {
           }
 
           this.telemetry.emit("llm.retry", telemetryContext, attempt);
-          if (retryDelayMs > 0) {
+          const isSchemaRepair = lastError instanceof LLMSchemaInvalidError && mode === "structured";
+          if (retryDelayMs > 0 && !isSchemaRepair) {
             const delay = retryDelayMs * Math.pow(1.5, attempt - 1);
             await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+
+          if (isSchemaRepair) {
+            const structuredSchema = (options as LLMStructuredCallOptions).schema;
+            const errorList = (lastError.details?.validationErrors && lastError.details.validationErrors.length > 0)
+              ? lastError.details.validationErrors
+              : [lastError.message];
+
+            const repairPrompt = [
+              "Your previous response failed structured schema validation.",
+              "",
+              "VALIDATION ERRORS:",
+              ...errorList.map((e: string) => `- ${e}`),
+              "",
+              "AUTHORITATIVE EXPECTED SCHEMA:",
+              JSON.stringify(structuredSchema.schema, null, 2),
+              "",
+              "REPAIR INSTRUCTIONS:",
+              "1. Fix all schema validation errors listed above.",
+              "2. Preserve your intended semantic code changes and explanation.",
+              "3. For MODIFY actions, you MUST NOT output full file content or isDeleted. You MUST output targeted edits with non-empty edits[] array:",
+              '   { "path": "...", "action": "modify", "description": "...", "edits": [ { "oldText": "...", "newText": "..." } ] }',
+              '4. For CREATE actions, output: { "path": "...", "action": "create", "content": "...", "description": "..." }',
+              '5. For DELETE actions, output: { "path": "...", "action": "delete", "isDeleted": true, "content": "", "description": "..." }',
+              "6. Respond ONLY with the corrected valid JSON object matching the schema. Do not output markdown code fences or conversational text.",
+            ].join("\n");
+
+            const assistantContent = (lastError.details?.rawContent as string) || (lastError.details?.rawPayloadSnippet as string) || "";
+            preparedOptions = {
+              ...preparedOptions,
+              messages: [
+                ...preparedOptions.messages,
+                { role: "assistant", content: assistantContent },
+                { role: "user", content: repairPrompt },
+              ],
+            };
           }
         }
       }
@@ -635,6 +672,9 @@ export class LLMGateway {
     }
 
     if (!validationResult || validationResult.valid !== true) {
+      const isRetryable =
+        stage === PipelineStages.CODE_GENERATION &&
+        telemetryContext.attempt === 1;
       throw new LLMSchemaInvalidError(
         `Structured model response failed schema validation: ${(validationResult?.errors || []).join("; ")}`,
         {
@@ -642,7 +682,10 @@ export class LLMGateway {
           model,
           validationErrors: validationResult?.errors,
           rawPayloadSnippet: rawContent.slice(0, 300),
-        }
+          rawContent,
+        },
+        undefined,
+        isRetryable
       );
     }
     return (validationResult.data !== undefined ? validationResult.data : parsed) as T;

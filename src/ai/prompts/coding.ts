@@ -115,7 +115,7 @@ Generate production-grade, complete code files with high-aesthetic modern design
 Task → Understand Goal → Determine Completion → Generate Files → Wire Everything → Run App → Verify → Done
 
 DESIGN & QUALITY STANDARDS:
-- Generate COMPLETE file contents from line 1 to the last line. NO partial diffs, NO truncated snippets, NO "// ... rest of code" placeholders.
+- For newly created files, generate COMPLETE file contents from line 1 to the last line. NO truncated snippets or placeholders. For modifying existing files, output targeted edits[] with exact oldText/newText pairs matching the existing source verbatim.
 - Every import statement MUST be explicit and present at the top of the file.
 - REPOSITORY TECH-STACK ALIGNMENT:
   * ALWAYS inspect the project file tree before creating or modifying files.
@@ -155,28 +155,30 @@ Respond ONLY with valid JSON:
 {
   "explanation": "Detailed explanation including the 7-step execution summary and ✓ verification checklist",
   "commitMessage": "feat(core): concise commit message describing changes",
-  "verificationChecklist": [
-    { "label": "Analyze current code base", "checked": true },
-    { "label": "React component exists", "checked": true },
-    { "label": "Route exists", "checked": true },
-    { "label": "Imported", "checked": true },
-    { "label": "Rendered", "checked": true },
-    { "label": "Styling complete", "checked": true },
-    { "label": "Responsive", "checked": true },
-    { "label": "No TS errors", "checked": true },
-    { "label": "Build passes", "checked": true },
-    { "label": "Visible on localhost", "checked": true },
-    { "label": "Interactive", "checked": true },
-    { "label": "Feature functional & working", "checked": true }
-  ],
   "changes": [
     {
-      "path": "relative/path/to/file.ts",
-      "content": "complete 100% full file content or empty string if action is delete",
-      "description": "summary of edits or deletion in this file",
-      "action": "create" | "modify" | "delete",
-      "isDeleted": boolean,
-      "layer": "Controller" | "Service" | "Repository" | "Schema" | "UI"
+      "path": "relative/path/to/created.ts",
+      "action": "create",
+      "content": "complete 100% full file content",
+      "description": "summary of created file"
+    },
+    {
+      "path": "relative/path/to/modified.ts",
+      "action": "modify",
+      "description": "summary of edits",
+      "edits": [
+        {
+          "oldText": "exact existing source text copied verbatim",
+          "newText": "replacement source text"
+        }
+      ]
+    },
+    {
+      "path": "relative/path/to/deleted.ts",
+      "action": "delete",
+      "isDeleted": true,
+      "content": "",
+      "description": "summary of deletion"
     }
   ]
 }`;

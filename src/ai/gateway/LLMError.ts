@@ -96,8 +96,8 @@ export class LLMInvalidJsonError extends LLMError {
 }
 
 export class LLMSchemaInvalidError extends LLMError {
-  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown) {
-    super(message, "LLM_SCHEMA_INVALID", details, false, cause);
+  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown, isRetryable: boolean = false) {
+    super(message, "LLM_SCHEMA_INVALID", details, isRetryable, cause);
     this.name = "LLMSchemaInvalidError";
   }
 }
