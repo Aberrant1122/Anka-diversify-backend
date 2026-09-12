@@ -9,7 +9,7 @@ import { prisma } from "../../services/database";
 import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
 import { TaskRuntime } from "../runtime/TaskRuntime";
 import { runWithTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
-import { AuthorizedCapabilityScope, CapabilityGrant } from "../runtime/CapabilityGuard";
+import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
 import { NodeGitCommandExecutor } from "../../services/git-command";
 
 const git = new NodeGitCommandExecutor();
@@ -30,7 +30,6 @@ export interface CodingAgentInternalOptions {
    * Explicit task write authority supplied by trusted backend code. This is a
    * separate argument so ChatRequest/model data cannot create or widen it.
    */
-  authorizedCapabilities?: readonly CapabilityGrant[];
   /** Trusted backend shipping policy; never read from ChatRequest/model output. */
   shipping?: RepositoryShippingPolicy;
 }
@@ -56,11 +55,14 @@ export class CodingAgent {
 
     // 1. Trusted internal-only direct execution path (used by EvalRunner and explicit test fixtures)
     if (internalOptions?.allowDirectExecution || internalOptions?.effectiveLocalPath) {
-      const directScope = internalOptions.effectiveLocalPath && internalOptions.authorizedCapabilities
-        ? AuthorizedCapabilityScope.fromBackendConfiguration({
+      const directRunId = crypto.randomUUID();
+      const directScope = internalOptions.effectiveLocalPath
+        ? AuthorizedCapabilityScope.fromIsolatedWorktree({
             workspaceRoot: internalOptions.effectiveLocalPath,
-            authorityId: `trusted-direct-execution:${projectId}`,
-            grants: internalOptions.authorizedCapabilities,
+            authorityId: `trusted-direct-execution:${directRunId}`,
+            repositoryId: projectId,
+            runId: directRunId,
+            grants: [],
           }) ?? undefined
         : undefined;
       return AgentPipeline.runCodingAgent(userId, projectId, request, onProgress, {
@@ -186,7 +188,6 @@ export class CodingAgent {
           repositoryPath: gitRoot,
           runId,
           request,
-          authorizedCapabilities: internalOptions?.authorizedCapabilities,
           taskRuntime: runtime,
           shipping: internalOptions?.shipping,
           onProgress,

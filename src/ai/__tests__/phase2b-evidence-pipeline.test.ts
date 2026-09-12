@@ -52,7 +52,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
     (global as any).__phase2bTempDir = tempDir;
     const srcDir = path.join(tempDir, "src");
     fs.mkdirSync(srcDir, { recursive: true });
-    fs.writeFileSync(path.join(srcDir, "App.tsx"), "import React from 'react'; export const App = () => <div>App</div>;", "utf8");
+    fs.writeFileSync(path.join(srcDir, "App.tsx"), "import React from 'react'; import { Button } from './Button'; // Header integration point\nexport const App = () => <Button />;", "utf8");
     fs.writeFileSync(path.join(srcDir, "Button.tsx"), "export const Button = () => <button>Click</button>;", "utf8");
     fs.writeFileSync(path.join(srcDir, "Dashboard.tsx"), "export const Dashboard = () => <div>Dashboard</div>;", "utf8");
 
@@ -143,7 +143,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
     // Investigation only finds FILE evidence via SEMANTIC_SEARCH for unrelated Dashboard.tsx
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
       const store: RepositoryEvidenceStore = args[7];
-      const evi1 = store.addEvidence({
+      const evi1 = store.observeRepository({
         kind: "FILE",
         filePath: "src/Dashboard.tsx",
         provenance: "SEMANTIC_SEARCH",
@@ -211,7 +211,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
     // Investigation adds active entry point evidence
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
       const store: RepositoryEvidenceStore = args[7];
-      store.addEvidence({
+      store.observeRepository({
         kind: "ENTRY_POINT",
         filePath: "src/App.tsx",
         provenance: "AST_GRAPH",
@@ -268,16 +268,18 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
     // Investigation adds FILE existence + REFERENCE structural relation evidence for Button.tsx
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
       const store: RepositoryEvidenceStore = args[7];
-      store.addEvidence({
+      store.observeRepository({
         kind: "FILE",
         filePath: "src/Button.tsx",
         provenance: "REPO_READ",
         metadata: { details: "File exists on disk" },
       });
-      store.addEvidence({
+      store.observeRepository({
         kind: "REFERENCE",
         filePath: "src/Button.tsx",
-        provenance: "AST_GRAPH",
+        sourceFile: "src/App.tsx",
+        symbol: "Button",
+        provenance: "REFERENCE_SEARCH",
         metadata: { details: "Imported by src/App.tsx" },
       });
 
@@ -346,16 +348,18 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
     // Investigation adds FILE + REFERENCE evidence for App.tsx
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
       const store: RepositoryEvidenceStore = args[7];
-      store.addEvidence({
+      store.observeRepository({
         kind: "FILE",
         filePath: "src/App.tsx",
         provenance: "REPO_READ",
         metadata: { details: "App exists" },
       });
-      store.addEvidence({
+      store.observeRepository({
         kind: "REFERENCE",
-        filePath: "src/App.tsx",
-        provenance: "AST_GRAPH",
+        filePath: "src/components/Header.tsx",
+        sourceFile: "src/App.tsx",
+        symbol: "Header",
+        provenance: "REFERENCE_SEARCH",
         metadata: { details: "App is root component" },
       });
 
@@ -495,13 +499,13 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
       const store: RepositoryEvidenceStore = args[7];
-      const evi1 = store.addEvidence({
+      const evi1 = store.observeRepository({
         kind: "FILE",
         filePath: "src/App.tsx",
         provenance: "REPO_READ",
         metadata: { details: "File read" },
       });
-      const evi2 = store.addEvidence({
+      const evi2 = store.observeRepository({
         kind: "REFERENCE",
         filePath: "src/App.tsx",
         provenance: "AST_GRAPH",

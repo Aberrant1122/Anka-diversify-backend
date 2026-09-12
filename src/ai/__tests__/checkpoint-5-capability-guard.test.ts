@@ -171,11 +171,11 @@ describe("Checkpoint 5: CapabilityGuard", () => {
   });
 
   test("production scope construction binds exact task grants to the isolated worktree", async () => {
-    const authorizedScope = GitWorktreeService.createIsolatedCapabilityScope(
-      workspace,
-      "run-1",
-      [{ path: "src/production.ts", action: "FILE_CREATE" }],
-    );
+    const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+      workspaceRoot: workspace,
+      authorityId: "run-1",
+      grants: [{ path: "src/production.ts", action: "FILE_CREATE" }],
+    });
     if (!authorizedScope) throw new Error("Isolated worktree authority must be valid");
     const capabilityGuard = CapabilityGuard.create({ workspaceRoot: workspace, scopeId: "stage-5", authorizedScope });
     const manager = new FileSystemStateManager(capabilityGuard, "stage-5");
@@ -188,21 +188,20 @@ describe("Checkpoint 5: CapabilityGuard", () => {
 
   test("production worktree containment alone grants no write authority and missing scope causes zero mutation", async () => {
     const authorizedScope = GitWorktreeService.createIsolatedCapabilityScope(workspace, "run-without-grants");
-    expect(authorizedScope).toBeNull();
-    const manager = new FileSystemStateManager(CapabilityGuard.denyAll(), "stage-5");
+    expect(authorizedScope).not.toBeNull();
+    const manager = new FileSystemStateManager(
+      CapabilityGuard.create({ workspaceRoot: workspace, scopeId: "stage-5", authorizedScope: authorizedScope! }),
+      "stage-5",
+    );
 
     await expect(manager.apply([
       { path: "src/declared.ts", action: "modify", content: "must-not-land", description: "inside worktree" },
-    ], workspace)).rejects.toMatchObject({ code: "CAPABILITY_POLICY_MISSING" });
+    ], workspace)).rejects.toMatchObject({ code: "CAPABILITY_PATH_NOT_DECLARED" });
     expect(fs.readFileSync(path.join(workspace, "src", "declared.ts"), "utf8")).toBe("before");
   });
 
   test("production scope is unchanged by manifest, planner, resolver, or generated changes", () => {
-    const authorizedScope = GitWorktreeService.createIsolatedCapabilityScope(
-      workspace,
-      "run-immutable",
-      [{ path: "src/declared.ts", action: "FILE_MODIFY" }],
-    );
+    const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({ workspaceRoot: workspace, authorityId: "run-immutable", grants: [{ path: "src/declared.ts", action: "FILE_MODIFY" }] });
     if (!authorizedScope) throw new Error("Isolated worktree authority must be valid");
     const capabilityGuard = CapabilityGuard.create({ workspaceRoot: workspace, scopeId: "stage-5", authorizedScope });
     const downstreamRequests = [
@@ -221,11 +220,7 @@ describe("Checkpoint 5: CapabilityGuard", () => {
   });
 
   test("production action authority is exact and modify does not imply delete or rename", () => {
-    const authorizedScope = GitWorktreeService.createIsolatedCapabilityScope(
-      workspace,
-      "run-actions",
-      [{ path: "src/declared.ts", action: "FILE_MODIFY" }],
-    );
+    const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({ workspaceRoot: workspace, authorityId: "run-actions", grants: [{ path: "src/declared.ts", action: "FILE_MODIFY" }] });
     if (!authorizedScope) throw new Error("Isolated worktree authority must be valid");
     const capabilityGuard = CapabilityGuard.create({ workspaceRoot: workspace, scopeId: "stage-5", authorizedScope });
 
@@ -236,11 +231,7 @@ describe("Checkpoint 5: CapabilityGuard", () => {
   });
 
   test("a proposed modify cannot create a missing file without explicit create authority", async () => {
-    const authorizedScope = GitWorktreeService.createIsolatedCapabilityScope(
-      workspace,
-      "run-no-create",
-      [{ path: "src/missing.ts", action: "FILE_MODIFY" }],
-    );
+    const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({ workspaceRoot: workspace, authorityId: "run-no-create", grants: [{ path: "src/missing.ts", action: "FILE_MODIFY" }] });
     if (!authorizedScope) throw new Error("Isolated worktree authority must be valid");
     const manager = new FileSystemStateManager(
       CapabilityGuard.create({ workspaceRoot: workspace, scopeId: "stage-5", authorizedScope }),

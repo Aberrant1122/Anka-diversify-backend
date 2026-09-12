@@ -83,7 +83,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
 
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
       const evidenceStore = args[7];
-      targetEvidenceId = evidenceStore.addEvidence({
+      targetEvidenceId = evidenceStore.observeRepository({
         kind: "FILE",
         filePath: "src/index.ts",
         provenance: "REPO_READ",

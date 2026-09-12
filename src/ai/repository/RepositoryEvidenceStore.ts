@@ -1,4 +1,10 @@
 import { normalizeRepoPath } from "./SemanticContextResolver";
+import {
+  isAuthenticRepositoryObservation,
+  readRepositoryObservation,
+  RepositoryObservationReceipt,
+  RepositoryObservationTools,
+} from "./RepositoryObservation";
 
 export type RepositoryEvidenceKind =
   | "FILE"
@@ -61,6 +67,7 @@ export class RepositoryEvidenceStore {
   private counter = 0;
   private readonly repositoryId: string;
   private readonly defaultWorkspace?: string;
+  private readonly authorityEligibleEvidence = new WeakSet<object>();
 
   constructor(repositoryId: string = "default-repo", defaultWorkspace?: string) {
     this.repositoryId = repositoryId;
@@ -99,6 +106,40 @@ export class RepositoryEvidenceStore {
    * Adds validated repository evidence. If the exact fact already exists, returns the existing evidence.
    */
   public addEvidence(params: AddEvidenceParams): RepositoryEvidence {
+    // Caller-shaped evidence is retained only as advisory/audit context. It can
+    // never satisfy the resolver's mutation-authority checks.
+    return this.insertEvidence(params, false);
+  }
+
+  public observeRepository(params: AddEvidenceParams): RepositoryEvidence {
+    if (!this.defaultWorkspace) return this.addEvidence(params);
+    const receipt = RepositoryObservationTools.observe(this.repositoryId, this.defaultWorkspace, params);
+    return receipt ? this.recordObservation(receipt) ?? this.addEvidence(params) : this.addEvidence(params);
+  }
+
+  public recordObservation(receipt: RepositoryObservationReceipt): RepositoryEvidence | null {
+    if (!isAuthenticRepositoryObservation(receipt)) return null;
+    if (receipt.repositoryId !== this.repositoryId) return null;
+    if (this.defaultWorkspace && receipt.workspaceRoot !== this.defaultWorkspace) return null;
+    const details = readRepositoryObservation(receipt);
+    if (!details || details.provenance === "SEMANTIC_SEARCH") return null;
+    return this.insertEvidence({
+      kind: details.kind,
+      filePath: details.filePath,
+      sourceFile: details.sourceFile,
+      symbol: details.symbol,
+      provenance: details.provenance,
+      metadata: details.metadata,
+      workspace: receipt.workspaceRoot,
+      repositoryId: receipt.repositoryId,
+    }, true);
+  }
+
+  public isAuthorityEligible(evidence: RepositoryEvidence): boolean {
+    return this.authorityEligibleEvidence.has(evidence) && this.idMap.get(evidence.id) === evidence;
+  }
+
+  private insertEvidence(params: AddEvidenceParams, authorityEligible: boolean): RepositoryEvidence {
     const normFile = normalizeRepoPath(params.filePath);
     const normSource = params.sourceFile ? normalizeRepoPath(params.sourceFile) : undefined;
     const repoId = params.repositoryId || this.repositoryId;
@@ -107,7 +148,9 @@ export class RepositoryEvidenceStore {
     const signature = this.buildSignature(params);
     const existingId = this.signatureMap.get(signature);
     if (existingId) {
-      return this.idMap.get(existingId)!;
+      const existing = this.idMap.get(existingId)!;
+      if (authorityEligible) this.authorityEligibleEvidence.add(existing);
+      return existing;
     }
 
     const id = this.generateId();
@@ -126,6 +169,7 @@ export class RepositoryEvidenceStore {
     this.evidenceList.push(evidence);
     this.idMap.set(id, evidence);
     this.signatureMap.set(signature, id);
+    if (authorityEligible) this.authorityEligibleEvidence.add(evidence);
 
     console.log(
       `[INVESTIGATION] evidenceAdded id=${id} kind=${evidence.kind} file="${evidence.filePath}" prov=${evidence.provenance}`

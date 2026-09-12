@@ -2,6 +2,7 @@
   "preset": "ts-jest",
   "testEnvironment": "node",
   "roots": ["<rootDir>/src"],
+  "setupFilesAfterEnv": ["<rootDir>/src/ai/__tests__/helpers/capability-test-harness.ts"],
   "maxWorkers": 3,
   "testMatch": ["**/__tests__/**/*.test.ts"],
   "transform": {

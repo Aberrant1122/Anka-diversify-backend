@@ -1,5 +1,3 @@
-import fs from "fs";
-import path from "path";
 import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
@@ -7,8 +5,6 @@ import { generatePresignedUrl, generateDownloadUrl, deleteFromS3, detectType } f
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
-import { AuthorizedCapabilityScope } from "../ai/runtime/CapabilityGuard";
-import { ValidationCoordinator } from "../ai/orchestration/ValidationCoordinator";
 const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
@@ -277,44 +273,18 @@ export class ProjectController {
       if (!project?.localPath) {
         return res.status(400).json({ success: false, error: "No local path configured for this project" });
       }
-      const localPath = project.localPath;
-
       const { changes } = req.body as { changes: { path: string; content: string }[] };
       if (!changes?.length) {
         return res.status(400).json({ success: false, error: "No changes provided" });
       }
-
-      const capabilityScopeId = `project:${param(req, "id")}`;
-      const authorizedCapabilityScope = AuthorizedCapabilityScope.fromAuthenticatedProject({
-        workspaceRoot: localPath,
-        authorityId: `authenticated-local-edit:${capabilityScopeId}`,
-        grants: changes.map((change) => ({
-          path: change.path,
-          action: fs.existsSync(path.resolve(localPath, change.path))
-            ? "FILE_MODIFY" as const
-            : "FILE_CREATE" as const,
-        })),
+      // Authentication permits project access, not request-defined filesystem authority.
+      // This endpoint has no independent server-side local-edit policy yet, so it must
+      // fail closed instead of deriving grants from req.body.changes.
+      return res.status(409).json({
+        success: false,
+        error: "LOCAL_EDIT_CAPABILITY_POLICY_REQUIRED",
+        message: "Local edits require a trusted backend capability policy.",
       });
-      const groupedChanges = changes.map((change) => ({
-        ...change,
-        action: fs.existsSync(path.resolve(localPath, change.path)) ? "modify" as const : "create" as const,
-        description: "Authenticated local edit",
-      }));
-      if (!authorizedCapabilityScope) {
-        throw new Error("Authenticated local edit capability scope could not be established");
-      }
-      const outcome = await ValidationCoordinator.applyLocalActionGroup({
-        stageId: capabilityScopeId,
-        localPath,
-        authorizedCapabilityScope,
-        changes: groupedChanges,
-      });
-      if (outcome.journalEntry.status !== "VERIFIED") {
-        throw new Error("Authenticated local write failed deterministic validation");
-      }
-      const written = changes.map((change) => change.path);
-
-      res.json({ success: true, data: { written } });
     } catch (error) {
       console.error("Error applying local changes:", error);
       res.status(500).json({ success: false, error: "Failed to write local files" });

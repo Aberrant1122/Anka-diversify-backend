@@ -27,7 +27,7 @@ import type { RepositoryContextAssemblyResult } from "./RepositoryObserver";
 import { DestructiveTargetResolver } from "../contracts/DestructiveTargetResolver";
 import { detectCompoundIntent, buildFinalExecutionContract } from "../contracts/ExecutionContractBuilder";
 import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
-import { AuthorizedCapabilityScope, CapabilityAction, CapabilityGuard } from "../runtime/CapabilityGuard";
+import { AuthorizedCapabilityScope, CapabilityAction, CapabilityGrant, CapabilityGuard } from "../runtime/CapabilityGuard";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { ManifestGenerator } from "../generation/ManifestGenerator";
 import { getOpenAI } from "../shared/utils";
@@ -98,12 +98,14 @@ export interface AgentManifestPlanningInput {
   finalConfidence: number;
   onProgress?: (event: AgentProgressEvent) => void;
   authorizedCapabilityScope?: AuthorizedCapabilityScope;
+  baseCommitSha?: string;
 }
 
 export interface AgentManifestPlanningSuccess {
   planningComplete: true;
   approvedManifest: FileManifest | null;
   executionContract: ExecutionContract;
+  authorizedCapabilityScope?: AuthorizedCapabilityScope;
   durationMs: number;
 }
 
@@ -220,6 +222,7 @@ export class AgentPlanner {
       onProgress,
     } = input;
     let executionContract = input.executionContract;
+    let activeCapabilityScope = input.authorizedCapabilityScope;
     const session = { id: sessionId };
     // Stage 6: Advisory Manifest Generation & Planning Validation
     const s6Start = performance.now();
@@ -671,6 +674,7 @@ export class AgentPlanner {
           };
         });
 
+        const effectiveRevision = input.baseCommitSha || (input.projectContext?.repoSnapshot as any)?.revision?.contentHash;
         const planningEvidenceResult = EvidenceBoundWriteSetResolver.resolve({
           policy: policyContract,
           intentSpec: taskIntentSpec,
@@ -679,39 +683,11 @@ export class AgentPlanner {
           existingFiles: canonicalExistingFiles,
           monorepo,
           targetRepositoryId: projectId,
+          workspaceRoot: effectiveLocalPath || undefined,
+          baseRevision: effectiveRevision,
+          stageId: activeStage.id,
+          runId: input.authorizedCapabilityScope?.runId,
         });
-
-        const capabilityGuard = effectiveLocalPath && input.authorizedCapabilityScope
-          ? CapabilityGuard.create({
-              workspaceRoot: effectiveLocalPath,
-              scopeId: activeStage.id,
-              authorizedScope: input.authorizedCapabilityScope,
-            })
-          : CapabilityGuard.denyAll();
-        const capabilityDenied: Array<{ path: string; reason: string }> = [];
-        const capabilityApprovedPaths = planningEvidenceResult.authorizedChanges
-          .filter((change) => {
-            const action: CapabilityAction = change.action === "create"
-              ? "FILE_CREATE"
-              : change.action === "delete"
-                ? "FILE_DELETE"
-                : "FILE_MODIFY";
-            const decision = capabilityGuard.authorize({ action, path: change.path, scopeId: activeStage.id });
-            if (!decision.allowed) capabilityDenied.push({ path: change.path, reason: `${decision.code}: ${decision.reason}` });
-            return decision.allowed;
-          })
-          .map((change) => normalizeRepoPath(change.path));
-
-        const groundedPlanningPaths = Array.from(new Set([
-          ...executionContract.targetPaths,
-          ...capabilityApprovedPaths,
-        ].map(normalizeRepoPath).filter(Boolean)));
-        executionContract = buildFinalExecutionContract(
-          policyContract,
-          groundedPlanningPaths,
-          canonicalExistingFiles,
-          executionContract.actionObligations
-        );
 
         // Blocker 5 fail-closed: If proposed changes exist but none were approved by evidence authority,
         // targetPaths MUST be [] and pipeline returns a controlled planning failure immediately.
@@ -740,33 +716,33 @@ export class AgentPlanner {
           };
         }
 
-        if (proposedPlannedChanges.length > 0 && capabilityApprovedPaths.length === 0) {
-          const rejectedReasons = capabilityDenied
-            .map((r) => `• ${r.path}: ${r.reason}`)
-            .join("\n");
-          const failureExplanation = `[Write Authority Rejected] CapabilityGuard denied every evidence-grounded requested mutation:\n${rejectedReasons}`;
-          await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
-
-          return {
-            explanation: failureExplanation,
-            changes: [],
-            commitMessage: "",
-            sessionId: session.id,
-            intent: intentResult.intent,
-            taskType: intentResult.taskType,
-            risk: intentResult.risk,
-            estimatedComplexity: intentResult.estimatedComplexity,
-            targetPath: intentResult.targetPath,
-            confidence: finalConfidence,
-            buildVerified: false,
-            buildErrors: failureExplanation,
-            lifecycleStage: "WriteAuthorityRejected",
-            errorCode: capabilityDenied[0]?.reason.split(":", 1)[0] || "CAPABILITY_POLICY_MISSING",
-          };
+        if (input.authorizedCapabilityScope && planningEvidenceResult.evidenceAuthorization) {
+          const derived = input.authorizedCapabilityScope.deriveExecutionScope(
+            planningEvidenceResult.evidenceAuthorization,
+            {
+              stageId: activeStage.id,
+              workspaceRoot: effectiveLocalPath || undefined,
+              baseRevision: effectiveRevision,
+            }
+          );
+          if (derived) {
+            activeCapabilityScope = derived;
+          }
         }
 
+        const groundedPlanningPaths = Array.from(new Set([
+          ...executionContract.targetPaths,
+          ...planningEvidenceResult.approvedPaths,
+        ].map(normalizeRepoPath).filter(Boolean)));
+        executionContract = buildFinalExecutionContract(
+          policyContract,
+          groundedPlanningPaths,
+          canonicalExistingFiles,
+          executionContract.actionObligations
+        );
+
         // Construct a coherent evidence-grounded planning manifest.
-        const approvedSet = new Set(capabilityApprovedPaths);
+        const approvedSet = new Set(planningEvidenceResult.approvedPaths.map(normalizeRepoPath));
         const coherentFiles = (rawManifest.files || []).filter((f) => approvedSet.has(normalizeRepoPath(f.path)));
         const coherentPlanningManifest: FileManifest = {
           files: coherentFiles,
@@ -906,6 +882,7 @@ export class AgentPlanner {
       planningComplete: true,
       approvedManifest,
       executionContract,
+      authorizedCapabilityScope: activeCapabilityScope,
       durationMs: s6Time,
     };
   }

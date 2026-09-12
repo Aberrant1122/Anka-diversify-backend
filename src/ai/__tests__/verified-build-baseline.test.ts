@@ -185,10 +185,9 @@ describe("Verified Build Baseline Before Agent Generation (Steps A-K)", () => {
 
     const pipelineOptions = pipelineSpy.mock.calls[0]?.[4];
     const productionScope = pipelineOptions?.authorizedCapabilityScope;
-    if (!productionScope) throw new Error("Production run must bind explicit task capabilities to its worktree");
-    expect(productionScope.mode.grants).toEqual([
-      { path: "src/Calculator.tsx", action: "FILE_MODIFY" },
-    ]);
+    if (!productionScope) throw new Error("Production run must bind a zero-write base capability to its worktree");
+    expect(productionScope.mode.grants).toEqual([]);
+    expect(productionScope.runId).toBe("run-repaired-baseline");
     expect(productionScope.mode.grants).not.toContainEqual(
       { path: "src/Unrequested.tsx", action: "FILE_MODIFY" },
     );
