@@ -865,7 +865,7 @@ export class DestructiveTargetResolver {
       const fileEvIds: string[] = [];
 
       if (fileExists) {
-        const fileEv = evidenceStore.addEvidence({
+        const fileEv = evidenceStore.observeRepository({
           kind: "FILE",
           filePath: norm,
           provenance: "REPO_READ",
@@ -881,7 +881,7 @@ export class DestructiveTargetResolver {
         if (content) {
           const symbols = extractExportedSymbols(content);
           for (const sym of symbols) {
-            const symEv = evidenceStore.addEvidence({
+            const symEv = evidenceStore.observeRepository({
               kind: "SYMBOL",
               filePath: norm,
               symbol: sym,
@@ -910,7 +910,7 @@ export class DestructiveTargetResolver {
       const normImp = normalizeRepoPath(impPath);
       const impEvIds: string[] = [];
 
-      const impFileEv = evidenceStore.addEvidence({
+      const impFileEv = evidenceStore.observeRepository({
         kind: "FILE",
         filePath: normImp,
         provenance: "REPO_READ",
@@ -933,7 +933,7 @@ export class DestructiveTargetResolver {
         });
 
         if (relType) {
-          const impRelEv = evidenceStore.addEvidence({
+          const impRelEv = evidenceStore.observeRepository({
             kind: relType === "SYMBOL_REFERENCE" ? "REFERENCE" : "IMPORT",
             filePath: normImp,
             sourceFile: normTarget,

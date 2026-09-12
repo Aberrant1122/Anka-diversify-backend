@@ -20,7 +20,7 @@ import { AgentFileChange, ExecutionContract, FileManifest } from "../shared/type
 const execAsync = promisify(exec);
 
 function isolatedWorktreeManager(worktreePath: string, scopeId: string): FileSystemStateManager {
-  const authorizedScope = AuthorizedCapabilityScope.fromIsolatedWorktree({
+  const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
     workspaceRoot: worktreePath,
     authorityId: `test-isolated-worktree:${scopeId}`,
     grants: [

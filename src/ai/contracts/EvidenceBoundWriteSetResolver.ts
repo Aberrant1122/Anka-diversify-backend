@@ -4,6 +4,75 @@ import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { RepositoryEvidenceStore, RepositoryEvidence } from "../repository/RepositoryEvidenceStore";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { MonorepoDescriptor } from "../workspace/MonorepoDetector";
+import type { CapabilityGrant, CapabilityAction } from "../runtime/CapabilityGuard";
+
+export interface EvidenceBoundAuthorization {
+  readonly authorizationId: string;
+  readonly repositoryId: string;
+  isAuthentic(): boolean;
+  getApprovedGrants(): readonly CapabilityGrant[];
+  getEvidenceIds(): readonly string[];
+  getWorkspaceRoot(): string | undefined;
+  getBaseRevision(): string | undefined;
+  getStageId(): string | undefined;
+  getRunId(): string | undefined;
+}
+
+interface EvidenceAuthorizationDetails {
+  readonly workspaceRoot?: string;
+  readonly baseRevision?: string;
+  readonly stageId?: string;
+  readonly runId?: string;
+  readonly approvedGrants: readonly CapabilityGrant[];
+  readonly evidenceIds: readonly string[];
+}
+
+const authenticEvidenceAuthorizations = new WeakSet<object>();
+const authorizationDetails = new WeakMap<object, EvidenceAuthorizationDetails>();
+
+class ResolverIssuedEvidenceAuthorization implements EvidenceBoundAuthorization {
+  private constructor(
+    public readonly authorizationId: string,
+    public readonly repositoryId: string,
+  ) {
+    authenticEvidenceAuthorizations.add(this);
+    Object.freeze(this);
+  }
+
+  public static create(input: {
+    authorizationId: string;
+    repositoryId: string;
+    workspaceRoot?: string;
+    baseRevision?: string;
+    stageId?: string;
+    runId?: string;
+    approvedGrants: readonly CapabilityGrant[];
+    evidenceIds: readonly string[];
+  }): EvidenceBoundAuthorization {
+    const artifact = new ResolverIssuedEvidenceAuthorization(input.authorizationId, input.repositoryId);
+    authorizationDetails.set(artifact, Object.freeze({
+      workspaceRoot: input.workspaceRoot ? path.resolve(input.workspaceRoot) : undefined,
+      baseRevision: input.baseRevision,
+      stageId: input.stageId,
+      runId: input.runId,
+      approvedGrants: Object.freeze(input.approvedGrants.map((grant) => Object.freeze({ ...grant }))),
+      evidenceIds: Object.freeze([...input.evidenceIds]),
+    }));
+    return artifact;
+  }
+
+  public isAuthentic(): boolean { return authenticEvidenceAuthorizations.has(this); }
+  public getApprovedGrants(): readonly CapabilityGrant[] { return authorizationDetails.get(this)?.approvedGrants ?? Object.freeze([]); }
+  public getEvidenceIds(): readonly string[] { return authorizationDetails.get(this)?.evidenceIds ?? Object.freeze([]); }
+  public getWorkspaceRoot(): string | undefined { return authorizationDetails.get(this)?.workspaceRoot; }
+  public getBaseRevision(): string | undefined { return authorizationDetails.get(this)?.baseRevision; }
+  public getStageId(): string | undefined { return authorizationDetails.get(this)?.stageId; }
+  public getRunId(): string | undefined { return authorizationDetails.get(this)?.runId; }
+}
+
+export function isAuthenticEvidenceBoundAuthorization(value: unknown): value is EvidenceBoundAuthorization {
+  return typeof value === "object" && value !== null && authenticEvidenceAuthorizations.has(value);
+}
 
 export interface IntegrationObligation {
   required?: boolean;
@@ -24,6 +93,7 @@ export interface WriteAuthorizationResult {
   approvedPaths: string[];
   rejectedPaths: Array<{ path: string; reason: string }>;
   authorizedChanges: PlannedChange[];
+  evidenceAuthorization: EvidenceBoundAuthorization;
 }
 
 export interface WriteSetResolverParams {
@@ -34,6 +104,11 @@ export interface WriteSetResolverParams {
   existingFiles: string[] | Set<string>;
   monorepo?: MonorepoDescriptor | null;
   targetRepositoryId?: string;
+  workspaceRoot?: string;
+  baseRevision?: string;
+  stageId?: string;
+  /** Server-issued execution identity, never request/model supplied. */
+  runId?: string;
 }
 
 function isDependencyMatch(dep: string, targetPath: string): boolean {
@@ -336,10 +411,21 @@ export class EvidenceBoundWriteSetResolver {
     // Fast-fail if policy requires clarification or task is unknown
     if (policy.requiresClarification || policy.taskType === "UNKNOWN") {
       console.log(`[WRITE_AUTH] Blocked: policy requires clarification or task is UNKNOWN.`);
+      const emptyAuth = ResolverIssuedEvidenceAuthorization.create({
+        authorizationId: `auth-blocked-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        repositoryId: targetRepositoryId,
+        workspaceRoot: params.workspaceRoot,
+        baseRevision: params.baseRevision,
+        stageId: params.stageId,
+        runId: params.runId,
+        approvedGrants: [],
+        evidenceIds: [],
+      });
       return {
         approvedPaths: [],
         rejectedPaths: proposedChanges.map((c) => ({ path: c.path, reason: "POLICY_BLOCKED_UNKNOWN_OR_CLARIFICATION" })),
         authorizedChanges: [],
+        evidenceAuthorization: emptyAuth,
       };
     }
 
@@ -389,6 +475,12 @@ export class EvidenceBoundWriteSetResolver {
           normPath,
           `INVENTED_OR_MISSING_EVIDENCE_IDS: Cited non-existent or unverified evidence IDs: ${evidenceValidation.missingIds.join(", ")}`
         );
+        continue;
+      }
+
+      if (evidenceValidation.evidence.some((evidence) => !evidenceStore.isAuthorityEligible(evidence))) {
+        console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=UNAUTHENTICATED_REPOSITORY_EVIDENCE`);
+        rejectionReasons.set(normPath, "UNAUTHENTICATED_REPOSITORY_EVIDENCE: Caller-shaped or advisory evidence cannot authorize mutation");
         continue;
       }
 
@@ -672,10 +764,40 @@ export class EvidenceBoundWriteSetResolver {
       }
     }
 
+    const approvedGrants: CapabilityGrant[] = authorizedChanges.map((change) => ({
+      path: normalizeRepoPath(change.path),
+      action: change.action === "create"
+        ? ("FILE_CREATE" as CapabilityAction)
+        : change.action === "delete"
+          ? ("FILE_DELETE" as CapabilityAction)
+          : ("FILE_MODIFY" as CapabilityAction),
+    }));
+
+    const allEvidenceIds: string[] = [];
+    for (const change of authorizedChanges) {
+      for (const id of change.evidenceIds || []) {
+        if (id && !allEvidenceIds.includes(id)) {
+          allEvidenceIds.push(id);
+        }
+      }
+    }
+
+    const evidenceAuthorization = ResolverIssuedEvidenceAuthorization.create({
+      authorizationId: `auth-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      repositoryId: targetRepositoryId,
+      workspaceRoot: params.workspaceRoot,
+      baseRevision: params.baseRevision,
+      stageId: params.stageId,
+      runId: params.runId,
+      approvedGrants,
+      evidenceIds: allEvidenceIds,
+    });
+
     return {
       approvedPaths,
       rejectedPaths,
       authorizedChanges,
+      evidenceAuthorization,
     };
   }
 }

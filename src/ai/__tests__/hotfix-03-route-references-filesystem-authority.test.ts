@@ -1,4 +1,6 @@
 import path from "path";
+import fs from "fs";
+import os from "os";
 import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
 import {
   buildExecutionContract,
@@ -184,12 +186,20 @@ describe("Hotfix 03: Route References Must Not Become Filesystem Write Authority
 
   describe("G. Evidence-Supported Implementation File Authorized via Backend Mechanism", () => {
     it("authorizes discovered file when backed by authentic repository evidence", () => {
-      const evidenceStore = new RepositoryEvidenceStore("proj-1");
-      const ev1 = evidenceStore.addEvidence({
-        kind: "SYMBOL",
+      const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "hotfix03-evidence-"));
+      fs.mkdirSync(path.join(workspace, "lib"), { recursive: true });
+      fs.writeFileSync(path.join(workspace, "lib", "mock-data.ts"), "export function getTasksByProject() {}", "utf8");
+      const evidenceStore = new RepositoryEvidenceStore("proj-1", workspace);
+      const fileEvidence = evidenceStore.observeRepository({
+        kind: "FILE",
         filePath: "lib/mock-data.ts",
         provenance: "REPO_READ",
-        metadata: { symbol: "getTasksByProject" },
+      });
+      const ev1 = evidenceStore.observeRepository({
+        kind: "SYMBOL",
+        filePath: "lib/mock-data.ts",
+        provenance: "AST_GRAPH",
+        symbol: "getTasksByProject",
       });
 
       const intentSpec: TaskIntentSpec = {
@@ -212,7 +222,7 @@ describe("Hotfix 03: Route References Must Not Become Filesystem Write Authority
           path: "lib/mock-data.ts",
           action: "modify",
           reason: "Fix getTasksByProject filtering logic",
-          evidenceIds: [ev1.id],
+          evidenceIds: [fileEvidence.id, ev1.id],
           dependencies: [],
         },
       ];
@@ -227,6 +237,7 @@ describe("Hotfix 03: Route References Must Not Become Filesystem Write Authority
 
       expect(writeSetResult.approvedPaths).toContain("lib/mock-data.ts");
       expect(writeSetResult.authorizedChanges.length).toBe(1);
+      fs.rmSync(workspace, { recursive: true, force: true });
 
       // Final contract successfully incorporates evidence-grounded planning path
       const finalContract = buildFinalExecutionContract(
@@ -332,11 +343,12 @@ describe("Hotfix 03: Route References Must Not Become Filesystem Write Authority
   describe("J. CapabilityGuard Still Rejects Genuine Scope Violation", () => {
     it("denies access when CapabilityGuard scope excludes target path", () => {
       const mockWorkspace = __dirname;
+      const authorizedPath = path.basename(__filename);
       const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
         authorityId: "auth-scope-test",
         workspaceRoot: mockWorkspace,
         grants: [
-          { action: "FILE_MODIFY", path: "components/ProjectDetail.tsx" },
+          { action: "FILE_MODIFY", path: authorizedPath },
         ],
       });
       expect(authorizedScope).not.toBeNull();
@@ -349,7 +361,7 @@ describe("Hotfix 03: Route References Must Not Become Filesystem Write Authority
 
       const allowedDecision = guard.authorize({
         action: "FILE_MODIFY",
-        path: "components/ProjectDetail.tsx",
+        path: authorizedPath,
         scopeId: "stage-1",
       });
       expect(allowedDecision.allowed).toBe(true);

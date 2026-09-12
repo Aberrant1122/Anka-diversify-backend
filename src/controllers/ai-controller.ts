@@ -16,7 +16,6 @@ const CAPABILITY_ACTIONS = new Set<CapabilityAction>(["FILE_CREATE", "FILE_MODIF
 
 interface CodingAgentInvocation {
   request: ChatRequest;
-  authorizedCapabilities?: readonly CapabilityGrant[];
 }
 
 function parseCodingAgentInvocation(body: unknown): CodingAgentInvocation | null {
@@ -24,24 +23,8 @@ function parseCodingAgentInvocation(body: unknown): CodingAgentInvocation | null
   const input = body as Record<string, unknown>;
   if (typeof input.message !== "string" || input.message.trim().length === 0) return null;
 
-  let authorizedCapabilities: CapabilityGrant[] | undefined;
-  if (input.authorizedCapabilities !== undefined) {
-    if (!Array.isArray(input.authorizedCapabilities)) return null;
-    authorizedCapabilities = [];
-    for (const value of input.authorizedCapabilities) {
-      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-      const grant = value as Record<string, unknown>;
-      if (
-        typeof grant.path !== "string"
-        || grant.path.trim().length === 0
-        || typeof grant.action !== "string"
-        || !CAPABILITY_ACTIONS.has(grant.action as CapabilityAction)
-      ) {
-        return null;
-      }
-      authorizedCapabilities.push({ path: grant.path, action: grant.action as CapabilityAction });
-    }
-  }
+  // External client request bodies may NEVER establish backend filesystem capabilities.
+  // Any externally supplied authorizedCapabilities field carries zero authority and is strictly ignored.
 
   const request: ChatRequest = { message: input.message };
   if (typeof input.sessionId === "string") request.sessionId = input.sessionId;
@@ -49,7 +32,7 @@ function parseCodingAgentInvocation(body: unknown): CodingAgentInvocation | null
   if (input.context && typeof input.context === "object" && !Array.isArray(input.context)) {
     request.context = input.context as Record<string, unknown>;
   }
-  return { request, authorizedCapabilities };
+  return { request };
 }
 
 export class AiController {
@@ -407,7 +390,7 @@ export class AiController {
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
       const invocation = parseCodingAgentInvocation(req.body);
-      if (!invocation) return res.status(400).json({ error: "A valid message and authorizedCapabilities are required" });
+      if (!invocation) return res.status(400).json({ error: "A valid message is required" });
 
       if (req.headers.accept?.includes("text/event-stream") || req.query.stream === "true") {
         return this.streamAgent(req, res);
@@ -418,7 +401,6 @@ export class AiController {
         projectId,
         invocation.request,
         undefined,
-        invocation.authorizedCapabilities,
       );
       res.json({ success: true, data: result });
     } catch (error) {
@@ -438,7 +420,7 @@ export class AiController {
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
       const invocation = parseCodingAgentInvocation(req.body);
-      if (!invocation) return res.status(400).json({ error: "A valid message and authorizedCapabilities are required" });
+      if (!invocation) return res.status(400).json({ error: "A valid message is required" });
 
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -458,7 +440,6 @@ export class AiController {
         (progressEvent: any) => {
           sendEvent("progress", progressEvent);
         },
-        invocation.authorizedCapabilities,
       );
 
       sendEvent("complete", result);

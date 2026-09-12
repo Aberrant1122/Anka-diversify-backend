@@ -489,7 +489,7 @@ export class AgentPipeline {
     if (diagnosticTargetPaths.length > 0) {
       for (const dt of diagnosticTargetPaths) {
         if (!diagnosticEvidences.some((e) => normalizeRepoPath(e.filePath) === normalizeRepoPath(dt))) {
-          evidenceStore.addEvidence({
+          evidenceStore.observeRepository({
             kind: "DIAGNOSTIC",
             filePath: dt,
             provenance: "BUILD_DIAGNOSTIC",
@@ -675,12 +675,14 @@ export class AgentPipeline {
       finalConfidence,
       onProgress,
       authorizedCapabilityScope: options?.authorizedCapabilityScope,
+      baseCommitSha: options?.baseCommitSha,
     });
     if (!("planningComplete" in manifestPlanning)) {
       return manifestPlanning;
     }
     const { approvedManifest, durationMs: s6Time } = manifestPlanning;
     executionContract = manifestPlanning.executionContract;
+    const activeCapabilityScope = manifestPlanning.authorizedCapabilityScope ?? options?.authorizedCapabilityScope;
     // Authoritative Manifest Source Hydration for MODIFY actions
     const hydrationResult = AuthoritativeSourceHydrator.hydrateModifySources(
       approvedManifest,
@@ -835,7 +837,7 @@ export class AgentPipeline {
       requestMessage: request.message,
       projectId,
       approvedManifest,
-      authorizedCapabilityScope: options?.authorizedCapabilityScope,
+      authorizedCapabilityScope: activeCapabilityScope,
       onProgress,
       baselineDiagnostics: options?.baselineDiagnostics,
       targetedBaselineDiagnostics: options?.targetedBaselineDiagnostics,

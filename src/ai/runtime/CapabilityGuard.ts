@@ -1,5 +1,9 @@
 import fs from "fs";
 import path from "path";
+import {
+  EvidenceBoundAuthorization,
+  isAuthenticEvidenceBoundAuthorization,
+} from "../contracts/EvidenceBoundWriteSetResolver";
 
 export type CapabilityAction = "FILE_CREATE" | "FILE_MODIFY" | "FILE_DELETE";
 
@@ -37,19 +41,24 @@ export interface CapabilityPolicyInput {
 export interface IsolatedWorktreeAuthorityInput {
   workspaceRoot: string;
   authorityId: string;
+  repositoryId: string;
+  runId: string;
   grants: readonly CapabilityGrant[];
+  baseRevision?: string;
 }
 
-export interface AuthenticatedProjectAuthorityInput {
+interface RejectedRawGrantInput {
   workspaceRoot: string;
   authorityId: string;
   grants: readonly CapabilityGrant[];
+  baseRevision?: string;
 }
 
-export interface ExactBackendAuthorityInput {
-  workspaceRoot: string;
-  authorityId: string;
-  grants: readonly CapabilityGrant[];
+export interface ExecutionDerivationContext {
+  stageId?: string;
+  workspaceRoot?: string;
+  baseRevision?: string;
+  authorityId?: string;
 }
 
 interface CapabilityPolicy {
@@ -61,6 +70,8 @@ interface CapabilityPolicy {
 
 const KNOWN_ACTIONS: readonly CapabilityAction[] = ["FILE_CREATE", "FILE_MODIFY", "FILE_DELETE"];
 const AUTHORITY_MARKER = Symbol("backend capability authority");
+
+const authenticCapabilityScopes = new WeakSet<object>();
 
 function requireText(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -93,6 +104,39 @@ function canonicalizeTarget(workspaceRoot: string, normalizedPath: string): stri
   return path.resolve(canonicalAncestor, unresolvedSuffix);
 }
 
+function readLiveGitHead(workspaceRoot: string): string | null {
+  try {
+    const dotGitPath = path.join(workspaceRoot, ".git");
+    const stat = fs.statSync(dotGitPath);
+    let gitDirectory = dotGitPath;
+    if (stat.isFile()) {
+      const pointer = fs.readFileSync(dotGitPath, "utf8").trim();
+      if (!pointer.startsWith("gitdir:")) return null;
+      gitDirectory = path.resolve(workspaceRoot, pointer.slice("gitdir:".length).trim());
+    }
+    const head = fs.readFileSync(path.join(gitDirectory, "HEAD"), "utf8").trim();
+    if (/^[0-9a-f]{40}$/i.test(head)) return head.toLowerCase();
+    if (!head.startsWith("ref:")) return null;
+    const refName = head.slice("ref:".length).trim();
+    const looseRefPath = path.join(gitDirectory, ...refName.split("/"));
+    if (fs.existsSync(looseRefPath)) return fs.readFileSync(looseRefPath, "utf8").trim().toLowerCase();
+    const commonDirPath = path.join(gitDirectory, "commondir");
+    const commonDirectory = fs.existsSync(commonDirPath)
+      ? path.resolve(gitDirectory, fs.readFileSync(commonDirPath, "utf8").trim())
+      : gitDirectory;
+    const commonLooseRef = path.join(commonDirectory, ...refName.split("/"));
+    if (fs.existsSync(commonLooseRef)) return fs.readFileSync(commonLooseRef, "utf8").trim().toLowerCase();
+    const packedRefs = path.join(commonDirectory, "packed-refs");
+    if (!fs.existsSync(packedRefs)) return null;
+    const match = fs.readFileSync(packedRefs, "utf8")
+      .split(/\r?\n/)
+      .find((line) => line.endsWith(` ${refName}`));
+    return match ? match.slice(0, 40).toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 type AuthorizedCapabilityScopeMode = { kind: "EXACT_PATHS"; grants: readonly CapabilityGrant[] };
 
 /**
@@ -105,31 +149,122 @@ export class AuthorizedCapabilityScope {
   private constructor(
     public readonly authorityId: string,
     public readonly workspaceRoot: string,
-    public readonly source: "ISOLATED_GIT_WORKTREE" | "AUTHENTICATED_PROJECT_LOCAL_EDIT" | "BACKEND_TEST_CONFIGURATION",
+    public readonly source: "ISOLATED_GIT_WORKTREE",
     public readonly mode: AuthorizedCapabilityScopeMode,
+    public readonly baseRevision?: string,
+    public readonly repositoryIdBinding?: string,
+    public readonly runId?: string,
   ) {
+    authenticCapabilityScopes.add(this);
     Object.freeze(this);
   }
 
   public static fromIsolatedWorktree(input: IsolatedWorktreeAuthorityInput): AuthorizedCapabilityScope | null {
+    // An isolated worktree is a trusted execution root, never a raw-grant issuer.
+    // Stage writes are derived only from evidence authorization.
+    if (input.grants.length !== 0 || !requireText(input.repositoryId) || !requireText(input.runId)) return null;
     return this.createExactAuthority(input, "ISOLATED_GIT_WORKTREE");
   }
 
-  public static fromAuthenticatedProject(input: AuthenticatedProjectAuthorityInput): AuthorizedCapabilityScope | null {
-    return this.createExactAuthority(input, "AUTHENTICATED_PROJECT_LOCAL_EDIT");
+  /** Compatibility rejection surface: raw backend grants cannot mint authority. */
+  public static fromBackendConfiguration(_input: RejectedRawGrantInput): AuthorizedCapabilityScope | null {
+    return null;
   }
 
-  /** Exact deterministic grants for backend fixtures and narrowly configured runtimes. */
-  public static fromBackendConfiguration(input: ExactBackendAuthorityInput): AuthorizedCapabilityScope | null {
-    return this.createExactAuthority(input, "BACKEND_TEST_CONFIGURATION");
+  /** Compatibility rejection surface: project authentication is not file authority. */
+  public static fromAuthenticatedProject(_input: RejectedRawGrantInput): AuthorizedCapabilityScope | null {
+    return null;
   }
 
   public isAuthentic(): boolean {
-    return this.marker === AUTHORITY_MARKER;
+    return this.marker === AUTHORITY_MARKER && authenticCapabilityScopes.has(this);
+  }
+
+  /**
+   * Derives a new immutable execution capability scope ONLY from an authentic base scope
+   * AND an authentic EvidenceBoundAuthorization artifact issued by EvidenceBoundWriteSetResolver.
+   */
+  public deriveExecutionScope(
+    evidenceAuthorization: EvidenceBoundAuthorization,
+    context?: ExecutionDerivationContext,
+  ): AuthorizedCapabilityScope | null {
+    if (!this.isAuthentic() || !(this instanceof AuthorizedCapabilityScope)) {
+      return null;
+    }
+    if (!isAuthenticEvidenceBoundAuthorization(evidenceAuthorization)) {
+      return null;
+    }
+
+    // Workspace / repository binding check
+    const authWorkspaceRoot = evidenceAuthorization.getWorkspaceRoot();
+    if (authWorkspaceRoot) {
+      const canonicalScopeRoot = path.resolve(this.workspaceRoot);
+      const canonicalAuthRoot = path.resolve(authWorkspaceRoot);
+      if (canonicalScopeRoot !== canonicalAuthRoot) {
+        try {
+          if (fs.realpathSync(canonicalScopeRoot) !== fs.realpathSync(canonicalAuthRoot)) {
+            return null;
+          }
+        } catch {
+          return null;
+        }
+      }
+    }
+
+    if (!this.repositoryIdBinding || evidenceAuthorization.repositoryId !== this.repositoryIdBinding) {
+      return null;
+    }
+    const authRunId = evidenceAuthorization.getRunId();
+    if (!this.runId || authRunId !== this.runId) {
+      return null;
+    }
+
+    if (context?.workspaceRoot) {
+      const canonicalScopeRoot = path.resolve(this.workspaceRoot);
+      const canonicalContextRoot = path.resolve(context.workspaceRoot);
+      if (canonicalScopeRoot !== canonicalContextRoot) {
+        try {
+          if (fs.realpathSync(canonicalScopeRoot) !== fs.realpathSync(canonicalContextRoot)) {
+            return null;
+          }
+        } catch {
+          return null;
+        }
+      }
+    }
+
+    // Base revision binding check
+    const authRevision = evidenceAuthorization.getBaseRevision();
+    if (this.baseRevision && authRevision && this.baseRevision !== authRevision) {
+      return null;
+    }
+    if (this.baseRevision && context?.baseRevision && this.baseRevision !== context.baseRevision) {
+      return null;
+    }
+
+    const approvedGrants = evidenceAuthorization.getApprovedGrants();
+    for (const grant of approvedGrants) {
+      if (!grant || !KNOWN_ACTIONS.includes(grant.action)) return null;
+      const grantPath = requireText(grant.path);
+      const normalizedPath = grantPath ? normalizeRelativePath(grantPath) : null;
+      if (!normalizedPath) return null;
+    }
+
+    const artifactStageId = evidenceAuthorization.getStageId();
+    if (!artifactStageId || !context?.stageId || context.stageId !== artifactStageId) return null;
+    const stageId = artifactStageId;
+    const suffix = stageId && !this.authorityId.includes(`:stage:${stageId}`)
+      ? `:stage:${stageId}`
+      : stageId ? "" : (this.authorityId.endsWith(":execution") ? "" : ":execution");
+    const derivedAuthorityId = `${this.authorityId}${suffix}`;
+    // A derived scope is exact to this authorization; it never carries base or prior-stage writes.
+    const mode = Object.freeze({ kind: "EXACT_PATHS" as const, grants: Object.freeze([...approvedGrants]) });
+    const effectiveRevision = this.baseRevision || authRevision || context?.baseRevision;
+    return new AuthorizedCapabilityScope(derivedAuthorityId, this.workspaceRoot, this.source, mode, effectiveRevision, this.repositoryIdBinding, this.runId);
   }
 
   private static createExactAuthority(
-    input: ExactBackendAuthorityInput,
+    input: IsolatedWorktreeAuthorityInput,
     source: AuthorizedCapabilityScope["source"],
   ): AuthorizedCapabilityScope | null {
     const authorityId = requireText(input.authorityId);
@@ -144,7 +279,16 @@ export class AuthorizedCapabilityScope {
       grants.push(Object.freeze({ action: grant.action, path: normalizedPath }));
     }
     const mode = Object.freeze({ kind: "EXACT_PATHS" as const, grants: Object.freeze(grants) });
-    return new AuthorizedCapabilityScope(authorityId, path.resolve(workspaceRootText), source, mode);
+    const baseRevision = input.baseRevision ? requireText(input.baseRevision) ?? undefined : undefined;
+    return new AuthorizedCapabilityScope(
+      authorityId,
+      path.resolve(workspaceRootText),
+      source,
+      mode,
+      baseRevision,
+      input.repositoryId,
+      input.runId,
+    );
   }
 }
 
@@ -185,6 +329,11 @@ export class CapabilityGuard {
       return CapabilityGuard.denyAll();
     }
     if (canonicalAuthorityRoot !== canonicalWorkspaceRoot) return CapabilityGuard.denyAll();
+
+    if (authorizedScope.baseRevision && /^[0-9a-f]{40}$/i.test(authorizedScope.baseRevision)) {
+      const liveHead = readLiveGitHead(canonicalWorkspaceRoot);
+      if (!liveHead || liveHead !== authorizedScope.baseRevision.toLowerCase()) return CapabilityGuard.denyAll();
+    }
 
     const authorityGrants = authorizedScope.mode.grants;
     const mutableGrants = new Map<string, Set<CapabilityAction>>();

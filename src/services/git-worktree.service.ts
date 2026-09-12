@@ -133,13 +133,17 @@ export class GitWorktreeService {
   public static createIsolatedCapabilityScope(
     worktreePath: string,
     runId: string,
-    authorizedCapabilities?: readonly CapabilityGrant[],
+    _authorizedCapabilities?: readonly CapabilityGrant[],
+    baseRevision?: string,
+    repositoryId?: string,
   ): AuthorizedCapabilityScope | null {
-    if (!authorizedCapabilities || authorizedCapabilities.length === 0) return null;
     return AuthorizedCapabilityScope.fromIsolatedWorktree({
       workspaceRoot: worktreePath,
       authorityId: `isolated-worktree:${runId}`,
-      grants: authorizedCapabilities,
+      repositoryId: repositoryId ?? path.resolve(worktreePath),
+      runId,
+      grants: [],
+      baseRevision,
     });
   }
 
@@ -747,7 +751,9 @@ export class GitWorktreeService {
             authorizedCapabilityScope: this.createIsolatedCapabilityScope(
               prepared.worktreePath,
               runId,
-              options.authorizedCapabilities,
+              options.authorizedCapabilities ?? [],
+              prepared.baseCommitSha,
+              projectId,
             ) ?? undefined,
             baselineDiagnostics,
             targetedBaselineDiagnostics,

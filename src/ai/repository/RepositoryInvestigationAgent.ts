@@ -147,7 +147,7 @@ export class RepositoryInvestigationAgent {
     // Pre-seed known architectural entry points into evidence store
     if (this.architectureSummary?.existingEntryPoints) {
       for (const entry of this.architectureSummary.existingEntryPoints) {
-        this.evidenceStore.addEvidence({
+        this.evidenceStore.observeRepository({
           kind: "ENTRY_POINT",
           filePath: entry,
           provenance: "ARCHITECTURE_DETECTOR",
@@ -161,7 +161,7 @@ export class RepositoryInvestigationAgent {
       for (const explicitPath of this.intentSpec.explicitUserPaths) {
         const fileCheck = this.toolEngine.readFile({ filePath: explicitPath });
         if (fileCheck.found) {
-          this.evidenceStore.addEvidence({
+          this.evidenceStore.observeRepository({
             kind: "FILE",
             filePath: explicitPath,
             provenance: "REPO_READ",
@@ -437,7 +437,7 @@ INSTRUCTIONS:
     // 1. repo_readFile confirms existence of file
     if (toolName === "repo_readFile" && parsed.found) {
       const filePath = parsed.filePath || params.filePath;
-      this.evidenceStore.addEvidence({
+      this.evidenceStore.observeRepository({
         kind: "FILE",
         filePath,
         provenance: "REPO_READ",
@@ -449,7 +449,7 @@ INSTRUCTIONS:
     // 2. repo_findComponent confirms component symbol and owning file
     if (toolName === "repo_findComponent" && Array.isArray(parsed.components)) {
       for (const comp of parsed.components) {
-        this.evidenceStore.addEvidence({
+        this.evidenceStore.observeRepository({
           kind: "SYMBOL",
           filePath: comp.file,
           symbol: comp.componentName,
@@ -463,7 +463,7 @@ INSTRUCTIONS:
     // 3. repo_findService confirms service existence
     if (toolName === "repo_findService" && Array.isArray(parsed.services)) {
       for (const svc of parsed.services) {
-        this.evidenceStore.addEvidence({
+        this.evidenceStore.observeRepository({
           kind: "SYMBOL",
           filePath: svc.filePath,
           symbol: svc.serviceName,
@@ -477,7 +477,7 @@ INSTRUCTIONS:
     // 4. repo_findRoute confirms route pattern and file
     if (toolName === "repo_findRoute" && Array.isArray(parsed.routes)) {
       for (const rt of parsed.routes) {
-        this.evidenceStore.addEvidence({
+        this.evidenceStore.observeRepository({
           kind: "ROUTE",
           filePath: rt.file,
           symbol: rt.path,
@@ -491,7 +491,7 @@ INSTRUCTIONS:
     // 5. repo_findReferences confirms import / call link between source and target
     if (toolName === "repo_findReferences" && Array.isArray(parsed.references)) {
       for (const ref of parsed.references) {
-        this.evidenceStore.addEvidence({
+        this.evidenceStore.observeRepository({
           kind: "REFERENCE",
           filePath: ref.file,
           symbol: params.symbolName,
@@ -509,7 +509,7 @@ INSTRUCTIONS:
         if (hit.filePath) {
           const check = this.toolEngine.readFile({ filePath: hit.filePath });
           if (check.found) {
-            this.evidenceStore.addEvidence({
+            this.evidenceStore.observeRepository({
               kind: "FILE",
               filePath: hit.filePath,
               symbol: hit.symbolName,
@@ -526,7 +526,7 @@ INSTRUCTIONS:
     if (toolName === "repo_grepSearch" && Array.isArray(parsed.results)) {
       for (const match of parsed.results.slice(0, 5)) {
         if (match.file) {
-          this.evidenceStore.addEvidence({
+          this.evidenceStore.observeRepository({
             kind: "FILE",
             filePath: match.file,
             provenance: "REPO_READ",
@@ -541,7 +541,7 @@ INSTRUCTIONS:
     if (toolName === "repo_searchArchitecture" && Array.isArray(parsed.results)) {
       for (const item of parsed.results.slice(0, 5)) {
         if (item.file) {
-          this.evidenceStore.addEvidence({
+          this.evidenceStore.observeRepository({
             kind: "ENTRY_POINT",
             filePath: item.file,
             provenance: "ARCHITECTURE_DETECTOR",

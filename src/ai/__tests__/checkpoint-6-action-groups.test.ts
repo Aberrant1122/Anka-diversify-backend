@@ -236,10 +236,11 @@ describe("Checkpoint 6 ActionGroups and verified checkpoint journal", () => {
     expect((actionGroupModule as Record<string, unknown>).fromDeterministicValidation).toBeUndefined();
   });
 
-  test("14. apply-local controller delegates its mutation to the coordinator action-group entry point", () => {
+  test("14. apply-local controller fails closed without a trusted local-edit capability policy", () => {
     const controller = fs.readFileSync(path.join(__dirname, "../../controllers/project-controller.ts"), "utf8");
     const coordinator = fs.readFileSync(path.join(__dirname, "../orchestration/ValidationCoordinator.ts"), "utf8");
-    expect(controller).toContain("ValidationCoordinator.applyLocalActionGroup");
+    expect(controller).toContain("LOCAL_EDIT_CAPABILITY_POLICY_REQUIRED");
+    expect(controller).not.toContain("fromAuthenticatedProject");
     expect(controller).not.toContain("FileSystemStateManager.apply");
     expect(coordinator).toContain("StageExecutionTransaction.startTransaction");
     expect(coordinator).toContain("ActionGroupExecutor.execute");
