@@ -126,16 +126,13 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
   };
 
   function getAuthorizedScope() {
-    return AuthorizedCapabilityScope.fromBackendConfiguration({
+    return AuthorizedCapabilityScope.fromIsolatedWorktree({
       workspaceRoot: tempDir,
       authorityId: "phase2b-evidence-pipeline",
-      grants: [
-        { path: "src/Button.tsx", action: "FILE_MODIFY" },
-        { path: "src/components/Header.tsx", action: "FILE_CREATE" },
-        { path: "src/App.tsx", action: "FILE_MODIFY" },
-        { path: "src/Dashboard.tsx", action: "FILE_MODIFY" },
-        { path: "src/components/OrphanWidget.tsx", action: "FILE_CREATE" },
-      ],
+      repositoryId: "proj-p2b",
+      runId: "phase2b-run",
+      grants: [],
+      baseRevision: "hash-p2b",
     })!;
   }
 

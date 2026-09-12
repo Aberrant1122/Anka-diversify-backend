@@ -14,6 +14,7 @@ import { PipelineTelemetry } from "./PipelineTelemetry";
 import { PipelineResultBuilder } from "./PipelineResult";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
+import { PreExecutionAuthorityClosure } from "../contracts/PreExecutionAuthorityClosure";
 import { verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
 import { BaselineDiagnostic } from "../../types";
 import { decrypt } from "../../utils/encryption";
@@ -752,10 +753,65 @@ export class AgentPipeline {
       executionContract,
     });
 
-    // Execution Scope Enforcement Gate (Post-Generation / Pre-Disk)
+    // Pre-execution authority closure. Generated paths are proposals only: any
+    // late target must be deterministically evidence-resolved before it can
+    // reach scope enforcement, validation, or an ActionGroup.
     const existingFileList = Array.isArray(effectiveSnapshot)
       ? effectiveSnapshot.map((f: any) => (typeof f === "string" ? f : f.path || ""))
       : (effectiveSnapshot?.keyFiles || []).map((f: any) => (typeof f === "string" ? f : f.path || ""));
+
+    const authorityClosure = PreExecutionAuthorityClosure.close({
+      changes: roadmapAndDiff.changes,
+      policy: policyContract,
+      intentSpec: taskIntentSpec,
+      evidenceStore,
+      existingFiles: existingFileList,
+      repositoryId: projectId,
+      workspaceRoot: effectiveLocalPath || undefined,
+      baseRevision: options?.baseCommitSha || currentRevisionHash,
+      stageId: activeStage.id,
+      runId: options?.authorizedCapabilityScope?.runId,
+      monorepo,
+      manifest: approvedManifest,
+    });
+
+    if (!authorityClosure.valid) {
+      const failureExplanation = `[EXECUTION_SCOPE_UNRESOLVED] Generated mutation candidates lacked required deterministic evidence:\n${authorityClosure.result.rejectedPaths.map((entry) => `• ${entry.path}: ${entry.reason}`).join("\n")}`;
+      await saveConversationMessage("assistant", failureExplanation);
+      return {
+        explanation: failureExplanation,
+        changes: [], commitMessage: "", sessionId: session.id,
+        intent: intentResult.intent, taskType: intentResult.taskType, risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity, targetPath: intentResult.targetPath,
+        confidence: finalConfidence, roadmap: roadmapAndDiff.roadmap,
+        lifecycleStage: "WriteAuthorityRejected", errorCode: "EXECUTION_SCOPE_UNRESOLVED",
+      };
+    }
+
+    const closureCapabilityScope = options?.authorizedCapabilityScope?.deriveExecutionScope(
+      authorityClosure.result.evidenceAuthorization,
+      { stageId: activeStage.id, workspaceRoot: effectiveLocalPath || undefined, baseRevision: options?.baseCommitSha || currentRevisionHash },
+    );
+    if (!closureCapabilityScope) {
+      const failureExplanation = "[EXECUTION_SCOPE_UNRESOLVED] Evidence authorization could not derive a live stage capability.";
+      await saveConversationMessage("assistant", failureExplanation);
+      return {
+        explanation: failureExplanation,
+        changes: [], commitMessage: "", sessionId: session.id,
+        intent: intentResult.intent, taskType: intentResult.taskType, risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity, targetPath: intentResult.targetPath,
+        confidence: finalConfidence, roadmap: roadmapAndDiff.roadmap,
+        lifecycleStage: "WriteAuthorityRejected", errorCode: "EXECUTION_SCOPE_UNRESOLVED",
+      };
+    }
+
+    executionContract = {
+      ...executionContract,
+      targetPaths: authorityClosure.result.approvedPaths,
+      targetProvenance: Object.fromEntries(authorityClosure.result.approvedPaths.map((path) => [path, "PRE_EXECUTION_EVIDENCE_CLOSURE"])),
+    };
+
+    // Execution Scope Enforcement Gate (Post-Generation / Pre-Disk)
 
     const scopeCheck = enforceExecutionScope({
       proposedChanges: roadmapAndDiff.changes,
@@ -837,7 +893,7 @@ export class AgentPipeline {
       requestMessage: request.message,
       projectId,
       approvedManifest,
-      authorizedCapabilityScope: activeCapabilityScope,
+      authorizedCapabilityScope: closureCapabilityScope,
       onProgress,
       baselineDiagnostics: options?.baselineDiagnostics,
       targetedBaselineDiagnostics: options?.targetedBaselineDiagnostics,

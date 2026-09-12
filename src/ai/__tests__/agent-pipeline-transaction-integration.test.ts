@@ -132,10 +132,15 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
   };
 
   function runPipeline() {
-    const authorizedCapabilityScope = AuthorizedCapabilityScope.fromBackendConfiguration({
+    // Match the production GitWorktreeService boundary: a trusted isolated
+    // worktree starts with no file grants, then Hotfix 05 derives exact scope
+    // from authentic evidence for this stage.
+    const authorizedCapabilityScope = AuthorizedCapabilityScope.fromIsolatedWorktree({
       workspaceRoot: tempDir,
       authorityId: "pipeline-transaction-integration",
-      grants: [{ path: "src/index.ts", action: "FILE_MODIFY" }],
+      repositoryId: "proj-1",
+      runId: "pipeline-transaction-integration-run",
+      grants: [],
     });
     if (!authorizedCapabilityScope) throw new Error("integration capability scope must be valid");
     return AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, { authorizedCapabilityScope });
