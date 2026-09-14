@@ -96,17 +96,18 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
     jest.spyOn(RepositorySearch, "runIterativeRepositorySearch").mockImplementation(async (...args: any[]) => {
       const store: RepositoryEvidenceStore = args[7];
       if (store) {
-        store.addEvidence({
+        store.observeRepository({
           kind: "FILE",
           filePath: "src/config.ts",
           provenance: "REPO_READ",
           metadata: { details: "File exists" },
         });
-        store.addEvidence({
-          kind: "REFERENCE",
+        store.observeRepository({
+          kind: "SYMBOL",
           filePath: "src/config.ts",
+          symbol: "timeout",
           provenance: "AST_GRAPH",
-          metadata: { details: "Explicit target" },
+          metadata: { details: "Observed configuration symbol" },
         });
       }
       return {
@@ -154,6 +155,16 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
     sessionId: "sess-1",
   };
 
+  function createProductionEquivalentBaseScope() {
+    return AuthorizedCapabilityScope.fromIsolatedWorktree({
+      workspaceRoot: tempDir,
+      authorityId: "pipeline-stale-source",
+      repositoryId: "proj-1",
+      runId: "pipeline-stale-source-run",
+      grants: [],
+    })!;
+  }
+
   // ── CHANGE 7: Matching version allows pipeline to proceed to apply ───────
   test("CHANGE 7: Matching disk content passes version guard and allows apply", async () => {
     jest.spyOn(ManifestGenerator.prototype, "generateManifest").mockImplementation(async (_msg: any, ctx: any) => {
@@ -197,11 +208,7 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
     // Disk still contains VERSION_A_CONTENT matching expected hash
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe(VERSION_A_CONTENT);
 
-    const authorizedCapabilityScope = AuthorizedCapabilityScope.fromBackendConfiguration({
-      workspaceRoot: tempDir,
-      authorityId: "pipeline-stale-source",
-      grants: [{ path: "src/config.ts", action: "FILE_MODIFY" }],
-    })!;
+    const authorizedCapabilityScope = createProductionEquivalentBaseScope();
 
     const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, { authorizedCapabilityScope });
 
@@ -250,11 +257,7 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
     const fsApplySpy = jest.spyOn(FileSystemStateManager.prototype, "apply");
     const selfHealSpy = jest.spyOn(SelfHealingEngine, "runSelfHealingLoop");
 
-    const authorizedCapabilityScope = AuthorizedCapabilityScope.fromBackendConfiguration({
-      workspaceRoot: tempDir,
-      authorityId: "pipeline-stale-source",
-      grants: [{ path: "src/config.ts", action: "FILE_MODIFY" }],
-    })!;
+    const authorizedCapabilityScope = createProductionEquivalentBaseScope();
 
     const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, { authorizedCapabilityScope });
 
