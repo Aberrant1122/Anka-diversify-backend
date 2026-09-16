@@ -1,3 +1,4 @@
+import { DiagnosticNormalizer, NormalizedDiagnostic } from "../ai/validation/DiagnosticNormalizer";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -63,6 +64,7 @@ export interface PreparedRepositoryRun {
   worktreePath: string;
   branchName: string;
   baseCommitSha: string;
+  targetBranch: string;
 }
 
 export interface WorktreeDiffResult {
@@ -85,6 +87,34 @@ export interface RepositoryRunSummary {
   visualVerification?: VisualVerificationResult;
   agentResponse: AgentResponse;
   shipping?: GitShippingResult;
+  shippingApproval?: GitShippingApproval;
+}
+
+export interface GitShippingApproval {
+  readonly approvalId: string;
+  readonly changedPaths: readonly string[];
+  readonly expiresAt: string;
+}
+
+export interface ApprovedAgentChange {
+  readonly path: string;
+  readonly content: string;
+}
+
+interface PendingGitShippingApproval {
+  readonly approval: GitShippingApproval;
+  readonly userId: string;
+  readonly projectId: string;
+  readonly repositoryId?: string;
+  readonly prepared: PreparedRepositoryRun;
+  readonly taskRuntime: TaskRuntime;
+  readonly checkpointJournal: VerifiedCheckpointJournal;
+  readonly trustedInfrastructureChanges: readonly {
+    path: string;
+    fingerprint: string;
+    policyAuthorized: true;
+  }[];
+  state: "AVAILABLE" | "SHIPPING";
 }
 
 export interface RepositoryShippingPolicy {
@@ -111,6 +141,8 @@ export interface RunIsolatedAgentOptions {
 
 export class GitWorktreeService {
   private static activeRuns = new Set<string>();
+  private static pendingShippingApprovals = new Map<string, PendingGitShippingApproval>();
+  private static readonly shippingApprovalTtlMs = 30 * 60 * 1000;
 
   /**
    * Returns count of active runs currently in process.
@@ -124,6 +156,171 @@ export class GitWorktreeService {
    */
   public static isRunActive(runId: string): boolean {
     return this.activeRuns.has(runId);
+  }
+
+  /**
+   * Retains an already-completed runtime and its exact verified disk state for
+   * a bounded human approval window. Client data can select this approval but
+   * cannot recreate its authority objects.
+   */
+  public static retainVerifiedRunForApproval(input: {
+    readonly userId: string;
+    readonly projectId: string;
+    readonly repositoryId?: string;
+    readonly prepared: PreparedRepositoryRun;
+    readonly taskRuntime: TaskRuntime;
+    readonly checkpointJournal: VerifiedCheckpointJournal;
+    readonly validationPassed: boolean;
+    readonly trustedInfrastructureChanges?: readonly {
+      path: string;
+      fingerprint: string;
+      policyAuthorized: true;
+    }[];
+  }): GitShippingApproval {
+    const runtime = input.taskRuntime.snapshot();
+    if (input.validationPassed !== true || runtime.status !== "COMPLETED"
+      || runtime.terminalOutcome?.type !== "COMPLETED"
+      || runtime.terminalOutcome.validationSource !== "COMPLETION_EVALUATOR") {
+      throw new Error("GIT_RUNTIME_INCOMPLETE: Only a deterministically completed run can await shipping approval.");
+    }
+
+    const infrastructure = input.trustedInfrastructureChanges ?? [];
+    const verified = new GitWorkflowService().buildVerifiedChangeset(input.checkpointJournal, infrastructure);
+    if (verified.length === 0) {
+      throw new Error("GIT_UNEXPECTED_DIFF: A shipping approval requires at least one verified change.");
+    }
+
+    const approvalId = `ship-${crypto.randomUUID()}`;
+    const expiresAtMs = Date.now() + this.shippingApprovalTtlMs;
+    const approval = Object.freeze({
+      approvalId,
+      changedPaths: Object.freeze(verified.map((change) => change.path)),
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    });
+    this.pendingShippingApprovals.set(approvalId, {
+      approval,
+      userId: input.userId,
+      projectId: input.projectId,
+      ...(input.repositoryId ? { repositoryId: input.repositoryId } : {}),
+      prepared: input.prepared,
+      taskRuntime: input.taskRuntime,
+      checkpointJournal: input.checkpointJournal,
+      trustedInfrastructureChanges: infrastructure,
+      state: "AVAILABLE",
+    });
+
+    const expiry = setTimeout(() => {
+      const pending = this.pendingShippingApprovals.get(approvalId);
+      if (!pending || pending.state !== "AVAILABLE") return;
+      this.pendingShippingApprovals.delete(approvalId);
+      void this.cleanupWorktree(
+        pending.prepared.worktreePath,
+        pending.prepared.repositoryRoot,
+        pending.prepared.branchName,
+        path.basename(pending.prepared.worktreePath),
+      );
+    }, this.shippingApprovalTtlMs);
+    expiry.unref();
+    return approval;
+  }
+
+  /** Returns only repository routing metadata after checking the approval owner binding. */
+  public static getApprovalRepositoryId(
+    approvalId: string,
+    userId: string,
+    projectId: string,
+  ): string | undefined {
+    const pending = this.pendingShippingApprovals.get(approvalId);
+    if (!pending || pending.userId !== userId || pending.projectId !== projectId) return undefined;
+    return pending.repositoryId;
+  }
+
+  /** Ships only the server-retained, fingerprint-verified worktree selected by the approval id. */
+  public static async shipApprovedRun(input: {
+    readonly approvalId: string;
+    readonly userId: string;
+    readonly projectId: string;
+    readonly changes: readonly ApprovedAgentChange[];
+    readonly commitSummary: string;
+    readonly expectedRepositoryIdentity?: string;
+    readonly gitEnvironment?: Readonly<Record<string, string>>;
+  }): Promise<GitShippingResult> {
+    const pending = this.pendingShippingApprovals.get(input.approvalId);
+    if (!pending || pending.userId !== input.userId || pending.projectId !== input.projectId) {
+      throw new Error("GIT_APPROVAL_NOT_FOUND: The verified shipping approval is missing; run the agent again.");
+    }
+    if (Date.parse(pending.approval.expiresAt) <= Date.now()) {
+      this.pendingShippingApprovals.delete(input.approvalId);
+      await this.cleanupWorktree(
+        pending.prepared.worktreePath,
+        pending.prepared.repositoryRoot,
+        pending.prepared.branchName,
+        path.basename(pending.prepared.worktreePath),
+      );
+      throw new Error("GIT_APPROVAL_EXPIRED: The verified shipping approval expired; run the agent again.");
+    }
+    if (pending.state !== "AVAILABLE") {
+      throw new Error("GIT_SHIPPING_IN_PROGRESS: This verified approval is already being shipped.");
+    }
+
+    const verified = new GitWorkflowService().buildVerifiedChangeset(
+      pending.checkpointJournal,
+      pending.trustedInfrastructureChanges,
+    );
+    const supplied = new Map<string, string>();
+    for (const change of input.changes) {
+      const normalized = change.path.replace(/\\/g, "/").replace(/^\.\//, "");
+      if (!normalized || supplied.has(normalized)) {
+        throw new Error("GIT_APPROVAL_MISMATCH: Approved changes contain an invalid or duplicate path.");
+      }
+      supplied.set(normalized, change.content);
+    }
+    if (supplied.size !== verified.length || verified.some((change) => !supplied.has(change.path))) {
+      throw new Error("GIT_APPROVAL_MISMATCH: Selected files do not match the deterministically verified changeset.");
+    }
+    for (const change of verified) {
+      if (change.fingerprint === "MISSING") continue;
+      const content = supplied.get(change.path);
+      if (content === undefined || crypto.createHash("sha256").update(content).digest("hex") !== change.fingerprint) {
+        throw new Error(`GIT_APPROVAL_MISMATCH: Client content differs from verified disk evidence for ${change.path}.`);
+      }
+    }
+
+    pending.state = "SHIPPING";
+    try {
+      const result = await RepositoryCacheManager.withProjectLock(input.projectId, () =>
+        new GitWorkflowService().ship({
+          repositoryRoot: pending.prepared.repositoryRoot,
+          worktreePath: pending.prepared.worktreePath,
+          baseRevision: pending.prepared.baseCommitSha,
+          taskBranch: pending.prepared.branchName,
+          targetBranch: pending.prepared.targetBranch,
+          trustedTargetRevision: pending.prepared.baseCommitSha,
+          shippingId: pending.approval.approvalId,
+          taskRuntime: pending.taskRuntime,
+          checkpointJournal: pending.checkpointJournal,
+          validationPassed: true,
+          mode: "PUSH_BRANCH",
+          remote: "origin",
+          expectedRepositoryIdentity: input.expectedRepositoryIdentity,
+          commitSummary: input.commitSummary,
+          trustedInfrastructureChanges: pending.trustedInfrastructureChanges,
+          validationSummary: "Deterministic validation passed before human approval",
+          gitEnvironment: input.gitEnvironment,
+        })
+      );
+      this.pendingShippingApprovals.delete(input.approvalId);
+      await this.cleanupWorktree(
+        pending.prepared.worktreePath,
+        pending.prepared.repositoryRoot,
+        pending.prepared.branchName,
+        path.basename(pending.prepared.worktreePath),
+      );
+      return result;
+    } catch (error) {
+      pending.state = "AVAILABLE";
+      throw error;
+    }
   }
 
   /**
@@ -283,6 +480,8 @@ export class GitWorktreeService {
     const repositoryRoot = await this.resolveRepositoryRoot(repositoryPath);
     await this.assertCleanWorkingTree(repositoryRoot);
     const baseCommitSha = await this.getHeadCommitSha(repositoryRoot);
+    const targetBranch = (await git.run(repositoryRoot, ["branch", "--show-current"])).stdout.trim();
+    if (!targetBranch) throw new Error("GIT_BRANCH_REQUIRED: Repository HEAD must be attached to a target branch.");
 
     const branchName = `anka/run-${runId}`;
     const worktreePath = path.resolve(this.getRunsRoot(), runId);
@@ -321,6 +520,7 @@ export class GitWorktreeService {
       worktreePath,
       branchName,
       baseCommitSha,
+      targetBranch,
     };
   }
 
@@ -455,7 +655,7 @@ export class GitWorktreeService {
   static async runIsolatedAgent(options: RunIsolatedAgentOptions): Promise<RepositoryRunSummary> {
     const { userId, projectId, repositoryPath, runId, request, onProgress } = options;
 
-    return RepositoryCacheManager.withLease(projectId, async () => {
+    return RepositoryCacheManager.withProjectLock(projectId, async () => {
       const prepared = await this.prepareRepositoryRun({ repositoryPath, runId });
       console.log(`[ANKA_EXEC] worktree=${prepared.worktreePath}`);
       let preserveForShippingRetry = false;
@@ -620,13 +820,17 @@ export class GitWorktreeService {
       let baselineBuildErrors: string | undefined;
       let baselineRepairedChanges: AgentFileChange[] = [];
       let baselineDiagnostics: BaselineDiagnostic[] = [];
+      let authorityDiagnostics: NormalizedDiagnostic[] = [];
       let baselineValidationSnapshot: DiagnosticValidationSnapshot | null = null;
       let targetedBaselineDiagnostics: BaselineDiagnostic[] = [];
       let isBaselineDeltaTask = false;
 
       if (baselineCommands.length > 0) {
         console.log(`[BASELINE_BUILD] Verifying untouched baseline build with: ${baselineCommands.join(" && ")}`);
-        const baselineCheck = await ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands);
+        const baselineObservation = await DiagnosticNormalizer.captureValidation(prepared.worktreePath,
+          () => ValidationRunner.validateWithShell([], prepared.worktreePath, baselineCommands));
+        const baselineCheck = baselineObservation.result;
+        authorityDiagnostics = baselineObservation.diagnostics;
         baselineBuildPassed = baselineCheck.success;
         baselineBuildErrors = baselineCheck.errors;
 
@@ -651,6 +855,7 @@ export class GitWorktreeService {
               baselineBuildPassed = true;
               baselineBuildErrors = undefined;
               baselineRepairedChanges = coordResult.changes;
+              authorityDiagnostics = [];
             }
           }
 
@@ -756,6 +961,8 @@ export class GitWorktreeService {
               projectId,
             ) ?? undefined,
             baselineDiagnostics,
+            authorityDiagnostics: authorityDiagnostics.filter((diagnostic) =>
+              targetedBaselineDiagnostics.some((target) => target.filePath === diagnostic.filePath)),
             targetedBaselineDiagnostics,
             isBaselineDeltaTask,
             baseCommitSha: prepared.baseCommitSha,
@@ -983,6 +1190,7 @@ export class GitWorktreeService {
       }
 
       let shipping: GitShippingResult | undefined;
+      let shippingApproval: GitShippingApproval | undefined;
       if (options.shipping) {
         if (!options.taskRuntime) {
           throw new Error("GIT_WORKFLOW_REQUIRED: Shipping requires the authoritative TaskRuntime.");
@@ -1019,6 +1227,34 @@ export class GitWorktreeService {
           reviewProvider: options.shipping.reviewProvider,
           validationSummary: validationPassed ? "Deterministic validation passed" : "Deterministic validation failed",
         });
+      } else if (
+        options.taskRuntime
+        && validationPassed
+        && diffInfo.changedFiles.length > 0
+        && options.taskRuntime.snapshot().status === "COMPLETED"
+      ) {
+        const trustedInfrastructureChanges = baselineRepairedChanges.map((change) => {
+          const relativePath = change.path.replace(/\\/g, "/");
+          const absolutePath = path.resolve(prepared.worktreePath, relativePath);
+          return Object.freeze({
+            path: relativePath,
+            fingerprint: change.action === "delete" || change.isDeleted || !fs.existsSync(absolutePath)
+              ? "MISSING"
+              : crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex"),
+            policyAuthorized: true as const,
+          });
+        });
+        shippingApproval = this.retainVerifiedRunForApproval({
+          userId,
+          projectId,
+          ...(request.repositoryId ? { repositoryId: request.repositoryId } : {}),
+          prepared,
+          taskRuntime: options.taskRuntime,
+          checkpointJournal,
+          validationPassed,
+          trustedInfrastructureChanges,
+        });
+        preserveForShippingRetry = true;
       }
 
       return {
@@ -1034,6 +1270,7 @@ export class GitWorktreeService {
         diagnosticComparison,
         visualVerification,
         ...(shipping ? { shipping } : {}),
+        ...(shippingApproval ? { shippingApproval } : {}),
         agentResponse: {
           ...agentResponse,
           changes: totalChanges,
@@ -1064,6 +1301,7 @@ export class GitWorktreeService {
           revealedBaselineDiagnostics: deltaResult?.revealedBaselineDiagnostics ?? agentResponse.revealedBaselineDiagnostics,
           newTaskDiagnostics: deltaResult?.newTaskDiagnostics ?? agentResponse.newTaskDiagnostics,
           visualVerification,
+          ...(shippingApproval ? { gitApproval: shippingApproval } : {}),
         },
       };
       } finally {

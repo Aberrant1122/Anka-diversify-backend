@@ -13,9 +13,15 @@ import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import * as utils from "../shared/utils";
 import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
+import { MutationTransaction } from "../runtime/MutationTransaction";
+import { reconcileExecutionManifest } from "../runtime/ExecutionManifest";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { fingerprintBytes } from "../editing/EditingPrimitives";
 
 describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", () => {
   let tempDir: string;
+  let mutationTransaction: MutationTransaction | undefined;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "repair-safety-test-"));
@@ -23,6 +29,8 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
 
   afterEach(() => {
     jest.restoreAllMocks();
+    mutationTransaction?.abort();
+    mutationTransaction = undefined;
     if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -306,126 +314,32 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
   test("TEST H: Subsequent repair uses latest disk state from attempt N-1", async () => {
     const filePath = path.join(tempDir, "src", "auth.ts");
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "const step = 1;\n", "utf8");
-
-    const manifest: FileManifest = {
-      files: [{ path: "src/auth.ts", action: "modify", dependencies: [], description: "Auth" }],
-      totalFiles: 1,
-      manifestVersion: "1.0.0",
-    };
-
-    const contract: ExecutionContract = {
-      goal: "fix auth",
-      taskType: "BUG_FIX",
-      risk: "LOW",
-      estimatedComplexity: "SMALL",
-      pipeline: "REPOSITORY",
-      environment: "NODE_JS",
-      repositoryRequired: true,
-      expectedFiles: ["src/auth.ts"],
-      validationType: "TYPESCRIPT_BUILD",
-      targetPaths: ["src"],
-      allowedActions: ["modify"],
-      forbiddenActions: [],
-      maxFiles: 5,
-      searchScope: ["src"],
-      contextScope: ["src"],
-      diffCriticEnabled: false,
-    };
-
-    const fsManager = authorizedModifyManager("src/auth.ts");
-    await fsManager.snapshot([{ path: "src/auth.ts", content: "const step = 1;\n", description: "init", action: "modify" }], tempDir);
-
-    let valAttempts = 0;
-    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
-      valAttempts++;
-      if (valAttempts === 1) return { success: false, errors: "error 1" };
-      if (valAttempts === 2) return { success: false, errors: "error 2" };
-      return { success: true, errors: "" };
+    fs.writeFileSync(filePath, "const step = 0;\n");
+    const changes = [{ path: "src/auth.ts", action: "modify" as const, content: "const step = 1;\n", description: "initial" }];
+    const scope = mutationFixtureScope(tempDir, changes);
+    const manifest = reconcileExecutionManifest(scope, null);
+    mutationTransaction = MutationTransaction.create(scope, manifest);
+    const manager = new FileSystemStateManager(CapabilityGuard.forTransaction(mutationTransaction, mutationTransaction.primary), mutationTransaction.id, mutationTransaction);
+    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async (_changes, root) => {
+      const content = fs.readFileSync(path.join(root!, "src/auth.ts"), "utf8");
+      if (content.includes("= 0") || content.includes("= 3")) return { success: true, errors: "" };
+      const messages = content.includes("= 1") ? ["missing_A", "missing_B"] : ["missing_B"];
+      return { success: false, errors: messages.map(name => "src/auth.ts(1,1): error TS2304: Cannot find name " + name + ".").join("\n") };
     });
-
-    let repairCalls = 0;
-    let attempt2PromptContent = "";
-
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockImplementation(async (args: any) => {
-            repairCalls++;
-            const userPrompt = args.messages.find((m: any) => m.role === "user")?.content || "";
-
-            if (repairCalls === 1) {
-              return {
-                choices: [
-                  {
-                    finish_reason: "stop",
-                    message: {
-                      content: JSON.stringify({
-                        repaired: true,
-                        changes: [
-                          {
-                            path: "src/auth.ts",
-                            action: "modify",
-                            description: "Go to step 2",
-                            edits: [{ oldText: "const step = 1;", newText: "const step = 2;" }],
-                          },
-                        ],
-                      }),
-                    },
-                  },
-                ],
-              };
-            }
-
-            if (repairCalls === 2) {
-              attempt2PromptContent = userPrompt;
-              return {
-                choices: [
-                  {
-                    finish_reason: "stop",
-                    message: {
-                      content: JSON.stringify({
-                        repaired: true,
-                        changes: [
-                          {
-                            path: "src/auth.ts",
-                            action: "modify",
-                            description: "Go to step 3",
-                            edits: [{ oldText: "const step = 2;", newText: "const step = 3;" }],
-                          },
-                        ],
-                      }),
-                    },
-                  },
-                ],
-              };
-            }
-
-            return { choices: [{ finish_reason: "stop", message: { content: "{}" } }] };
-          }),
-        },
-      },
-    };
-    jest.spyOn(utils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/auth.ts", content: "const step = 1;\n", description: "init", action: "modify" }],
-      tempDir,
-      ["npm run build"],
-      "system prompt",
-      "fix error",
-      fsManager,
-      "proj-1",
-      undefined,
-      manifest,
-      contract,
-    );
-
+    const observed: string[] = [];
+    jest.spyOn(LLMGateway.getInstance(), "callStructured").mockImplementation(async options => {
+      const context = JSON.parse(String(options.messages[1].content).split("\n")[0]);
+      const source: string = context.currentFiles[0].content;
+      observed.push(source);
+      return { content: { operations: [{ op: "replace_exact", path: "src/auth.ts", expectedFileHash: fingerprintBytes(source),
+        oldText: source, newText: "const step = " + (observed.length + 1) + ";\n" }] } } as Awaited<ReturnType<LLMGateway["callStructured"]>>;
+    });
+    const result = await SelfHealingEngine.runSelfHealingLoop(changes, tempDir, ["fixture-check"], "system", "Modify src/auth.ts",
+      manager, "fixture-project", undefined, manifest);
     expect(result.success).toBe(true);
-    // Verify attempt 2 user prompt contained "const step = 2;" (the state produced in attempt 1)
-    expect(attempt2PromptContent).toContain("const step = 2;");
-    // Verify final disk content is step 3
+    expect(observed).toEqual(["const step = 1;\n", "const step = 2;\n"]);
     expect(fs.readFileSync(filePath, "utf8")).toBe("const step = 3;\n");
+    expect(mutationTransaction.transitions).toHaveLength(3);
   });
 
   // ── TEST I: Scope rechecked every attempt ──────────────────────────────────
@@ -534,7 +448,7 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
       undefined,
       manifest,
       contract,
-    )).rejects.toMatchObject({ code: "LLM_SCHEMA_INVALID" });
+    )).resolves.toMatchObject({ success: false, errorType: "REPAIR_UNRESOLVED" });
 
     // package.json was never created or written to disk
     expect(fs.existsSync(path.join(tempDir, "package.json"))).toBe(false);
@@ -576,7 +490,9 @@ describe("AI Step 9A — Repair Safety Gates & Structured Self-Healing Tests", (
     const ORIGINAL_CONTENT = "export const timeout = 1000;\n";
     fs.writeFileSync(filePath, ORIGINAL_CONTENT, "utf8");
 
-    const fsManager = authorizedModifyManager("src/config.ts");
+    const scope = mutationFixtureScope(tempDir, [{ path: "src/config.ts", action: "modify", content: ORIGINAL_CONTENT, description: "rollback fixture" }]);
+    mutationTransaction = MutationTransaction.create(scope, reconcileExecutionManifest(scope, null));
+    const fsManager = new FileSystemStateManager(CapabilityGuard.forTransaction(mutationTransaction, mutationTransaction.primary), mutationTransaction.id, mutationTransaction);
     // Snapshot initial pre-run state
     await fsManager.snapshot([{ path: "src/config.ts", content: ORIGINAL_CONTENT, description: "orig", action: "modify" }], tempDir);
 

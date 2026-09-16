@@ -333,7 +333,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
 
-    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
+    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", { ...chatReq, message: "Update the button rendered by src/App.tsx" }, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Resolver approves Button.tsx -> ManifestValidator succeeds -> CodeGenerator called
     expect(codeGenSpy).toHaveBeenCalled();
@@ -428,7 +428,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
 
-    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
+    const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", { ...chatReq, message: "Create src/components/Header.tsx and integrate it in src/App.tsx" }, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Both Header.tsx and App.tsx should be approved and generated
     expect(codeGenSpy).toHaveBeenCalled();

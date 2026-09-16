@@ -93,9 +93,11 @@ describe("Checkpoint 11 verified Git/GitHub/GitLab workflow", () => {
     run(source, ["config", "user.name", "ANKA CP11 Test"]);
     run(source, ["config", "user.email", "cp11@anka.test"]);
     fs.mkdirSync(path.join(source, "src"), { recursive: true });
+    fs.writeFileSync(path.join(source, ".gitattributes"), "*.css text eol=lf\n", "utf8");
+    fs.writeFileSync(path.join(source, "src", "style.css"), "body {\n  color: black;\n}\n", "utf8");
     fs.writeFileSync(path.join(source, "src", "value.ts"), "export const value = 'before';\n", "utf8");
     fs.writeFileSync(path.join(source, "src", "delete.ts"), "export const remove = true;\n", "utf8");
-    run(source, ["add", "--", "src/value.ts", "src/delete.ts"]);
+    run(source, ["add", "--", ".gitattributes", "src/style.css", "src/value.ts", "src/delete.ts"]);
     run(source, ["commit", "-m", "baseline"]);
     baseRevision = run(source, ["rev-parse", "HEAD"]);
     run(root, ["init", "--bare", bareRemote]);
@@ -280,6 +282,19 @@ describe("Checkpoint 11 verified Git/GitHub/GitLab workflow", () => {
     expect(run(prepared.worktreePath, ["rev-parse", "HEAD"])).toBe(baseRevision);
   });
 
+  test("7a. clean-filtered index bytes are accepted only when derived from verified worktree bytes", async () => {
+    const prepared = await prepare("clean-filtered-stage");
+    const verifiedContent = "body {\r\n  color: white;\r\n}\r\n";
+    const state = await completed(prepared, [
+      { path: "src/style.css", action: "modify", content: verifiedContent, description: "verified CRLF stylesheet" },
+    ]);
+
+    const result = await new GitWorkflowService().ship(request(prepared, state));
+
+    expect(result.commitCreated).toBe(true);
+    expect(run(prepared.worktreePath, ["show", `${result.commitSha}:src/style.css`])).toBe("body {\n  color: white;\n}");
+  });
+
   test("8, 9, 29. incomplete runtime/validation cannot commit and Git cannot mint authority receipts", async () => {
     const prepared = await prepare("incomplete");
     const incomplete = TaskRuntime.create({
@@ -325,6 +340,52 @@ describe("Checkpoint 11 verified Git/GitHub/GitLab workflow", () => {
     expect(push).toEqual(["push", "origin", `${prepared.branchName}:refs/heads/${prepared.branchName}`]);
     expect(tracking.calls.flat()).not.toContain("--force");
     expect(run(root, ["--git-dir", bareRemote, "rev-parse", `refs/heads/${prepared.branchName}`])).toBe(result.commitSha);
+  }, 20_000);
+
+  test("31. human approval ships only the retained verified bytes and rejects forged handoffs", async () => {
+    const prepared = await prepare("approval-handoff");
+    const content = "export const value = 'approved';\n";
+    const state = await completed(prepared, [
+      { path: "src/value.ts", action: "modify", content, description: "approved change" },
+    ]);
+    const approval = GitWorktreeService.retainVerifiedRunForApproval({
+      userId: "user-1",
+      projectId: "project-1",
+      prepared,
+      taskRuntime: state.runtime,
+      checkpointJournal: state.journal,
+      validationPassed: true,
+    });
+
+    await expect(GitWorktreeService.shipApprovedRun({
+      approvalId: approval.approvalId,
+      userId: "user-1",
+      projectId: "project-1",
+      changes: [{ path: "src/value.ts", content: "forged\n" }],
+      commitSummary: "attempt forged push",
+      expectedRepositoryIdentity: bareRemote,
+    })).rejects.toThrow(/GIT_APPROVAL_MISMATCH/);
+
+    await expect(GitWorktreeService.shipApprovedRun({
+      approvalId: approval.approvalId,
+      userId: "different-user",
+      projectId: "project-1",
+      changes: [{ path: "src/value.ts", content }],
+      commitSummary: "attempt cross-user push",
+      expectedRepositoryIdentity: bareRemote,
+    })).rejects.toThrow(/GIT_APPROVAL_NOT_FOUND/);
+
+    const result = await GitWorktreeService.shipApprovedRun({
+      approvalId: approval.approvalId,
+      userId: "user-1",
+      projectId: "project-1",
+      changes: [{ path: "src/value.ts", content }],
+      commitSummary: "ship approved change",
+      expectedRepositoryIdentity: bareRemote,
+    });
+    expect(result).toMatchObject({ pushed: true, changedPaths: ["src/value.ts"] });
+    expect(run(root, ["--git-dir", bareRemote, "show", `${result.commitSha}:src/value.ts`])).toContain("approved");
+    expect(fs.existsSync(prepared.worktreePath)).toBe(false);
   }, 20_000);
 
   test("15, 21, 22. remote/review CI failures remain separate from completed runtime history", async () => {

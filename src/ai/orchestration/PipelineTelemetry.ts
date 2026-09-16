@@ -43,7 +43,7 @@ export class PipelineTelemetry {
         : "Passed"
       : metrics.infrastructureError
       ? "Failed (Infrastructure Error)"
-      : `Failed (${metrics.repairAttempts || 5} attempts)`;
+      : `Failed (${metrics.repairAttempts ?? 0} attempts)`;
 
     return `
 \`\`\`text

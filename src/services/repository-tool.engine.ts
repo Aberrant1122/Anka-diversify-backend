@@ -77,6 +77,8 @@ export interface DatabaseModelResult {
 export interface SymbolReferencesResult {
   references: Array<{
     file: string;
+    /** File declaring the queried symbol, when supplied by the caller. */
+    targetFile?: string;
     line: number;
     context: string;
     referenceType: "import" | "call" | "render" | "definition";
@@ -724,6 +726,11 @@ export class RepositoryToolEngine {
     this.semanticRetrievalEngine = new SemanticRetrievalEngine();
   }
 
+  /** Read-only repository identities already isolated by getSnapshotFiles. */
+  getIndexedFilePaths(): string[] {
+    return [...this.index.filesMap.keys()].sort();
+  }
+
   // ── Tool 1: Read File ────────────────────────────────────────────────────────
   readFile(params: { filePath: string; startLine?: number; endLine?: number }): FileContentResult {
     const { filePath, startLine, endLine } = params || {};
@@ -946,6 +953,12 @@ export class RepositoryToolEngine {
 
     const results: SymbolReferencesResult["references"] = [];
     const cSym = SymbolNormalizer.canonical(symbolName);
+    const escapedSymbol = symbolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const normalizedSourceFile = sourceFilePath?.replace(/\\/g, "/");
+    const verifiedTargetFile = normalizedSourceFile && this.index.symbolIndex.some(
+      (entry) => entry.file === normalizedSourceFile && entry.symbolName === symbolName,
+    ) ? normalizedSourceFile : undefined;
+    if (normalizedSourceFile && !verifiedTargetFile) return { references: [] };
 
     for (const [p, fe] of this.index.filesMap.entries()) {
       if (!fe.content.includes(symbolName) && !SymbolNormalizer.canonical(fe.content).includes(cSym)) {
@@ -960,14 +973,15 @@ export class RepositoryToolEngine {
 
         let referenceType: SymbolReferencesResult["references"][0]["referenceType"] = "call";
         if (/import\s+/.test(line)) referenceType = "import";
-        else if (new RegExp(`<${symbolName}[\\s/>]`).test(line)) referenceType = "render";
-        else if (new RegExp(`(?:function|class|const|interface|type)\\s+${symbolName}`).test(line)) referenceType = "definition";
+        else if (new RegExp(`<${escapedSymbol}[\\s/>]`).test(line)) referenceType = "render";
+        else if (new RegExp(`(?:function|class|const|interface|type)\\s+${escapedSymbol}`).test(line)) referenceType = "definition";
 
         const evalRes = ScoringEngine.evaluate(line, symbolName);
-        const sourceBonus = sourceFilePath && p === sourceFilePath.replace(/\\/g, "/") ? 0.2 : 0;
+        const sourceBonus = verifiedTargetFile && p === verifiedTargetFile ? 0.2 : 0;
 
         results.push({
           file: fe.path,
+          targetFile: verifiedTargetFile,
           line: i + 1,
           context: line.trim().slice(0, 200),
           referenceType,

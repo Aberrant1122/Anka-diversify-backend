@@ -1,3 +1,4 @@
+import { authoritySnapshot, withAuthoritySnapshot } from "../repository/AuthorityWorktree";
 import { AgentFileChange } from "../shared/types";
 import { FileManifest } from "../../types";
 import { PolicyContract } from "./PolicyContract";
@@ -7,6 +8,7 @@ import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { MonorepoDescriptor } from "../workspace/MonorepoDetector";
 import { resolveEffectiveAction } from "./ExecutionScopeEnforcer";
+import { DeterministicRelationEvidenceAcquirer } from "./DeterministicRelationEvidenceAcquirer";
 
 export interface PreExecutionAuthorityClosureInput {
   changes: readonly AgentFileChange[];
@@ -37,10 +39,30 @@ export interface PreExecutionAuthorityClosureResult {
  */
 export class PreExecutionAuthorityClosure {
   public static close(input: PreExecutionAuthorityClosureInput): PreExecutionAuthorityClosureResult {
+    if (input.workspaceRoot) return withAuthoritySnapshot(input.workspaceRoot, () => this.closeBatch(input));
+    return this.closeBatch(input);
+  }
+
+  private static closeBatch(input: PreExecutionAuthorityClosureInput): PreExecutionAuthorityClosureResult {
     const existing = new Set(input.existingFiles.map(normalizeRepoPath));
-    const proposedChanges: PlannedChange[] = input.changes.map((change) => {
-      const path = normalizeRepoPath(change.path);
-      const action = resolveEffectiveAction(change, existing.has(path));
+    const normalizedChanges = input.changes.map((change) => ({
+      change,
+      path: normalizeRepoPath(change.path),
+      action: resolveEffectiveAction(change, existing.has(normalizeRepoPath(change.path))),
+    }));
+
+    // Late generated candidates trigger a bounded, read-only search from
+    // independently task-grounded anchors.  The candidate and manifest are
+    // never used as anchors or evidence.
+    DeterministicRelationEvidenceAcquirer.acquire({
+      candidatePaths: normalizedChanges.map((entry) => entry.path),
+      intentSpec: input.intentSpec,
+      evidenceStore: input.evidenceStore,
+      repositoryId: input.repositoryId,
+      workspaceRoot: input.workspaceRoot,
+      existingFiles: input.existingFiles,
+    });
+    const proposedChanges: PlannedChange[] = normalizedChanges.map(({ change, path, action }) => {
       const manifestEntry = input.manifest?.files.find((entry) => normalizeRepoPath(entry.path) === path);
 
       // This read authenticates only current file existence.  Relation evidence
@@ -52,7 +74,7 @@ export class PreExecutionAuthorityClosure {
 
       const observedEvidenceIds = input.evidenceStore
         .getEvidenceForFile(path)
-        .filter((evidence) => input.evidenceStore.isAuthorityEligible(evidence))
+        .filter((evidence) => input.evidenceStore.isAuthorityEligible(evidence) && !!input.workspaceRoot && evidence.repositoryRevision === authoritySnapshot(input.workspaceRoot).revision)
         .map((evidence) => evidence.id);
       // Manifest-provided IDs are only references to facts that already exist in
       // this backend store.  Invented or advisory IDs still fail in the resolver.

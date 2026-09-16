@@ -589,10 +589,10 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
       );
 
       expect(manifest.files[0].action).toBe("delete");
-      expect(manifest.files[0].evidenceIds).toContain("ev-delete-1");
+      expect(manifest.files[0].evidenceIds).toEqual([]);
     });
 
-    it("20. evidence IDs preserved in normalized manifest", async () => {
+    it("20. legacy model evidence IDs are discarded during normalization", async () => {
       const mockClient = {
         chat: {
           completions: {
@@ -629,10 +629,10 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
         mockContract
       );
 
-      expect(manifest.files[0].evidenceIds).toEqual(["ev-123", "ev-456"]);
+      expect(manifest.files[0].evidenceIds).toEqual([]);
     });
 
-    it("21. MANIFEST_ACTION_MISMATCH behavior preserved when model produces wrong action", async () => {
+    it("21. trusted action obligation overrides conflicting model action", async () => {
       const contractWithObligation: ExecutionContract = {
         ...mockContract,
         actionObligations: [
@@ -670,16 +670,15 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
       } as any;
 
       const generator = new ManifestGenerator(mockClient);
-      await expect(
-        generator.generateManifest(
-          "Delete task",
-          {
-            existingFiles: ["src/must-delete.ts"],
-            actionObligations: contractWithObligation.actionObligations,
-          },
-          contractWithObligation
-        )
-      ).rejects.toThrow(/MANIFEST_ACTION_MISMATCH/);
+      const manifest = await generator.generateManifest(
+        "Delete task",
+        {
+          existingFiles: ["src/must-delete.ts"],
+          actionObligations: contractWithObligation.actionObligations,
+        },
+        contractWithObligation
+      );
+      expect(manifest.files[0].action).toBe("delete");
     });
   });
 

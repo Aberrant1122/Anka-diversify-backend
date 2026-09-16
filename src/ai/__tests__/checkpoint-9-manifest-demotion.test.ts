@@ -66,7 +66,7 @@ describe("Checkpoint 9 manifest demotion", () => {
         { path: "src/a.ts", action: "modify", content: "must roll back", description: "allowed first" },
         { path: "src/outside.ts", action: "create", content: "denied", description: "manifest request" },
       ],
-    })).rejects.toMatchObject({ code: "CAPABILITY_PATH_NOT_DECLARED" });
+    })).rejects.toMatchObject({ code: "REPAIR_SCOPE_EXPANSION_REQUIRED" });
     expect(fs.readFileSync(path.join(root, "src/a.ts"), "utf8")).toBe("before");
     expect(fs.existsSync(path.join(root, "src/outside.ts"))).toBe(false);
   });

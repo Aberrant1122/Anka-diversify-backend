@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import crypto from "crypto";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
 import { validateRepairManifestScope } from "../repair/RepairProposalResolver";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
@@ -9,9 +10,39 @@ import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import { FileManifest, ExecutionContract, AgentFileChange } from "../../types";
 import * as sharedUtils from "../shared/utils";
+import { CapabilityGuard } from "../runtime/CapabilityGuard";
+import { MutationTransaction } from "../runtime/MutationTransaction";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
 
 describe("Repair Scope for Generated Files & Next.js Client Directive (Section 10)", () => {
   let tempDir: string;
+
+  function createAuthorizedFsManager(dir: string, changes: AgentFileChange[], projectId = "proj-1", manifest?: FileManifest) {
+    const authorizedChanges: AgentFileChange[] = changes.map((c) => {
+      const fullPath = path.join(dir, c.path);
+      const exists = fs.existsSync(fullPath);
+      return {
+        ...c,
+        action: exists ? "modify" : (c.action || "create"),
+      };
+    });
+    for (const c of authorizedChanges) {
+      if (c.action === "modify") {
+        const fullPath = path.join(dir, c.path);
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        if (!fs.existsSync(fullPath)) {
+          fs.writeFileSync(fullPath, c.content || "", "utf8");
+        }
+      }
+    }
+    const scope = mutationFixtureScope(dir, authorizedChanges, projectId, "stage-1");
+    const guard = CapabilityGuard.create({ workspaceRoot: dir, scopeId: "stage-1", authorizedScope: scope });
+    if (manifest) {
+      const transaction = MutationTransaction.create(scope, manifest);
+      return new FileSystemStateManager(guard, "stage-1", transaction);
+    }
+    return new FileSystemStateManager(guard, "stage-1");
+  }
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-repair-scope-test-"));
@@ -136,10 +167,6 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
 
   // ── TEST D: Generated file is read from current worktree during repair ────
   test("TEST D: Generated file is read from current worktree during repair", async () => {
-    const calcFile = path.join(tempDir, "app/components/Calculator.tsx");
-    fs.mkdirSync(path.dirname(calcFile), { recursive: true });
-    fs.writeFileSync(calcFile, "export function Calculator() { return <div>Initial Generated</div>; }\n");
-
     jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
       success: false,
       errors: "Build failed: useState requires 'use client'",
@@ -206,13 +233,16 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
       diffCriticEnabled: true,
     };
 
+    const changesD: AgentFileChange[] = [{ path: "app/components/Calculator.tsx", action: "create", content: "export function Calculator() { return <div>Initial Generated</div>; }\n", description: "calc" }];
+    const fsManagerD = createAuthorizedFsManager(tempDir, changesD, "proj-1");
+
     await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/components/Calculator.tsx", action: "create", content: "export function Calculator() { return <div>Initial Generated</div>; }\n", description: "calc" }],
+      changesD,
       tempDir,
       ["npm run build"],
       "prompt",
       "msg",
-      new FileSystemStateManager(),
+      fsManagerD,
       "proj-1",
       undefined,
       manifest,
@@ -225,8 +255,6 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
   // ── TEST E: Generated file SHA is verified before repair ──────────────────
   test("TEST E: Generated file SHA is verified before repair", async () => {
     const calcFile = path.join(tempDir, "app/components/Calculator.tsx");
-    fs.mkdirSync(path.dirname(calcFile), { recursive: true });
-    fs.writeFileSync(calcFile, "export function Calculator() { return <div>v1</div>; }\n");
 
     jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
       success: false,
@@ -289,13 +317,16 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
       diffCriticEnabled: true,
     };
 
+    const changesE: AgentFileChange[] = [{ path: "app/components/Calculator.tsx", action: "create", content: "export function Calculator() { return <div>v1</div>; }\n", description: "calc" }];
+    const fsManagerE = createAuthorizedFsManager(tempDir, changesE, "proj-1");
+
     const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/components/Calculator.tsx", action: "create", content: "export function Calculator() { return <div>v1</div>; }\n", description: "calc" }],
+      changesE,
       tempDir,
       ["npm run build"],
       "prompt",
       "msg",
-      new FileSystemStateManager(),
+      fsManagerE,
       "proj-1",
       undefined,
       manifest,
@@ -337,19 +368,17 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
 
   // ── TEST I: SelfHealing can add 'use client' to an approved generated file ──
   test("TEST I: SelfHealing can add 'use client' to an approved generated file and succeed", async () => {
-    const calcFile = path.join(tempDir, "app/components/Calculator.tsx");
-    fs.mkdirSync(path.dirname(calcFile), { recursive: true });
-    fs.writeFileSync(calcFile, "export function Calculator() { return <div>Calc</div>; }\n");
-
     let buildCalls = 0;
     jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
       buildCalls++;
-      if (buildCalls === 1) {
-        return { success: false, errors: "Build failed: useState requires 'use client'" };
+      if (buildCalls === 2) {
+        return { success: false, errors: "./app/components/Calculator.tsx:1:1\nError: useState requires 'use client'" };
       }
       return { success: true, errors: "" };
     });
 
+    const calcText = "export function Calculator() { return <div>Calc</div>; }\n";
+    const calcHash = crypto.createHash("sha256").update(calcText).digest("hex");
     const mockOpenAI = {
       chat: {
         completions: {
@@ -359,17 +388,13 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
                 finish_reason: "stop",
                 message: {
                   content: JSON.stringify({
-                    changes: [
+                    operations: [
                       {
+                        op: "replace_exact",
                         path: "app/components/Calculator.tsx",
-                        action: "modify",
-                        description: "Add use client directive",
-                        edits: [
-                          {
-                            oldText: "export function Calculator() { return <div>Calc</div>; }\n",
-                            newText: "'use client';\n\nexport function Calculator() { return <div>Calc</div>; }\n",
-                          },
-                        ],
+                        expectedFileHash: calcHash,
+                        oldText: calcText,
+                        newText: "'use client';\n\n" + calcText,
                       },
                     ],
                   }),
@@ -407,13 +432,16 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
       diffCriticEnabled: true,
     };
 
+    const changesI: AgentFileChange[] = [{ path: "app/components/Calculator.tsx", action: "create", content: "export function Calculator() { return <div>Calc</div>; }\n", description: "calc" }];
+    const fsManagerI = createAuthorizedFsManager(tempDir, changesI, "proj-1", manifest);
+
     const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/components/Calculator.tsx", action: "create", content: "export function Calculator() { return <div>Calc</div>; }\n", description: "calc" }],
+      changesI,
       tempDir,
       ["npm run build"],
       "prompt",
       "msg",
-      new FileSystemStateManager(),
+      fsManagerI,
       "proj-1",
       undefined,
       manifest,
@@ -422,7 +450,7 @@ describe("Repair Scope for Generated Files & Next.js Client Directive (Section 1
 
     expect(result.success).toBe(true);
     expect(result.repairApplied).toBe(true);
-    expect(buildCalls).toBe(2);
+    expect(buildCalls).toBe(3);
   });
 
   // ── TEST L & M: Direct newly introduced eval() / new Function() is flagged ──

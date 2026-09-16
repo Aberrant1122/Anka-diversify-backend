@@ -1,9 +1,13 @@
+import { bindUserRequest } from "../repository/TrustedTaskContext";
 import {
   TaskExecutionPlan,
   TaskExecutionStage,
   TaskExecutionStageSpec,
   StageExecutionStatus,
+  PriorVerifiedTarget,
 } from "../shared/TaskExecutionPlan";
+import type { ActionGroupJournalEntry } from "../runtime/VerifiedCheckpointJournal";
+import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { createTaskIntentSpec, TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { TaskClassificationResult, TaskType } from "../classification/TaskTypes";
 import { getOpenAI } from "../shared/utils";
@@ -11,6 +15,35 @@ import { LLMGateway } from "../gateway/LLMGateway";
 import { PipelineStages } from "../gateway/PipelineStage";
 
 export class TaskExecutionPlanManager {
+  /**
+   * Promotes only actually executed targets from an authentic VERIFIED journal
+   * checkpoint. The copied path/action identities are advisory and contain no
+   * evidence, capability, manifest, transaction, or revision authority.
+   */
+  public static recordVerifiedCheckpointTargets(
+    plan: TaskExecutionPlan,
+    checkpoint: Pick<ActionGroupJournalEntry, "status" | "attemptedActions">,
+  ): TaskExecutionPlan {
+    if (checkpoint.status !== "VERIFIED") return plan;
+
+    const priorVerifiedTargets: PriorVerifiedTarget[] = checkpoint.attemptedActions.map((target) => ({
+      path: normalizeRepoPath(target.path),
+      action: target.action === "FILE_CREATE"
+        ? "create"
+        : target.action === "FILE_DELETE"
+          ? "delete"
+          : "modify",
+    }));
+
+    return { ...plan, priorVerifiedTargets };
+  }
+
+  public static clearPriorVerifiedTargets(plan: TaskExecutionPlan): TaskExecutionPlan {
+    return plan.priorVerifiedTargets === undefined
+      ? plan
+      : { ...plan, priorVerifiedTargets: [] };
+  }
+
   /**
    * Constructs the canonical TaskExecutionPlan from a user message and structured intent classification.
    * Preserves all decomposed stages or defaults to a 1-stage plan.
@@ -20,19 +53,28 @@ export class TaskExecutionPlanManager {
     classification: TaskClassificationResult,
     explicitUserPaths: string[] = []
   ): TaskExecutionPlan {
-    const rawStages: TaskExecutionStageSpec[] =
-      Array.isArray(classification.stages) && classification.stages.length > 0
-        ? classification.stages
-        : [
-            {
-              id: "stage-1",
-              name: message,
-              taskType: classification.taskType,
-              goal: message,
-              targetPath: explicitUserPaths[0] || undefined,
-              dependsOn: [],
-            },
-          ];
+    const classifiedStages = Array.isArray(classification.stages) ? classification.stages : [];
+    const hasDistinctTaskTypes = new Set(classifiedStages.map((stage) => stage.taskType)).size > 1;
+    const explicitPathSet = new Set(explicitUserPaths.map(normalizeRepoPath));
+    const groundedStageTargets = classifiedStages
+      .map((stage) => stage.targetPath && normalizeRepoPath(stage.targetPath))
+      .filter((target): target is string => typeof target === "string" && explicitPathSet.has(target));
+    const hasDistinctExplicitStageTargets = classifiedStages.length > 1 &&
+      groundedStageTargets.length === classifiedStages.length &&
+      new Set(groundedStageTargets).size === classifiedStages.length;
+    const representsDistinctDeliverables = hasDistinctTaskTypes || hasDistinctExplicitStageTargets;
+    const rawStages: TaskExecutionStageSpec[] = classifiedStages.length === 1 || representsDistinctDeliverables
+      ? classifiedStages
+      : [
+          {
+            id: "stage-1",
+            name: message,
+            taskType: classification.taskType,
+            goal: message,
+            targetPath: explicitUserPaths[0] || undefined,
+            dependsOn: [],
+          },
+        ];
 
     const stages: TaskExecutionStage[] = rawStages.map((s, idx) => {
       const stageClassification: TaskClassificationResult = {
@@ -57,6 +99,7 @@ export class TaskExecutionPlanManager {
 
       const stageExplicitPaths = (s.targetPath && explicitUserPaths.includes(s.targetPath)) ? [s.targetPath] : idx === 0 ? explicitUserPaths : [];
       const stageIntent = createTaskIntentSpec(s.goal, stageClassification, stageExplicitPaths);
+      bindUserRequest(stageIntent, message);
 
       return {
         id: s.id || `stage-${idx + 1}`,

@@ -1,3 +1,4 @@
+import { bindUserRequest } from "../repository/TrustedTaskContext";
 import { TaskClassificationResult, TaskType, TaskRisk, TaskComplexity } from "../classification/TaskTypes";
 import { TaskSuccessCondition } from "../../types";
 import { ResolvedTaskTarget } from "./TaskExecutionPlan";
@@ -98,7 +99,7 @@ export function createTaskIntentSpec(
     acceptanceCriteria.push("Ensure new/modified behavior builds without errors and passes tests");
   }
 
-  return {
+  const intent: TaskIntentSpec = {
     goal: message,
     operations,
     constraints,
@@ -116,4 +117,6 @@ export function createTaskIntentSpec(
     question: classification.question,
     options: classification.options,
   };
+  bindUserRequest(intent, message);
+  return intent;
 }

@@ -27,6 +27,10 @@ const VALID_INTENTS = new Set<TaskClassificationResult["intent"]>([
   "BUG_FIX", "FEATURE_ADD", "REFACTOR", "DOCS", "OPTIMIZATION", "DELETE_FOLDER",
   "DELETE_FILE", "NEW_FEATURE", "UNKNOWN", "CLASSIFICATION_FAILED",
 ]);
+const MODEL_INTENTS = [
+  "BUG_FIX", "FEATURE_ADD", "REFACTOR", "DOCS", "OPTIMIZATION", "DELETE_FOLDER",
+  "DELETE_FILE", "NEW_FEATURE",
+] as const;
 const VALID_SUCCESS_CONDITIONS = new Set<TaskSuccessCondition>([
   "SOURCE_DIAGNOSTICS", "BUILD", "TEST_FAILURE", "BEHAVIORAL_VALIDATION", "DETERMINISTIC_STATE",
 ]);
@@ -100,9 +104,12 @@ export class IntentClassifier {
           },
         ],
         temperature: 0.1,
+        // One schema-aware correction attempt prevents a transient malformed
+        // decomposition from aborting the entire run while keeping cost bounded.
+        maxRetries: 1,
         schema: {
           name: "IntentClassificationSchema",
-          strict: false,
+          strict: true,
           schema: {
             type: "object",
             properties: {
@@ -118,43 +125,64 @@ export class IntentClassifier {
                 type: "string",
                 enum: Array.from(VALID_COMPLEXITIES),
               },
-              intent: { type: "string" },
+              intent: { type: "string", enum: [...MODEL_INTENTS] },
               targetPath: {
                 anyOf: [
                   { type: "string" },
                   { type: "array", items: { type: "string" } },
+                  { type: "null" },
                 ],
               },
               confidence: { type: "number" },
               requiresClarification: { type: "boolean" },
-              question: { type: "string" },
-              options: { type: "array", items: { type: "string" } },
+              question: { anyOf: [{ type: "string" }, { type: "null" }] },
+              options: {
+                anyOf: [
+                  { type: "array", items: { type: "string" } },
+                  { type: "null" },
+                ],
+              },
               reasoning: { type: "string" },
               successCondition: {
-                type: "string",
-                enum: Array.from(VALID_SUCCESS_CONDITIONS),
+                anyOf: [
+                  { type: "string", enum: Array.from(VALID_SUCCESS_CONDITIONS) },
+                  { type: "null" },
+                ],
               },
               stages: {
-                type: "array",
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    id: { type: "string" },
-                    taskType: { type: "string" },
-                    goal: { type: "string" },
-                    successCondition: {
-                      type: "string",
-                      enum: Array.from(VALID_SUCCESS_CONDITIONS),
+                anyOf: [
+                  {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        id: { type: "string" },
+                        taskType: {
+                          type: "string",
+                          enum: Array.from(VALID_TASK_TYPES),
+                        },
+                        goal: { type: "string" },
+                        successCondition: {
+                          anyOf: [
+                            { type: "string", enum: Array.from(VALID_SUCCESS_CONDITIONS) },
+                            { type: "null" },
+                          ],
+                        },
+                        targetPath: { anyOf: [{ type: "string" }, { type: "null" }] },
+                        dependsOn: { type: "array", items: { type: "string" } },
+                      },
+                      required: ["id", "taskType", "goal", "successCondition", "targetPath", "dependsOn"],
                     },
-                    targetPath: { type: "string" },
-                    dependsOn: { type: "array", items: { type: "string" } },
                   },
-                  required: ["id", "taskType", "goal", "dependsOn"],
-                },
+                  { type: "null" },
+                ],
               },
             },
-            required: ["taskType", "risk", "estimatedComplexity", "intent", "confidence", "requiresClarification", "reasoning"],
+            required: [
+              "taskType", "risk", "estimatedComplexity", "intent", "targetPath", "confidence",
+              "requiresClarification", "question", "options", "reasoning", "successCondition", "stages",
+            ],
             additionalProperties: false,
           },
           validate: (parsed) => {
@@ -165,21 +193,61 @@ export class IntentClassifier {
             if (!VALID_INTENTS.has(parsed.intent as TaskClassificationResult["intent"])) return { valid: false, errors: ["Invalid or missing intent"] };
             if (typeof parsed.confidence !== "number" || !Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1) return { valid: false, errors: ["Invalid or missing confidence"] };
             if (typeof parsed.requiresClarification !== "boolean") return { valid: false, errors: ["Invalid or missing clarification flag"] };
-            if (typeof parsed.reasoning !== "string" || !parsed.reasoning.trim() || (parsed.question !== undefined && (typeof parsed.question !== "string" || !parsed.question.trim()))) return { valid: false, errors: ["Invalid narrative field"] };
-            if (parsed.successCondition !== undefined && !VALID_SUCCESS_CONDITIONS.has(parsed.successCondition as TaskSuccessCondition)) return { valid: false, errors: ["Invalid successCondition"] };
-            if (parsed.options !== undefined && (!Array.isArray(parsed.options) || parsed.options.some((item) => typeof item !== "string" || !item.trim()))) return { valid: false, errors: ["Invalid clarification options"] };
-            const paths = Array.isArray(parsed.targetPath) ? parsed.targetPath : parsed.targetPath === undefined ? [] : [parsed.targetPath];
+            if (typeof parsed.reasoning !== "string" || !parsed.reasoning.trim() || (parsed.question != null && (typeof parsed.question !== "string" || !parsed.question.trim()))) return { valid: false, errors: ["Invalid narrative field"] };
+            if (parsed.successCondition != null && !VALID_SUCCESS_CONDITIONS.has(parsed.successCondition as TaskSuccessCondition)) return { valid: false, errors: ["Invalid successCondition"] };
+            if (parsed.options != null && (!Array.isArray(parsed.options) || parsed.options.some((item) => typeof item !== "string" || !item.trim()))) return { valid: false, errors: ["Invalid clarification options"] };
+            const paths = Array.isArray(parsed.targetPath) ? parsed.targetPath : parsed.targetPath == null ? [] : [parsed.targetPath];
             if (paths.some((item) => !isSafeRelativePath(item))) return { valid: false, errors: ["Invalid targetPath"] };
-            if (parsed.stages !== undefined) {
+            if (parsed.stages != null) {
               if (!Array.isArray(parsed.stages) || parsed.stages.length === 0) return { valid: false, errors: ["Invalid stages"] };
               const ids = new Set<string>();
-              for (const stage of parsed.stages) {
-                if (!isRecord(stage) || !onlyKeys(stage, ["id", "taskType", "goal", "successCondition", "targetPath", "dependsOn"]) || typeof stage.id !== "string" || !stage.id.trim() || ids.has(stage.id) || !VALID_TASK_TYPES.has(stage.taskType as TaskType) || typeof stage.goal !== "string" || !stage.goal.trim() || (stage.successCondition !== undefined && !VALID_SUCCESS_CONDITIONS.has(stage.successCondition as TaskSuccessCondition)) || (stage.targetPath !== undefined && !isSafeRelativePath(stage.targetPath)) || !Array.isArray(stage.dependsOn) || stage.dependsOn.some((id) => typeof id !== "string" || !id.trim() || id === stage.id)) return { valid: false, errors: ["Invalid stage decomposition"] };
+              for (let index = 0; index < parsed.stages.length; index++) {
+                const stage = parsed.stages[index];
+                const label = `Stage ${index + 1}`;
+                if (!isRecord(stage) || !onlyKeys(stage, ["id", "taskType", "goal", "successCondition", "targetPath", "dependsOn"])) return { valid: false, errors: [`${label} contains invalid fields`] };
+                if (typeof stage.id !== "string" || !stage.id.trim()) return { valid: false, errors: [`${label} has a missing or empty id`] };
+                if (ids.has(stage.id)) return { valid: false, errors: [`${label} duplicates stage id '${stage.id}'`] };
+                if (!VALID_TASK_TYPES.has(stage.taskType as TaskType)) return { valid: false, errors: [`${label} has invalid taskType '${String(stage.taskType)}'`] };
+                if (typeof stage.goal !== "string" || !stage.goal.trim()) return { valid: false, errors: [`${label} has a missing or empty goal`] };
+                if (stage.successCondition != null && !VALID_SUCCESS_CONDITIONS.has(stage.successCondition as TaskSuccessCondition)) return { valid: false, errors: [`${label} has an invalid successCondition`] };
+                if (stage.targetPath != null && !isSafeRelativePath(stage.targetPath)) return { valid: false, errors: [`${label} targetPath must be a safe repository-relative path or null`] };
+                if (!Array.isArray(stage.dependsOn) || stage.dependsOn.some((id) => typeof id !== "string" || !id.trim())) return { valid: false, errors: [`${label} dependsOn must contain non-empty stage ids`] };
+                if (stage.dependsOn.includes(stage.id)) return { valid: false, errors: [`${label} cannot depend on itself`] };
                 ids.add(stage.id);
               }
-              if (parsed.stages.some((stage: any) => stage.dependsOn.some((id: string) => !ids.has(id)))) return { valid: false, errors: ["Stage dependency references an unknown ID"] };
+              for (let index = 0; index < parsed.stages.length; index++) {
+                const stage = parsed.stages[index] as Record<string, unknown>;
+                const unknownDependency = (stage.dependsOn as string[]).find((id) => !ids.has(id));
+                if (unknownDependency) return { valid: false, errors: [`Stage ${index + 1} depends on unknown stage id '${unknownDependency}'`] };
+              }
             }
-            return { valid: true };
+            return {
+              valid: true,
+              data: {
+                taskType: parsed.taskType as TaskType,
+                risk: parsed.risk as TaskRisk,
+                estimatedComplexity: parsed.estimatedComplexity as TaskComplexity,
+                intent: parsed.intent as string,
+                targetPath: parsed.targetPath == null
+                  ? undefined
+                  : parsed.targetPath as string | string[],
+                confidence: parsed.confidence as number,
+                requiresClarification: parsed.requiresClarification as boolean,
+                question: parsed.question == null ? undefined : parsed.question as string,
+                options: parsed.options == null ? undefined : parsed.options as string[],
+                reasoning: parsed.reasoning as string,
+                successCondition: parsed.successCondition == null
+                  ? undefined
+                  : parsed.successCondition as TaskSuccessCondition,
+                stages: Array.isArray(parsed.stages)
+                  ? parsed.stages.map((stage) => ({
+                    ...stage,
+                    successCondition: stage.successCondition ?? undefined,
+                    targetPath: stage.targetPath ?? undefined,
+                  }))
+                  : undefined,
+              },
+            };
           },
         },
       });

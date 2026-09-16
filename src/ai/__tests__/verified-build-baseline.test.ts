@@ -36,6 +36,7 @@ describe("Verified Build Baseline Before Agent Generation (Steps A-K)", () => {
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-broken-build",
+      targetBranch: "main",
       baseCommitSha: "sha-123",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -106,6 +107,7 @@ describe("Verified Build Baseline Before Agent Generation (Steps A-K)", () => {
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-baseline-repair",
+      targetBranch: "main",
       baseCommitSha: "sha-234",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -259,6 +261,7 @@ describe("Verified Build Baseline Before Agent Generation (Steps A-K)", () => {
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-clean-baseline",
+      targetBranch: "main",
       baseCommitSha: "sha-345",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);

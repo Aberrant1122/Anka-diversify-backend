@@ -9,9 +9,24 @@ import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
 import { BaselineRepairCoordinator } from "../../services/baseline-repair.coordinator";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
+import { MutationTransaction } from "../runtime/MutationTransaction";
+import { CapabilityGuard } from "../runtime/CapabilityGuard";
+import { reconcileExecutionManifest } from "../runtime/ExecutionManifest";
+import { AgentFileChange } from "../../types";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { fingerprintBytes } from "../editing/EditingPrimitives";
 
 describe("Baseline-Delta Task Completion & SelfHealing Isolation (Steps A-K)", () => {
   let tempDir: string;
+  let transaction: MutationTransaction | undefined;
+  function transactionManager(changes: AgentFileChange[]) {
+    fs.mkdirSync(path.join(tempDir, "components"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, "components/Calculator.tsx"), "export const Calculator = () => null;");
+    const scope = mutationFixtureScope(tempDir, changes);
+    transaction = MutationTransaction.create(scope, reconcileExecutionManifest(scope, null));
+    return new FileSystemStateManager(CapabilityGuard.forTransaction(transaction, transaction.primary), transaction.id, transaction);
+  }
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-task-completion-"));
@@ -27,6 +42,8 @@ describe("Baseline-Delta Task Completion & SelfHealing Isolation (Steps A-K)", (
   });
 
   afterEach(() => {
+    transaction?.abort();
+    transaction = undefined;
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });
     } catch {}
@@ -77,6 +94,7 @@ Cannot resolve 'ag-grid'
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-task-comp-1",
+      targetBranch: "main",
       baseCommitSha: "sha-head-1",
     });
 
@@ -191,7 +209,6 @@ Cannot resolve 'mathjs'
     const baselineDiagnostics = BaselineDeltaVerifier.extractDiagnostics(baselineErrors, "BASELINE");
     const targetedDiagnostics = [baselineDiagnostics.find((d) => d.filePath === "components/Calculator.tsx")!];
 
-    const fsManager = new FileSystemStateManager();
     const initialChanges = [
       {
         path: "components/Calculator.tsx",
@@ -201,8 +218,10 @@ Cannot resolve 'mathjs'
       },
     ];
 
-    // Build returns the remaining baseline error (mathjs missing)
-    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
+    const fsManager = transactionManager(initialChanges);
+    const model = jest.spyOn(LLMGateway.getInstance(), "callStructured");
+    // Observe the true baseline first; the initial candidate resolves only its target.
+    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValueOnce({ success: false, errors: baselineErrors }).mockResolvedValue({
       success: false,
       errors: "./src/math.ts\nCannot resolve 'mathjs'",
     });
@@ -223,10 +242,11 @@ Cannot resolve 'mathjs'
     );
 
     // Stops with success: true and taskVerified: true without attempting to repair mathjs!
-    expect(result.success).toBe(true);
+    expect(result).toMatchObject({ success: true, errorType: undefined });
     expect(result.taskVerified).toBe(true);
     expect(result.repositoryClean).toBe(false);
-    expect(result.attempts).toBe(1);
+    expect(result.attempts).toBe(0);
+    expect(model).not.toHaveBeenCalled();
   });
 
   test("G. A NEW_CURRENT_TASK diagnostic DOES enter SelfHealing", async () => {
@@ -243,7 +263,6 @@ Cannot resolve 'mathjs'
 
     const targetedDiagnostics = [baselineDiagnostics[0]];
 
-    const fsManager = new FileSystemStateManager();
     const initialChanges = [
       {
         path: "components/Calculator.tsx",
@@ -253,10 +272,18 @@ Cannot resolve 'mathjs'
       },
     ];
 
+    const fsManager = transactionManager(initialChanges);
+    jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue({ content: { operations: [{
+      op: "replace_exact", path: "components/Calculator.tsx", expectedFileHash: fingerprintBytes(initialChanges[0].content),
+      oldText: "export { CalculatorButton };", newText: "",
+    }] } } as Awaited<ReturnType<LLMGateway["callStructured"]>>);
     let buildCalls = 0;
     jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
       buildCalls++;
       if (buildCalls === 1) {
+        return { success: false, errors: "components/Calculator.tsx(1,1): error TS2304: useState requires use client." };
+      }
+      if (buildCalls === 2) {
         // Targeted useState error is resolved, but a NEW duplicate export error is introduced!
         return {
           success: false,

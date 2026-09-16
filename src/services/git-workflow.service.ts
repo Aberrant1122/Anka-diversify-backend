@@ -60,6 +60,8 @@ export interface GitShippingRequest {
   readonly trustedInfrastructureChanges?: readonly TrustedInfrastructureChange[];
   readonly reviewProvider?: CodeReviewProvider;
   readonly validationSummary?: string;
+  /** Trusted process environment used only for remote Git transport. */
+  readonly gitEnvironment?: Readonly<Record<string, string>>;
 }
 
 export interface GitShippingResult {
@@ -283,8 +285,20 @@ export class GitWorkflowService {
     }
 
     await this.assertRemote(root, remote, request.expectedRepositoryIdentity);
-    await this.assertRemoteTargetRevision(worktree, remote, request.targetBranch, request.trustedTargetRevision);
-    const pushed = await this.pushTaskBranch(worktree, remote, request.taskBranch, commitSha);
+    await this.assertRemoteTargetRevision(
+      worktree,
+      remote,
+      request.targetBranch,
+      request.trustedTargetRevision,
+      request.gitEnvironment,
+    );
+    const pushed = await this.pushTaskBranch(
+      worktree,
+      remote,
+      request.taskBranch,
+      commitSha,
+      request.gitEnvironment,
+    );
     if (mode === "PUSH_BRANCH") {
       return this.result(request, taskHeadRevision, finalVerifiedRevision, allowedPaths, commitCreated, commitSha, pushed, "NOT_REQUESTED", remote);
     }
@@ -405,8 +419,17 @@ export class GitWorkflowService {
         if (present) throw new GitWorkflowError("GIT_STAGE_MISMATCH", `Verified deletion remains in the index: ${change.path}`);
         continue;
       }
-      const indexedContent = (await this.git.run(worktree, ["show", `:${change.path}`])).stdout;
-      if (fingerprint(indexedContent) !== change.fingerprint) {
+      const absolute = path.resolve(worktree, change.path);
+      if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile() || fingerprint(fs.readFileSync(absolute)) !== change.fingerprint) {
+        throw new GitWorkflowError("GIT_STAGE_MISMATCH", `Worktree bytes changed while staging: ${change.path}`);
+      }
+
+      // Journal fingerprints intentionally cover raw worktree bytes. The Git
+      // index stores clean-filtered bytes (for example LF under core.autocrlf),
+      // so compare canonical Git blob identities instead of decoded stdout.
+      const expectedBlob = (await this.git.run(worktree, ["hash-object", `--path=${change.path}`, "--", change.path])).stdout.trim();
+      const indexedBlob = (await this.git.run(worktree, ["rev-parse", "--verify", `:${change.path}`])).stdout.trim();
+      if (!/^[0-9a-f]{40,64}$/i.test(expectedBlob) || indexedBlob !== expectedBlob) {
         throw new GitWorkflowError("GIT_STAGE_MISMATCH", `Indexed bytes differ from verified evidence: ${change.path}`);
       }
     }
@@ -457,9 +480,19 @@ export class GitWorkflowService {
     }
   }
 
-  private async assertRemoteTargetRevision(worktree: string, remote: string, target: string, trusted: string): Promise<void> {
+  private async assertRemoteTargetRevision(
+    worktree: string,
+    remote: string,
+    target: string,
+    trusted: string,
+    environment?: Readonly<Record<string, string>>,
+  ): Promise<void> {
     try {
-      const output = (await this.git.run(worktree, ["ls-remote", "--heads", remote, `refs/heads/${target}`])).stdout.trim();
+      const output = (await this.git.run(
+        worktree,
+        ["ls-remote", "--heads", remote, `refs/heads/${target}`],
+        { environment },
+      )).stdout.trim();
       const remoteSha = output ? output.split(/\s+/, 1)[0] : "";
       if (!remoteSha || remoteSha !== trusted) {
         throw new GitWorkflowError("GIT_BASE_REVISION_CHANGED", "Remote target branch moved from its trusted base revision");
@@ -470,15 +503,29 @@ export class GitWorkflowService {
     }
   }
 
-  private async pushTaskBranch(worktree: string, remote: string, branch: string, commitSha: string): Promise<boolean> {
+  private async pushTaskBranch(
+    worktree: string,
+    remote: string,
+    branch: string,
+    commitSha: string,
+    environment?: Readonly<Record<string, string>>,
+  ): Promise<boolean> {
     try {
-      const remoteHead = (await this.git.run(worktree, ["ls-remote", "--heads", remote, `refs/heads/${branch}`])).stdout.trim();
+      const remoteHead = (await this.git.run(
+        worktree,
+        ["ls-remote", "--heads", remote, `refs/heads/${branch}`],
+        { environment },
+      )).stdout.trim();
       if (remoteHead) {
         const existingSha = remoteHead.split(/\s+/, 1)[0];
         if (existingSha === commitSha) return true;
         throw new GitWorkflowError("GIT_PUSH_FAILED", "Remote task branch already points to different history; refusing rewrite");
       }
-      await this.git.run(worktree, ["push", remote, `${branch}:refs/heads/${branch}`]);
+      await this.git.run(
+        worktree,
+        ["push", remote, `${branch}:refs/heads/${branch}`],
+        { environment },
+      );
       return true;
     } catch (error) {
       if (error instanceof GitWorkflowError) throw error;

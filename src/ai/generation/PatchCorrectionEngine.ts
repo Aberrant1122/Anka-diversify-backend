@@ -21,7 +21,8 @@ export interface PatchCorrectionInput {
     | "MODIFY_PATCH_REQUIRED"
     | "EMPTY_PATCH_TARGET"
     | "OVERLAPPING_PATCH_EDITS"
-    | "NO_PATCH_EDITS";
+    | "NO_PATCH_EDITS"
+    | "PUBLIC_CONTRACT_DRIFT";
   errorMessage: string;
 }
 
@@ -57,6 +58,7 @@ export class PatchCorrectionEngine {
       "EMPTY_PATCH_TARGET",
       "OVERLAPPING_PATCH_EDITS",
       "NO_PATCH_EDITS",
+      "PUBLIC_CONTRACT_DRIFT",
     ];
     if (!eligibleCodes.includes(errorCode)) {
       return {
@@ -72,7 +74,7 @@ export class PatchCorrectionEngine {
 A previously generated search/replace patch failed (Reason: ${errorCode}). A modify edit must produce a real effective change and match exact source text.
 
 CRITICAL CORRECTION RULES:
-1. The previous oldText was not found exactly in the current source.
+1. Correct the reported patch or module-contract failure against the current source.
 2. Return corrected structured edits only.
 3. Every "oldText" MUST be copied EXACTLY character-for-character from the supplied CURRENT EXACT FULL SOURCE CONTENT.
 4. "oldText" must contain sufficient surrounding context to match uniquely in the file (no ambiguous duplicates).
@@ -81,6 +83,7 @@ CRITICAL CORRECTION RULES:
 7. Do NOT invent source or guess formatting.
 8. Do NOT use line-number-only patches or unified diff format.
 9. Multiple independent changes to one file must be separate edits[] entries.
+10. Preserve existing named/default exports and their import contracts unless the requested task explicitly changes that public contract.
 
 Respond ONLY with valid JSON:
 {

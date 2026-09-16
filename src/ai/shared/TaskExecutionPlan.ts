@@ -43,10 +43,17 @@ export interface TaskExecutionStage {
   actionObligations?: FileActionObligation[];
 }
 
+/** Advisory identity from the immediately preceding VERIFIED mutation group. */
+export interface PriorVerifiedTarget {
+  path: string;
+  action: "create" | "modify" | "delete";
+}
+
 export interface TaskExecutionPlan {
   id: string;
   goal: string;
   stages: TaskExecutionStage[];
   currentStageIndex: number;
   status: PlanExecutionStatus;
+  priorVerifiedTargets?: PriorVerifiedTarget[];
 }

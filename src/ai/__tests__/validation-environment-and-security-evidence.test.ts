@@ -10,6 +10,8 @@ import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { AgentFileChange, ExecutionContract } from "../../types";
 import * as sharedUtils from "../shared/utils";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
+import { CapabilityGuard } from "../runtime/CapabilityGuard";
 
 describe("Target Build Environment Isolation + Security Finding Evidence (Section 11 A–Q)", () => {
   let tempDir: string;
@@ -118,6 +120,19 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
     expect(result.errors).toContain("exit code 1");
   });
 
+  function createAuthorizedFsManager(dir: string, changes: AgentFileChange[], projectId = "proj-1") {
+    for (const c of changes) {
+      const fullPath = path.join(dir, c.path);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      if (!fs.existsSync(fullPath)) {
+        fs.writeFileSync(fullPath, c.content || "", "utf8");
+      }
+    }
+    const scope = mutationFixtureScope(dir, changes, projectId, "stage-1");
+    const guard = CapabilityGuard.create({ workspaceRoot: dir, scopeId: "stage-1", authorizedScope: scope });
+    return new FileSystemStateManager(guard, "stage-1");
+  }
+
   // ── TEST G: ENVIRONMENT/INFRA failure does not enter generic SelfHealing ────
   test("TEST G: ENVIRONMENT/INFRA failure stops immediately without generic SelfHealing", async () => {
     const errorMsg = '⚠ You are using a non-standard "NODE_ENV" value in your environment. Next.js expects "production".';
@@ -130,13 +145,16 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
       errors: errorMsg,
     });
 
+    const changes: AgentFileChange[] = [{ path: "app/page.tsx", action: "modify", content: "export default function Page() {}", description: "page" }];
+    const fsManager = createAuthorizedFsManager(tempDir, changes, "proj-1");
+
     const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/page.tsx", action: "modify", content: "export default function Page() {}", description: "page" }],
+      changes,
       tempDir,
       ["npm run build"],
       "prompt",
       "fix",
-      new FileSystemStateManager(),
+      fsManager,
       "proj-1",
       undefined,
       { files: [{ path: "app/page.tsx", action: "modify", dependencies: [], description: "page" }], totalFiles: 1, manifestVersion: "1.0.0" },
@@ -188,13 +206,16 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
     fs.mkdirSync(path.join(tempDir, "app"), { recursive: true });
     fs.writeFileSync(pagePath, "const a = 1;\n");
 
+    const changes: AgentFileChange[] = [{ path: "app/page.tsx", action: "modify", content: "const a = 1;\n", description: "page" }];
+    const fsManager = createAuthorizedFsManager(tempDir, changes, "proj-1");
+
     const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/page.tsx", action: "modify", content: "const a = 1;\n", description: "page" }],
+      changes,
       tempDir,
       ["npm run build"],
       "prompt",
       "fix",
-      new FileSystemStateManager(),
+      fsManager,
       "proj-1",
       undefined,
       { files: [{ path: "app/page.tsx", action: "modify", dependencies: [], description: "page" }], totalFiles: 1, manifestVersion: "1.0.0" },
@@ -247,13 +268,16 @@ describe("Target Build Environment Isolation + Security Finding Evidence (Sectio
     fs.mkdirSync(path.join(tempDir, "app"), { recursive: true });
     fs.writeFileSync(pagePath, "let a;\n");
 
+    const changes: AgentFileChange[] = [{ path: "app/page.tsx", action: "modify", content: "let a;\n", description: "page" }];
+    const fsManager = createAuthorizedFsManager(tempDir, changes, "proj-1");
+
     const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/page.tsx", action: "modify", content: "let a;\n", description: "page" }],
+      changes,
       tempDir,
       ["npm run build"],
       "prompt",
       "fix",
-      new FileSystemStateManager(),
+      fsManager,
       "proj-1",
       undefined,
       { files: [{ path: "app/page.tsx", action: "modify", dependencies: [], description: "page" }], totalFiles: 1, manifestVersion: "1.0.0" },

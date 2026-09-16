@@ -146,6 +146,13 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
     return AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, { authorizedCapabilityScope });
   }
 
+  it("expected transaction capability denial returns a normal agent response without an HTTP 500 exception", async () => {
+    const { CapabilityAuthorizationError } = await import("../validation/FileSystemStateManager");
+    jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockRejectedValue(new CapabilityAuthorizationError("REPAIR_SCOPE_EXPANSION_REQUIRED", "Fresh task authority is required."));
+    await expect(runPipeline()).resolves.toMatchObject({ errorCode: "REPAIR_SCOPE_EXPANSION_REQUIRED", changes: [] });
+    expect(fs.readFileSync(targetFilePath, "utf8")).toBe("console.log('original');");
+  });
+
   it("1. SelfHealingEngine mutates workspace then throws -> AgentPipeline catches and rolls back disk", async () => {
     jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (changes, localPath, _cmds, _sp, _msg, fsManager) => {
       if (fsManager && localPath) {
@@ -230,7 +237,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
     expect(response.securityPass).toBe(false);
     expect(response.lifecycleStage).toBe("BuildFailed");
     expect(response.changes).toEqual([]);
-    expect(response.checkpointJournal).toHaveLength(2);
+    expect(response.checkpointJournal).toHaveLength(1);
     expect(response.checkpointJournal).toEqual(expect.arrayContaining([
       expect.objectContaining({ actionGroupId: response.actionGroupId, status: "ROLLED_BACK" }),
     ]));

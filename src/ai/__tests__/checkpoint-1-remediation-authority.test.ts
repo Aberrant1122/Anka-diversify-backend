@@ -1,3 +1,4 @@
+import { bindUserRequest } from "../repository/TrustedTaskContext";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -83,10 +84,16 @@ describe("Checkpoint 1 final remediation authority", () => {
     jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(gatewayDecision(false, [
       { tool: "repo_readFile", params: { filePath: "src/target.ts" }, reason: "Materialize the target" },
     ]));
-    const store = new RepositoryEvidenceStore("repo");
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cp1-rooted-"));
+    fs.mkdirSync(path.join(workspace, "src"));
+    fs.writeFileSync(path.join(workspace, "src/target.ts"), "export const target = true;");
+    const store = new RepositoryEvidenceStore("repo", workspace);
+    const task = destructiveIntent();
+    bindUserRequest(task, "Delete src/target.ts");
     const dispatch = jest.fn(() => JSON.stringify({ found: true, filePath: "src/target.ts", totalLines: 1 }));
-    const result = await investigationAgent(store, destructiveIntent(), dispatch).investigate();
+    const result = await investigationAgent(store, task, dispatch).investigate();
     expect(result.readyToPlan).toBe(true);
+    fs.rmSync(workspace, { recursive: true, force: true });
   });
 
   test("model readyToPlan true cannot waive destructive target binding when evidence is unrelated", async () => {
@@ -100,10 +107,16 @@ describe("Checkpoint 1 final remediation authority", () => {
 
   test("model readyToPlan true is accepted only when exact target evidence and deterministic conditions hold", async () => {
     jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(gatewayDecision(true));
-    const store = new RepositoryEvidenceStore("repo");
-    store.addEvidence({ kind: "FILE", filePath: ".\\src\\target.ts", provenance: "REPO_READ" });
-    const result = await investigationAgent(store).investigate();
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cp1-rooted-"));
+    fs.mkdirSync(path.join(workspace, "src"));
+    fs.writeFileSync(path.join(workspace, "src/target.ts"), "export const target = true;");
+    const store = new RepositoryEvidenceStore("repo", workspace);
+    const task = destructiveIntent();
+    bindUserRequest(task, "Delete src/target.ts");
+    store.observeRepository({ kind: "FILE", filePath: ".\\src\\target.ts", provenance: "REPO_READ" });
+    const result = await investigationAgent(store, task).investigate();
     expect(result.readyToPlan).toBe(true);
+    fs.rmSync(workspace, { recursive: true, force: true });
   });
 
   test("an explicit user target path is not satisfied by unrelated evidence", async () => {

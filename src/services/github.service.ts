@@ -46,15 +46,41 @@ export interface RepoSnapshot {
   lastSyncedAt: Date;
 }
 
-function parseGithubUrl(url: string): { owner: string; repo: string } | null {
+export function parseGithubUrl(url: string): { owner: string; repo: string } | null {
+  const trimmed = url.trim();
+  const sshMatch = trimmed.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (sshMatch) return { owner: sshMatch[1], repo: sshMatch[2] };
   try {
-    const parsed = new URL(url.trim());
+    const parsed = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+    if (parsed.hostname.toLowerCase() !== "github.com") return null;
     const parts = parsed.pathname.split("/").filter(Boolean);
-    if (parts.length >= 2) {
+    if (parts.length === 2) {
       return { owner: parts[0], repo: parts[1].replace(/\.git$/, "") };
     }
-  } catch {}
+  } catch {
+    return null;
+  }
   return null;
+}
+
+export type GitHubErrorCode =
+  | "GITHUB_AUTH_MISSING"
+  | "GITHUB_AUTH_FAILED"
+  | "GITHUB_FORBIDDEN"
+  | "GITHUB_RATE_LIMITED"
+  | "GITHUB_REPOSITORY_NOT_FOUND"
+  | "GITHUB_UNAVAILABLE"
+  | "GITHUB_NETWORK_ERROR";
+
+export class GitHubApiError extends Error {
+  constructor(
+    public readonly code: GitHubErrorCode,
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "GitHubApiError";
+  }
 }
 
 function githubHeaders(token?: string): Record<string, string> {
@@ -69,9 +95,34 @@ function githubHeaders(token?: string): Record<string, string> {
 }
 
 async function fetchGitHub(path: string, token?: string): Promise<unknown> {
-  const res = await fetch(`https://api.github.com${path}`, { headers: githubHeaders(token) });
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com${path}`, { headers: githubHeaders(token) });
+  } catch {
+    throw new GitHubApiError("GITHUB_NETWORK_ERROR", 502, "Unable to reach GitHub.");
+  }
   if (!res.ok) {
-    throw new Error(`GitHub API ${res.status}: ${path}`);
+    const payload = await res.json().catch(() => null) as { message?: string } | null;
+    const message = payload?.message ?? "GitHub request failed.";
+    const hasToken = Boolean(token || process.env.GITHUB_TOKEN);
+    if (res.status === 401) {
+      throw new GitHubApiError(hasToken ? "GITHUB_AUTH_FAILED" : "GITHUB_AUTH_MISSING", 401, "GitHub authentication is required or invalid.");
+    }
+    if (res.status === 403) {
+      const isRateLimit = res.headers.get("x-ratelimit-remaining") === "0" || /rate limit/i.test(message);
+      throw new GitHubApiError(
+        isRateLimit ? "GITHUB_RATE_LIMITED" : "GITHUB_FORBIDDEN",
+        isRateLimit ? 429 : 403,
+        isRateLimit ? "GitHub rate limit exceeded." : "GitHub denied access to this repository.",
+      );
+    }
+    if (res.status === 404) {
+      throw new GitHubApiError("GITHUB_REPOSITORY_NOT_FOUND", 404, "GitHub repository not found.");
+    }
+    if (res.status >= 500) {
+      throw new GitHubApiError("GITHUB_UNAVAILABLE", 502, "GitHub is temporarily unavailable.");
+    }
+    throw new GitHubApiError("GITHUB_UNAVAILABLE", 502, `GitHub request failed with status ${res.status}.`);
   }
   return res.json();
 }

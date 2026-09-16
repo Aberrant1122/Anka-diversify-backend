@@ -23,6 +23,8 @@ export interface StaticValidationIssue {
   line: number;
   reason: string;
   suggestedFix: string;
+  /** Resolved local module involved in the issue, when deterministically known. */
+  relatedFile?: string;
 }
 
 export interface StaticValidationResult {
@@ -481,7 +483,7 @@ export class StaticValidationEngine {
               suggestedFix: `Create file "${imp.rawPath}" or update import path in "${ast.path}"`,
             });
           } else {
-            const targetAST = asts.find((a) => a.path === imp.resolvedPath);
+            const targetAST = asts.find((a) => a.path === imp.resolvedPath || a.normalizedPath === imp.resolvedPath);
             if (targetAST) {
               for (const named of imp.namedImports) {
                 const hasExport = targetAST.exports.some((e) => e.name === named);
@@ -493,20 +495,26 @@ export class StaticValidationEngine {
                     line: imp.line,
                     reason: `Missing export: module "${imp.rawPath}" does not export named symbol "${named}"`,
                     suggestedFix: `Add "export const ${named} = ..." to "${imp.resolvedPath}" or fix import name`,
+                    relatedFile: imp.resolvedPath,
                   });
                 }
               }
 
               if (imp.defaultImport) {
                 const hasDefault = targetAST.exports.some((e) => e.kind === "default");
-                if (!hasDefault && targetAST.exports.length > 0) {
+                if (!hasDefault) {
+                  const namedList = targetAST.exports.map((e) => e.name).filter(Boolean);
+                  const exportsDetail = namedList.length > 0 ? ` (exports named: [${namedList.join(", ")}])` : "";
                   issues.push({
                     checkId: "missing_export",
-                    severity: "WARNING",
+                    severity: "FAIL",
                     file: ast.path,
                     line: imp.line,
-                    reason: `Module "${imp.rawPath}" has no default export (exports named: [${targetAST.exports.map((e) => e.name).join(", ")}])`,
-                    suggestedFix: `Change to named import: import { ${targetAST.exports[0]?.name || "Component"} } from "${imp.rawPath}"`,
+                    reason: `Module "${imp.rawPath}" has no default export${exportsDetail}`,
+                    suggestedFix: namedList.length > 0
+                      ? `Change to named import: import { ${namedList[0] || "Component"} } from "${imp.rawPath}"`
+                      : `Add "export default ..." to "${imp.resolvedPath}"`,
+                    relatedFile: imp.resolvedPath,
                   });
                 }
               }

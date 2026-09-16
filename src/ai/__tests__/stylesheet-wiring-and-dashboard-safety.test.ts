@@ -189,7 +189,9 @@ describe("UI Feature Integration Quality: Stylesheet Wiring & Full-Page Dashboar
 
       const styleCheck = validation.checks.find((c) => c.id === "style_integration");
       expect(styleCheck?.status).toBe("PASS");
-      expect(validation.overallPassed).toBe(true);
+      const importExportCheck = validation.checks.find((c) => c.id === "import_export");
+      expect(importExportCheck?.status).toBe("FAIL");
+      expect(validation.overallPassed).toBe(false);
     });
 
     test("Regression 4 & Part Q: Pre-existing unrelated unused CSS file does NOT fail task-delta validation", async () => {

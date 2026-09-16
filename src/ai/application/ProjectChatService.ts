@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { PrismaClient } from "@prisma/client";
 import { extractDocumentText, injectImages, estimateCostUSD } from "../shared/utils";
-import { ChatRequest, ChatResponse, ProposedTask, EpicProposal, ProjectHealth, GeneralContext, ProjectContext, AIAction } from "../shared/types";
+import { ChatRequest, ChatResponse, ProposedTask, EpicProposal, GeneralContext, ProjectContext, AIAction } from "../shared/types";
 import { RepositoryContextBuilder } from "../repository/RepositoryContextBuilder";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { LLMGateway, LLMToolValidationResult } from "../gateway/LLMGateway";
@@ -356,71 +356,6 @@ export class ProjectChatService {
         messageCount: await MemoryPersistence.getMessageCount(session.id),
         lastUpdated: new Date(),
       },
-    };
-  }
-
-  async getProjectHealth(projectId: string): Promise<ProjectHealth> {
-    const now = new Date();
-    const [tasks, recentActivity] = await Promise.all([
-      prisma.projectTask.findMany({ where: { projectId } }),
-      prisma.projectActivity.findMany({
-        where: { projectId },
-        orderBy: { createdAt: "desc" },
-        take: 1,
-      }),
-    ]);
-
-    const totalTasks = tasks.length;
-    const completedTasks = tasks.filter((t: any) => t.status === "done").length;
-    const inProgressTasks = tasks.filter((t: any) => t.status === "in_progress").length;
-    const overdueTasks = tasks.filter(
-      (t: any) => t.dueDate && new Date(t.dueDate) < now && t.status !== "done",
-    ).length;
-    const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
-
-    const daysSinceActivity = recentActivity[0]
-      ? Math.floor((now.getTime() - new Date(recentActivity[0].createdAt).getTime()) / 86400000)
-      : 999;
-
-    const flags: string[] = [];
-    const recommendations: string[] = [];
-    let score = 100;
-
-    if (overdueTasks > 0) {
-      score -= Math.min(overdueTasks * 8, 30);
-      flags.push(`${overdueTasks} overdue task${overdueTasks > 1 ? "s" : ""}`);
-      recommendations.push("Review and reschedule overdue tasks or mark them as blocked.");
-    }
-    if (completionRate < 20 && totalTasks > 5) {
-      score -= 15;
-      flags.push("Low completion rate");
-      recommendations.push("Break large tasks into smaller ones to improve velocity.");
-    }
-    if (inProgressTasks > 5) {
-      score -= 10;
-      flags.push(`${inProgressTasks} tasks in progress simultaneously`);
-      recommendations.push("Limit work-in-progress to 2-3 tasks per person.");
-    }
-    if (daysSinceActivity > 7) {
-      score -= 15;
-      flags.push(`No activity in ${daysSinceActivity} days`);
-      recommendations.push("Schedule a team sync to unblock progress.");
-    }
-    if (totalTasks === 0) {
-      score = 50;
-      flags.push("No tasks created yet");
-      recommendations.push("Use the AI assistant to break down your project into actionable tasks.");
-    }
-
-    score = Math.max(0, Math.min(100, score));
-    const status: ProjectHealth["status"] = score >= 70 ? "healthy" : score >= 40 ? "warning" : "critical";
-
-    return {
-      score,
-      status,
-      flags,
-      recommendations,
-      stats: { totalTasks, completedTasks, overdueTasks, inProgressTasks, completionRate },
     };
   }
 

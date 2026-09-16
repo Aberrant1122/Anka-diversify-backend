@@ -43,12 +43,12 @@ describe("FileSystemStateManager", () => {
   }
 
   it("should snapshot existing files and new files as null", async () => {
-    const existingFile = path.join(tempDir, "existing.txt");
+    const existingFile = path.join(tempDir, "existing.ts");
     fs.writeFileSync(existingFile, "original content", "utf8");
 
     const changes: AgentFileChange[] = [
-      { path: "existing.txt", action: "modify", content: "new content", description: "test" },
-      { path: "new-file.txt", action: "create", content: "brand new content", description: "test" },
+      { path: "existing.ts", action: "modify", content: "new content", description: "test" },
+      { path: "new-file.ts", action: "create", content: "brand new content", description: "test" },
     ];
 
     const manager = authorizedManager(changes);
@@ -58,23 +58,23 @@ describe("FileSystemStateManager", () => {
   });
 
   it("should apply changes to disk and snapshot newly encountered files", async () => {
-    const existingFile = path.join(tempDir, "existing.txt");
+    const existingFile = path.join(tempDir, "existing.ts");
     fs.writeFileSync(existingFile, "original content", "utf8");
 
     const changes: AgentFileChange[] = [
-      { path: "existing.txt", action: "modify", content: "updated content", description: "test" },
-      { path: "created.txt", action: "create", content: "hello world", description: "test" },
+      { path: "existing.ts", action: "modify", content: "updated content", description: "test" },
+      { path: "created.ts", action: "create", content: "hello world", description: "test" },
     ];
 
     const manager = authorizedManager(changes);
     await manager.apply(changes, tempDir);
 
     expect(fs.readFileSync(existingFile, "utf8")).toBe("updated content");
-    expect(fs.readFileSync(path.join(tempDir, "created.txt"), "utf8")).toBe("hello world");
+    expect(fs.readFileSync(path.join(tempDir, "created.ts"), "utf8")).toBe("hello world");
   });
 
   it("should throw RepairInfrastructureError if localPath is null or invalid directory", async () => {
-    const changes: AgentFileChange[] = [{ path: "foo.txt", action: "create", content: "bar", description: "test" }];
+    const changes: AgentFileChange[] = [{ path: "foo.ts", action: "create", content: "bar", description: "test" }];
     const manager = authorizedManager(changes);
 
     await expect(manager.apply(changes, null)).rejects.toThrow(RepairInfrastructureError);
@@ -106,7 +106,7 @@ describe("FileSystemStateManager", () => {
   });
 
   it("should clear snapshot state on commit", async () => {
-    const changes: AgentFileChange[] = [{ path: "file.txt", action: "create", content: "data", description: "test" }];
+    const changes: AgentFileChange[] = [{ path: "file.ts", action: "create", content: "data", description: "test" }];
     const manager = authorizedManager(changes);
 
     await manager.snapshot(changes, tempDir);

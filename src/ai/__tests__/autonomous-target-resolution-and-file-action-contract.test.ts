@@ -1,3 +1,5 @@
+import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { productionIsAuthorityEligible } from "./helpers/capability-test-harness";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -19,6 +21,9 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "autonomous-action-contract-test-"));
+    fs.mkdirSync(path.join(tempDir, "src/components/calculator"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, "src/components/calculator/Calculator.tsx"), "export const Calculator = () => null;");
+    fs.writeFileSync(path.join(tempDir, "src/app.ts"), "import { Calculator } from './components/calculator/Calculator'; export const App = Calculator;");
   });
 
   afterEach(() => {
@@ -27,6 +32,11 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
     }
   });
 
+  function store() {
+    const result = new RepositoryEvidenceStore("test-repo", tempDir);
+    result.isAuthorityEligible = productionIsAuthorityEligible.bind(result);
+    return result;
+  }
   const defaultDeletePolicy: PolicyContract = {
     goal: "remove the calculator",
     taskType: "DELETE_FOLDER",
@@ -146,7 +156,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       "src/components/calculator/Calculator.tsx",
       "src/components/calculator/index.ts",
     ];
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
     const resolution = DestructiveTargetResolver.resolve(
       "remove the calculator",
       files,
@@ -174,7 +184,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       "src/components/calculator/Calculator.tsx": "export const Calculator = () => null;",
       "src/app.ts": "import { Calculator } from './components/calculator/Calculator';",
     };
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
 
     const resolution = DestructiveTargetResolver.resolve(
       "remove the calculator",
@@ -241,16 +251,15 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
 
   // Test 7: correct DELETE manifest -> passes write authority
   test("7. correct DELETE manifest -> passes write authority", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const calcEv = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const calcEv = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/components/calculator/Calculator.tsx",
       provenance: "REPO_READ",
     });
-    const appEv = evidenceStore.addEvidence({
-      kind: "IMPORT",
+    const appEv = evidenceStore.observeRepository({
+      kind: "FILE",
       filePath: "src/app.ts",
-      sourceFile: "src/components/calculator/Calculator.tsx",
       provenance: "REPO_READ",
     });
 
@@ -300,6 +309,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       },
     };
 
+    bindUserRequest(intentWithTarget, "Delete src/components/calculator/Calculator.tsx and clean up src/app.ts");
     const authRes = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultDeletePolicy,
       intentSpec: intentWithTarget,
@@ -390,8 +400,8 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
 
   // Test 9: action authority is (path, action), not path-only
   test("9. action authority is (path, action), not path-only", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const appEv = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const appEv = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/app.ts",
       provenance: "REPO_READ",
@@ -431,6 +441,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       },
     };
 
+    bindUserRequest(intentWithTarget, "Delete src/components/calculator/Calculator.tsx and clean up src/app.ts");
     const authRes = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultDeletePolicy,
       intentSpec: intentWithTarget,
@@ -447,8 +458,8 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
 
   // Test 10: DELETE target cannot be changed to MODIFY
   test("10. DELETE target cannot be changed to MODIFY", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const calcEv = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const calcEv = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/components/calculator/Calculator.tsx",
       provenance: "REPO_READ",
@@ -487,6 +498,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       },
     };
 
+    bindUserRequest(intentWithTarget, "Delete src/components/calculator/Calculator.tsx and clean up src/app.ts");
     const authRes = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultDeletePolicy,
       intentSpec: intentWithTarget,
@@ -503,8 +515,8 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
 
   // Test 11: MODIFY importer cannot be changed to DELETE
   test("11. MODIFY importer cannot be changed to DELETE", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const appEv = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const appEv = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/app.ts",
       provenance: "REPO_READ",
@@ -543,6 +555,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       },
     };
 
+    bindUserRequest(intentWithTarget, "Delete src/components/calculator/Calculator.tsx and clean up src/app.ts");
     const authRes = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultDeletePolicy,
       intentSpec: intentWithTarget,
@@ -660,8 +673,8 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       dependencies: [],
     };
 
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    evidenceStore.addEvidence({
+    const evidenceStore = store();
+    evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "Calculator.tsx",
       provenance: "REPO_READ",
@@ -681,6 +694,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       },
     };
 
+    bindUserRequest(intentWithTarget, "Delete src/components/calculator/Calculator.tsx and clean up src/app.ts");
     const authRes = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultDeletePolicy,
       intentSpec: intentWithTarget,

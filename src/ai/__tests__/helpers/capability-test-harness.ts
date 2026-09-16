@@ -1,3 +1,6 @@
+import { createTaskIntentSpec } from "../../shared/TaskIntentSpec";
+import { TaskRootedAuthorizationVerifier } from "../../contracts/TaskRootedAuthorizationProof";
+import { withAuthoritySnapshot } from "../../repository/AuthorityWorktree";
 import fs from "fs";
 import path from "path";
 import {
@@ -10,6 +13,12 @@ import {
   RepositoryEvidence,
   RepositoryEvidenceStore,
 } from "../../repository/RepositoryEvidenceStore";
+
+function configureLegacyHarness(target: object, property: PropertyKey, descriptor: PropertyDescriptor): void {
+  // Security suites exercise production classes, even under the full Jest config.
+  if (expect.getState().testPath?.match(/(?:task-rooted-authority-security|mutation-transaction-security)\.test\.ts$/)) return;
+  Object.defineProperty(target, property, descriptor);
+}
 
 interface TestAuthorityInput {
   workspaceRoot: string;
@@ -34,31 +43,20 @@ function createTestCapabilityScope(input: TestAuthorityInput): AuthorizedCapabil
   if (!base || input.grants.length === 0) return base;
 
   const store = new RepositoryEvidenceStore(repositoryId, input.workspaceRoot);
-  const anchorPath = ".anka-test-observation-anchor";
-  const anchorAbsolutePath = path.join(input.workspaceRoot, anchorPath);
-  fs.mkdirSync(input.workspaceRoot, { recursive: true });
-  const anchorExisted = fs.existsSync(anchorAbsolutePath);
-  if (!anchorExisted) fs.writeFileSync(anchorAbsolutePath, "test observation anchor", "utf8");
-  const anchorEvidence = store.observeRepository({ kind: "FILE", filePath: anchorPath, provenance: "REPO_READ" });
-
-  const syntheticTargets: string[] = [];
-  for (const grant of input.grants) {
-    if (grant.action === "FILE_CREATE") continue;
-    const absoluteTarget = path.join(input.workspaceRoot, grant.path);
-    if (!fs.existsSync(absoluteTarget)) {
-      fs.mkdirSync(path.dirname(absoluteTarget), { recursive: true });
-      fs.writeFileSync(absoluteTarget, "test observation target", "utf8");
-      syntheticTargets.push(absoluteTarget);
-    }
-  }
+  const destructive = input.grants.some((grant) => grant.action === "FILE_DELETE");
+  const intentSpec = createTaskIntentSpec(input.grants.map((grant) => `${grant.action === "FILE_CREATE" ? "Create" : grant.action === "FILE_DELETE" ? "Remove" : "Modify"} ${grant.path}`).join("; "), {
+    taskType: destructive ? "DELETE_FILE" : "BUG_FIX", intent: destructive ? "DELETE_FILE" : "BUG_FIX",
+    risk: "LOW", estimatedComplexity: "SMALL", confidence: 1, requiresClarification: false, reasoning: "Explicit test fixture scope",
+  });
+  withAuthoritySnapshot(input.workspaceRoot, () => TaskRootedAuthorizationVerifier.roots(store, intentSpec));
 
   const proposedChanges = input.grants.map((grant) => {
-    const targetEvidence = store.observeRepository({ kind: "FILE", filePath: grant.path, provenance: "REPO_READ" });
+    const targetEvidence = store.getEvidenceForFile(grant.path).find((e) => store.isAuthorityEligible(e));
     return {
       path: grant.path,
       action: grant.action === "FILE_CREATE" ? "create" as const : grant.action === "FILE_DELETE" ? "delete" as const : "modify" as const,
       reason: "test harness capability",
-      evidenceIds: [grant.action === "FILE_CREATE" ? anchorEvidence.id : targetEvidence.id],
+      evidenceIds: targetEvidence ? [targetEvidence.id] : [],
       dependencies: [],
       integration: { required: false },
     };
@@ -84,18 +82,7 @@ function createTestCapabilityScope(input: TestAuthorityInput): AuthorizedCapabil
       explicitUserPaths: input.grants.map((grant) => grant.path),
       userConstraints: [],
     },
-    intentSpec: {
-      goal: "test harness",
-      operations: [],
-      constraints: [],
-      acceptanceCriteria: [],
-      taskType: "BUG_FIX",
-      risk: "LOW",
-      estimatedComplexity: "SMALL",
-      destructive: input.grants.some((grant) => grant.action === "FILE_DELETE"),
-      requiresClarification: false,
-      explicitUserPaths: input.grants.map((grant) => grant.path),
-    },
+    intentSpec,
     proposedChanges,
     evidenceStore: store,
     existingFiles: input.grants.filter((grant) => grant.action !== "FILE_CREATE").map((grant) => grant.path),
@@ -106,17 +93,15 @@ function createTestCapabilityScope(input: TestAuthorityInput): AuthorizedCapabil
     runId,
   }).evidenceAuthorization;
 
-  if (!anchorExisted) fs.rmSync(anchorAbsolutePath, { force: true });
-  for (const syntheticTarget of syntheticTargets) fs.rmSync(syntheticTarget, { force: true });
   return base.deriveExecutionScope(authorization, { stageId: `test-stage:${input.authorityId}` });
 }
 
-Object.defineProperty(AuthorizedCapabilityScope, "fromBackendConfiguration", {
+configureLegacyHarness(AuthorizedCapabilityScope, "fromBackendConfiguration", {
   configurable: true,
   value: createTestCapabilityScope,
 });
 
-Object.defineProperty(AuthorizedCapabilityScope, "fromAuthenticatedProject", {
+configureLegacyHarness(AuthorizedCapabilityScope, "fromAuthenticatedProject", {
   configurable: true,
   value: createTestCapabilityScope,
 });
@@ -125,7 +110,7 @@ export const productionAddEvidence = RepositoryEvidenceStore.prototype.addEviden
 export const productionIsAuthorityEligible = RepositoryEvidenceStore.prototype.isAuthorityEligible;
 const testEvidence = new WeakSet<object>();
 
-Object.defineProperty(RepositoryEvidenceStore.prototype, "addEvidence", {
+configureLegacyHarness(RepositoryEvidenceStore.prototype, "addEvidence", {
   configurable: true,
   value: function addTestEvidence(this: RepositoryEvidenceStore, params: AddEvidenceParams): RepositoryEvidence {
     const evidence = productionAddEvidence.call(this, params);
@@ -134,7 +119,7 @@ Object.defineProperty(RepositoryEvidenceStore.prototype, "addEvidence", {
   },
 });
 
-Object.defineProperty(RepositoryEvidenceStore.prototype, "isAuthorityEligible", {
+configureLegacyHarness(RepositoryEvidenceStore.prototype, "isAuthorityEligible", {
   configurable: true,
   value: function isTestAuthorityEligible(this: RepositoryEvidenceStore, evidence: RepositoryEvidence): boolean {
     return productionIsAuthorityEligible.call(this, evidence) || testEvidence.has(evidence);

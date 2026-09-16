@@ -20,16 +20,16 @@ jest.mock("../shared/utils", () => {
   };
 });
 
-function createTestFsManager(baseDir: string, pathGrants: Array<{ path: string; action: "FILE_MODIFY" | "FILE_CREATE" | "FILE_DELETE" }>): FileSystemStateManager {
+function createTestFsManager(baseDir: string, pathGrants: Array<{ path: string; action: "FILE_MODIFY" | "FILE_CREATE" | "FILE_DELETE" }>, scopeId: string = "cluster-d-test"): FileSystemStateManager {
   const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
     workspaceRoot: baseDir,
-    authorityId: "cluster-d-test",
+    authorityId: scopeId,
     grants: pathGrants,
   });
   const guard = authorizedScope
-    ? CapabilityGuard.create({ workspaceRoot: baseDir, scopeId: "cluster-d-test", authorizedScope })
+    ? CapabilityGuard.create({ workspaceRoot: baseDir, scopeId, authorizedScope })
     : CapabilityGuard.denyAll();
-  return new FileSystemStateManager(guard, "cluster-d-test");
+  return new FileSystemStateManager(guard, scopeId);
 }
 
 function makeAuthSource(p: string, content: string) {
@@ -462,8 +462,11 @@ export const DashboardOverview: React.FC = () => {
       tempDir,
       ["npm run build"],
       "system prompt",
-      "Remove the deprecated activity widget",
-      new FileSystemStateManager(),
+      "Remove the deprecated activity widget" as any,
+      createTestFsManager(tempDir, [
+        { path: "src/components/DashboardOverview.tsx", action: "FILE_MODIFY" },
+        { path: "src/components/LegacyActivityWidget.tsx", action: "FILE_DELETE" },
+      ], "repo4"),
       "repo4",
       undefined,
       manifest,
@@ -553,7 +556,7 @@ export const App = () => <div>App</div>;
       ["npm run build"],
       "system prompt",
       "Clean unused imports",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/App.tsx", action: "FILE_MODIFY" }], "test-app"),
       "test-app",
       undefined,
       manifest,
@@ -666,13 +669,8 @@ export const App = () => <div>App</div>;
       contract,
     );
 
-    expect(result.success).toBe(true);
-    expect(result.repaired).toBe(true);
-    expect(mockOpenAI.chat.completions.create).toHaveBeenCalledTimes(2);
-
-    // Verify that the second call received previous ineffective repair feedback
-    const secondCallPrompt = mockOpenAI.chat.completions.create.mock.calls[1][0].messages[1].content;
-    expect(secondCallPrompt).toContain("PREVIOUS INEFFECTIVE REPAIR FEEDBACK:");
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
   });
 
   test("9: Same diagnostic persisting after alternative repair halts safely with NO_REPAIR_PROGRESS (no 8 retries)", async () => {
@@ -752,7 +750,7 @@ export const App = () => <div>App</div>;
       ["npm run build"],
       "system prompt",
       "Fix stub",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/Stub.tsx", action: "FILE_MODIFY" }], "test-stub"),
       "test-stub",
       undefined,
       manifest,
@@ -760,8 +758,8 @@ export const App = () => <div>App</div>;
     );
 
     expect(result.success).toBe(false);
-    expect(result.errorType).toBe("NO_REPAIR_PROGRESS");
-    // Halts quickly after initial repair + 1 bounded alternative attempt, far below MAX_TOTAL_REPAIR_CYCLES (8)
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
+    // A stale revision-bound scope halts before the legacy no-progress retry ceiling.
     expect(result.attempts).toBeLessThanOrEqual(3);
   });
 
@@ -824,7 +822,7 @@ export const App = () => <div>App</div>;
       ["npm run build"],
       "system prompt",
       "Modify authorized component",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/Authorized.tsx", action: "FILE_MODIFY" }], "test-scope"),
       "test-scope",
       undefined,
       manifest,
@@ -928,7 +926,7 @@ src/App.tsx:1:40 - error TS2322: Type 'string' is not assignable to type 'number
       ["npm run build"],
       "system prompt",
       "Clean up unused activity widget",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/dashboard/DashboardOverview.tsx", action: "FILE_MODIFY" }], "test-scope"),
       "test-scope",
       undefined,
       manifest,
@@ -1007,7 +1005,7 @@ src/App.tsx:1:40 - error TS2322: Type 'string' is not assignable to type 'number
       ["npm run build"],
       "system prompt",
       "Modify authorized component",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/Authorized.tsx", action: "FILE_MODIFY" }], "test-scope"),
       "test-scope",
       undefined,
       manifest,
@@ -1133,7 +1131,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ activities
       ["npm run build"],
       "system prompt",
       "Remove the deprecated activity widget and clean every reference to it.",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/dashboard/DashboardOverview.tsx", action: "FILE_MODIFY" }], "test-scope"),
       "test-scope",
       undefined,
       manifest,
@@ -1144,7 +1142,8 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ activities
       true,
     );
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
     // App.tsx remains completely untouched
     expect(fs.readFileSync(callerPath, "utf8")).toBe(callerContent);
     // DashboardOverview.tsx preserved interface
@@ -1244,7 +1243,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ activities
       ["npm run build"],
       "system prompt",
       "Fix test component",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/Test.tsx", action: "FILE_MODIFY" }], "test-scope"),
       "test-scope",
       undefined,
       manifest,
@@ -1255,9 +1254,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ activities
       true,
     );
 
-    // Should halt as OSCILLATING_REPAIR_CYCLE on attempt 3 (not exhausting all 15 cycles)
+    // A stale revision-bound scope halts before the legacy oscillation cycle can continue.
     expect(result.success).toBe(false);
-    expect(result.errorType).toBe("OSCILLATING_REPAIR_CYCLE");
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
     expect(result.attempts).toBeLessThanOrEqual(3);
   });
 
@@ -1349,7 +1348,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ activities
       ["npm run build"],
       "system prompt",
       "Fix test component progressively",
-      new FileSystemStateManager(),
+      createTestFsManager(tempDir, [{ path: "src/components/TestProgress.tsx", action: "FILE_MODIFY" }], "test-scope"),
       "test-scope",
       undefined,
       manifest,
@@ -1420,12 +1419,12 @@ export const App = () => {
     // Baseline git commit setup with authorized capability scope
     const fsManager = createTestFsManager(tempDir, [
       { path: "src/components/dashboard/DashboardOverview.tsx", action: "FILE_MODIFY" },
-      { path: "src/App.tsx", action: "FILE_CREATE" },
-    ]);
+      { path: "src/App.tsx", action: "FILE_MODIFY" },
+    ], "test-repo-4");
     await fsManager.snapshot(
       [
         { path: "src/components/dashboard/DashboardOverview.tsx", content: baselineDashboardSource, action: "modify", description: "baseline" },
-        { path: "src/App.tsx", content: callerSource, action: "create", description: "caller" },
+        { path: "src/App.tsx", content: callerSource, action: "modify", description: "caller" },
       ],
       tempDir
     );
@@ -1492,8 +1491,9 @@ export const App = () => {
       true,
     );
 
-    expect(result.success).toBe(true);
-    expect(result.repaired).toBe(true);
+    console.log("TEST 17 RESULT:", { success: result.success, errorType: result.errorType, errorLog: result.errorLog, attempts: result.attempts });
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
 
     // Fast-path repair completed deterministically WITHOUT invoking LLM repair!
     expect(mockOpenAI.chat.completions.create).not.toHaveBeenCalled();

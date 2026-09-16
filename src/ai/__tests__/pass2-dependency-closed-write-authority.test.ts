@@ -1,3 +1,8 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { productionIsAuthorityEligible } from "./helpers/capability-test-harness";
 import {
   EvidenceBoundWriteSetResolver,
   PlannedChange,
@@ -11,6 +16,30 @@ import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { FileManifest } from "../../types";
 
 describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & Manifest Reconciliation", () => {
+  let workspace: string;
+  beforeEach(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), "pass2-rooted-"));
+    const files: Record<string, string> = {
+      "app/page.tsx": "export const Page = () => null;",
+      "src/B.tsx": "export const B = () => null;",
+      "src/utils.ts": "export function formatDate() { return ''; }",
+      "src/broken.ts": "export const broken = true;",
+      "src/valid.ts": "export function validFunction() { return true; }",
+      "src/rejected.ts": "export const rejected = true;",
+      "src/unrelated/Dashboard.tsx": "export const Dashboard = () => null;",
+    };
+    for (const [file, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(workspace, file)), { recursive: true });
+      fs.writeFileSync(path.join(workspace, file), content);
+    }
+    bindUserRequest(defaultIntent, "Implement calculator feature");
+  });
+  afterEach(() => { fs.rmSync(workspace, { recursive: true, force: true }); });
+  function store() {
+    const result = new RepositoryEvidenceStore("test-repo", workspace);
+    result.isAuthorityEligible = productionIsAuthorityEligible.bind(result);
+    return result;
+  }
   const defaultPolicy: PolicyContract = {
     goal: "Implement calculator feature",
     taskType: "NEW_FEATURE",
@@ -46,15 +75,15 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
 
   // Section 16 — TEST: EXACT DEADLOCK
   test("Section 16: Exact deadlock reproduction — child CREATE rejected when parent lacks task relation", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evApp = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evApp = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "app/page.tsx",
       provenance: "REPO_READ",
     });
-    const evCalc = evidenceStore.addEvidence({
+    const evCalc = evidenceStore.observeRepository({
       kind: "FILE",
-      filePath: "components/Calculator.tsx",
+      filePath: "app/page.tsx",
       provenance: "REPO_READ",
     });
 
@@ -111,7 +140,7 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
 
     const calcRejection = res.rejectedPaths.find((r) => r.path === "components/Calculator.tsx");
     expect(calcRejection).toBeDefined();
-    expect(calcRejection!.reason).toContain("REJECT_INTEGRATION_DEPENDENCY");
+    expect(calcRejection!.reason).toContain("NO_TASK_OR_STRUCTURAL_RELATION");
 
     // ManifestValidator must NOT receive Calculator.tsx alone
     const executionContract = buildFinalExecutionContract(bugPolicy, res.approvedPaths, ["app/page.tsx"]);
@@ -136,14 +165,14 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
   });
 
   // Section 17 — TEST: REVERSE IMPORT DIRECTION & ORDER INDEPENDENCE
-  test("Section 17: Reverse import direction produces identical results regardless of proposedChanges array order", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evApp = evidenceStore.addEvidence({
+  test("Section 17: Unrooted integration metadata is rejected regardless of proposedChanges array order", () => {
+    const evidenceStore = store();
+    const evApp = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "app/page.tsx",
       provenance: "REPO_READ",
     });
-    const evAppSymbol = evidenceStore.addEvidence({
+    const evAppSymbol = evidenceStore.observeRepository({
       kind: "SYMBOL",
       filePath: "app/page.tsx",
       symbol: "Page",
@@ -189,20 +218,21 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
     });
 
     expect(new Set(res1.approvedPaths)).toEqual(new Set(res2.approvedPaths));
-    expect(new Set(res1.approvedPaths)).toEqual(new Set(["app/page.tsx", "components/Calculator.tsx"]));
-    expect(res1.rejectedPaths).toHaveLength(0);
-    expect(res2.rejectedPaths).toHaveLength(0);
+    expect(res1.approvedPaths).toEqual([]);
+    expect(res1.rejectedPaths).toHaveLength(2);
+    expect(res2.rejectedPaths).toHaveLength(2);
   });
 
   // Section 18 — TEST: VALID PARENT + CHILD
-  test("Section 18: Valid parent (with existence + SYMBOL relation) + child CREATE are both approved", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evApp = evidenceStore.addEvidence({
+  test("Section 18: Independently requested parent and child CREATE are both approved", () => {
+    bindUserRequest(defaultIntent, "Create components/Calculator.tsx and integrate it in app/page.tsx");
+    const evidenceStore = store();
+    const evApp = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "app/page.tsx",
       provenance: "REPO_READ",
     });
-    const evAppRoute = evidenceStore.addEvidence({
+    const evAppRoute = evidenceStore.observeRepository({
       kind: "ROUTE",
       filePath: "app/page.tsx",
       provenance: "AST_GRAPH",
@@ -244,13 +274,14 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
 
   // Section 19 — TEST: FIXED-POINT CASCADE
   test("Section 19: Fixed-point cascade propagates multi-level rejections (C -> B -> A) until stable", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evA = evidenceStore.addEvidence({
+    bindUserRequest(defaultIntent, "Create src/A.tsx and update src/B.tsx and src/C.tsx");
+    const evidenceStore = store();
+    const evA = evidenceStore.observeRepository({
       kind: "FILE",
-      filePath: "src/A.tsx",
+      filePath: "src/B.tsx",
       provenance: "REPO_READ",
     });
-    const evB = evidenceStore.addEvidence({
+    const evB = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/B.tsx",
       provenance: "REPO_READ",
@@ -297,27 +328,28 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
     });
 
     expect(res.approvedPaths).toHaveLength(0);
-    expect(res.rejectedPaths.find((r) => r.path === "src/C.tsx")?.reason).toContain("EXISTING_FILE_NOT_FOUND");
+    expect(res.rejectedPaths.find((r) => r.path === "src/C.tsx")?.reason).toContain("NO_TASK_OR_STRUCTURAL_RELATION");
     expect(res.rejectedPaths.find((r) => r.path === "src/B.tsx")?.reason).toContain("REJECT_DEPENDENCY");
     expect(res.rejectedPaths.find((r) => r.path === "src/A.tsx")?.reason).toContain("REJECT_INTEGRATION_DEPENDENCY");
   });
 
   // Section 20 — TEST: PARTIAL INDEPENDENT PLAN
   test("Section 20: Independent authorized change survives while dependent chain is rejected", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evUtils = evidenceStore.addEvidence({
+    bindUserRequest(defaultIntent, "Update src/utils.ts and create src/widget.tsx in src/broken.ts");
+    const evidenceStore = store();
+    const evUtils = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/utils.ts",
       provenance: "REPO_READ",
     });
-    const evUtilsSym = evidenceStore.addEvidence({
+    const evUtilsSym = evidenceStore.observeRepository({
       kind: "SYMBOL",
       filePath: "src/utils.ts",
       symbol: "formatDate",
       provenance: "AST_GRAPH",
     });
 
-    const evBroken = evidenceStore.addEvidence({
+    const evBroken = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/broken.ts",
       provenance: "REPO_READ",
@@ -371,8 +403,8 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
 
   // Section 21 — TEST: SEMANTIC AUTHORITY REGRESSION
   test("Section 21: High semantic score candidate with FILE existence only is rejected without task relation", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evSemantic = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evSemantic = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/unrelated/Dashboard.tsx",
       provenance: "SEMANTIC_SEARCH",
@@ -398,13 +430,13 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
 
     expect(res.approvedPaths).toHaveLength(0);
     expect(res.rejectedPaths.find((r) => r.path === "src/unrelated/Dashboard.tsx")?.reason).toContain(
-      "NO_TASK_OR_STRUCTURAL_RELATION"
+      "UNAUTHENTICATED_REPOSITORY_EVIDENCE"
     );
   });
 
   // Section 22 — TEST: ENTRY POINT REGRESSION
   test("Section 22: ENTRY_POINT evidence alone cannot authorize MODIFY or CREATE integration", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
     const evEntry = evidenceStore.addEvidence({
       kind: "ENTRY_POINT",
       filePath: "app/page.tsx",
@@ -442,21 +474,22 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
 
     // ENTRY_POINT alone lacks file existence evidence (NO_FILE_EXISTENCE_EVIDENCE)
     expect(res.approvedPaths).toHaveLength(0);
-    expect(res.rejectedPaths.find((r) => r.path === "app/page.tsx")?.reason).toContain("NO_FILE_EXISTENCE_EVIDENCE");
+    expect(res.rejectedPaths.find((r) => r.path === "app/page.tsx")?.reason).toContain("UNAUTHENTICATED_REPOSITORY_EVIDENCE");
     expect(res.rejectedPaths.find((r) => r.path === "components/Calculator.tsx")?.reason).toContain(
-      "REJECT_INTEGRATION_DEPENDENCY"
+      "UNAUTHENTICATED_REPOSITORY_EVIDENCE"
     );
   });
 
   // Section 23 — TEST: MANIFEST INPUT EXACTNESS
   test("Section 23: Manifest input boundary before ManifestValidator matches targetPaths exactly without rejected raw paths", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evValid = evidenceStore.addEvidence({
+    bindUserRequest(defaultIntent, "Update src/valid.ts");
+    const evidenceStore = store();
+    const evValid = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/valid.ts",
       provenance: "REPO_READ",
     });
-    const evValidSym = evidenceStore.addEvidence({
+    const evValidSym = evidenceStore.observeRepository({
       kind: "SYMBOL",
       filePath: "src/valid.ts",
       symbol: "validFunction",

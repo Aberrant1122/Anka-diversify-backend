@@ -1,3 +1,5 @@
+import { authoritySnapshot, captureAuthoritySnapshot, withAuthoritySnapshot } from "../repository/AuthorityWorktree";
+import { RepositoryObservationTools } from "../repository/RepositoryObservation";
 import { ErrorDiagnosticsParser } from "../../services/surgical-repair.engine";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { RepositoryEvidenceStore, RepositoryEvidence } from "../repository/RepositoryEvidenceStore";
@@ -24,6 +26,7 @@ export interface NormalizedDiagnostic {
 }
 
 export interface NormalizationOptions {
+  workspaceRoot?: string;
   repositoryId?: string;
   workspaceId?: string;
   checkpointId?: string;
@@ -53,6 +56,12 @@ const ENVIRONMENT_PATTERNS = [
   /incompatible environment/i,
   /unsupported environment/i,
   /network unavailable/i,
+  /Failed to fetch[^\r\n]*from Google Fonts/i,
+  /next\/font(?::|\s).*error[\s\S]*?(?:fetch|Google Fonts|network|ECONNRESET|ENETUNREACH|EAI_AGAIN|getaddrinfo)/i,
+  /\bnetwork request failed\b/i,
+  /\bgetaddrinfo\b/i,
+  /\b(?:fetch|request|network|connect|socket|registry|download|dependency|Google Fonts|fonts\.googleapis\.com)\b[^\r\n]{0,200}\b(?:ECONNRESET|ENETUNREACH|EAI_AGAIN)\b/i,
+  /\b(?:ECONNRESET|ENETUNREACH|EAI_AGAIN)\b[^\r\n]{0,200}\b(?:fetch|request|network|connect|socket|registry|download|dependency|Google Fonts|fonts\.googleapis\.com)\b/i,
   /\bENOTFOUND\b/i,
   /\bECONNREFUSED\b/i,
   /\bETIMEDOUT\b/i,
@@ -79,11 +88,39 @@ const DEPENDENCY_PATTERNS = [
  * Invariant: Environment, dependency, and toolchain failures NEVER generate source file paths
  * or source write authority.
  */
+const normalizedReceipts = new WeakMap<object, { workspace: string; revision: string }>();
+const diagnosticEvidence = new WeakSet<object>();
+export function isTrustedDiagnosticEvidence(value: RepositoryEvidence): boolean { return diagnosticEvidence.has(value); }
+
 export class DiagnosticNormalizer {
+  /** Trusted validation boundary: changed worktrees produce advisory diagnostics only. */
+  public static async captureValidation<T extends { errors: string }>(workspaceRoot: string, validate: () => Promise<T>): Promise<{ result: T; diagnostics: NormalizedDiagnostic[] }> {
+    const before = captureAuthoritySnapshot(workspaceRoot);
+    const result = await validate();
+    const after = captureAuthoritySnapshot(workspaceRoot);
+    const unchanged = before.canonicalRoot === after.canonicalRoot && before.revision === after.revision;
+    const diagnostics = this.parse(result.errors).map((diagnostic) => {
+      Object.freeze(diagnostic);
+      if (unchanged) normalizedReceipts.set(diagnostic, { workspace: workspaceRoot, revision: before.revision });
+      return diagnostic;
+    });
+    return { result, diagnostics };
+  }
+
   /**
    * Normalizes raw error logs into typed diagnostics.
    */
-  public static normalize(
+  public static normalize(rawErrorLog: string, options?: NormalizationOptions): NormalizedDiagnostic[] {
+    const workspace = options?.workspaceRoot;
+    const revision = workspace ? authoritySnapshot(workspace).revision : undefined;
+    return this.parse(rawErrorLog, options).map((d) => {
+      Object.freeze(d);
+      if (workspace && revision) normalizedReceipts.set(d, { workspace, revision });
+      return d;
+    });
+  }
+
+  private static parse(
     rawErrorLog: string,
     options?: NormalizationOptions
   ): NormalizedDiagnostic[] {
@@ -238,6 +275,12 @@ export class DiagnosticNormalizer {
     evidenceStore: RepositoryEvidenceStore,
     checkpointId?: string
   ): RepositoryEvidence[] {
+    const workspace = evidenceStore.getDefaultWorkspace();
+    if (!workspace || !evidenceStore.getCanonicalWorkspaceRoot()) return [];
+    return withAuthoritySnapshot(workspace, () => this.ingestBatch(diagnostics, evidenceStore, checkpointId));
+  }
+
+  private static ingestBatch(diagnostics: NormalizedDiagnostic[], evidenceStore: RepositoryEvidenceStore, checkpointId?: string): RepositoryEvidence[] {
     const added: RepositoryEvidence[] = [];
 
     for (const d of diagnostics) {
@@ -245,20 +288,16 @@ export class DiagnosticNormalizer {
         continue;
       }
 
-      const evidence = evidenceStore.addEvidence({
-        kind: "DIAGNOSTIC",
-        filePath: d.filePath,
-        provenance: "BUILD_DIAGNOSTIC",
-        metadata: {
-          code: d.code,
-          line: d.line,
-          column: d.column,
-          checkpointId: checkpointId || d.checkpointId,
-          stale: false,
-        },
-        workspace: d.workspaceId,
-        repositoryId: d.repositoryId || evidenceStore.getRepositoryId(),
+      const workspace = evidenceStore.getDefaultWorkspace();
+      const normalized = normalizedReceipts.get(d);
+      if (!workspace || normalized?.workspace !== workspace || normalized.revision !== authoritySnapshot(workspace).revision) continue;
+      const receipt = RepositoryObservationTools.observeDiagnostic(evidenceStore.getRepositoryId(), workspace, d.filePath, {
+        code: d.code, line: d.line, column: d.column, checkpointId: checkpointId || d.checkpointId, stale: false,
       });
+      if (!receipt) continue;
+      const evidence = evidenceStore.recordObservation(receipt);
+      if (!evidence) continue;
+      diagnosticEvidence.add(evidence);
 
       added.push(evidence);
     }

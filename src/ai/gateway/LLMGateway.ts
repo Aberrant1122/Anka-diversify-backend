@@ -344,36 +344,72 @@ export class LLMGateway {
           }
 
           this.telemetry.emit("llm.retry", telemetryContext, attempt);
-          const isSchemaRepair = lastError instanceof LLMSchemaInvalidError && mode === "structured";
-          if (retryDelayMs > 0 && !isSchemaRepair) {
+          const isStructuredCorrection = mode === "structured" && (
+            lastError instanceof LLMSchemaInvalidError ||
+            lastError instanceof LLMInvalidJsonError
+          );
+          if (retryDelayMs > 0 && !isStructuredCorrection) {
             const delay = retryDelayMs * Math.pow(1.5, attempt - 1);
             await new Promise((resolve) => setTimeout(resolve, delay));
           }
 
-          if (isSchemaRepair) {
+          if (isStructuredCorrection) {
             const structuredSchema = (options as LLMStructuredCallOptions).schema;
             const errorList = (lastError.details?.validationErrors && lastError.details.validationErrors.length > 0)
               ? lastError.details.validationErrors
               : [lastError.message];
 
-            const repairPrompt = [
-              "Your previous response failed structured schema validation.",
-              "",
-              "VALIDATION ERRORS:",
-              ...errorList.map((e: string) => `- ${e}`),
-              "",
-              "AUTHORITATIVE EXPECTED SCHEMA:",
-              JSON.stringify(structuredSchema.schema, null, 2),
-              "",
-              "REPAIR INSTRUCTIONS:",
-              "1. Fix all schema validation errors listed above.",
-              "2. Preserve your intended semantic code changes and explanation.",
-              "3. For MODIFY actions, you MUST NOT output full file content or isDeleted. You MUST output targeted edits with non-empty edits[] array:",
-              '   { "path": "...", "action": "modify", "description": "...", "edits": [ { "oldText": "...", "newText": "..." } ] }',
-              '4. For CREATE actions, output: { "path": "...", "action": "create", "content": "...", "description": "..." }',
-              '5. For DELETE actions, output: { "path": "...", "action": "delete", "isDeleted": true, "content": "", "description": "..." }',
-              "6. Respond ONLY with the corrected valid JSON object matching the schema. Do not output markdown code fences or conversational text.",
-            ].join("\n");
+            const repairPrompt = stage === PipelineStages.MANIFEST_GENERATION
+              ? [
+                  "Your previous manifest proposal was not valid structured JSON.",
+                  "",
+                  "VALIDATION ERRORS:",
+                  ...errorList.map((e: string) => `- ${e}`),
+                  "",
+                  "AUTHORITATIVE EXPECTED SCHEMA:",
+                  JSON.stringify(structuredSchema.schema, null, 2),
+                  "",
+                  "MANIFEST CORRECTION INSTRUCTIONS:",
+                  "1. Return one valid JSON object matching the schema exactly.",
+                  "2. Correct only model-owned planning fields: path, action, dependencies, description, and manifest metadata.",
+                  "3. Do not add evidenceIds or any authorization token; backend authorization is performed separately.",
+                  "4. Do not output markdown code fences or conversational text.",
+                ].join("\n")
+              : stage === PipelineStages.INTENT_CLASSIFICATION
+                ? [
+                  "Your previous intent-classification response failed deterministic schema validation.",
+                  "",
+                  "VALIDATION ERRORS:",
+                  ...errorList.map((e: string) => `- ${e}`),
+                  "",
+                  "AUTHORITATIVE EXPECTED SCHEMA:",
+                  JSON.stringify(structuredSchema.schema, null, 2),
+                  "",
+                  "INTENT CLASSIFICATION CORRECTION INSTRUCTIONS:",
+                  "1. Return one valid JSON object matching the schema exactly.",
+                  "2. Preserve the classification semantics of the original user request.",
+                  "3. Use unique stage ids, reference only declared earlier stage ids in dependsOn, and never make a stage depend on itself.",
+                  "4. Use a repository-relative path for targetPath, or null when no exact path is known.",
+                  "5. Respond ONLY with the corrected JSON object. Do not output markdown fences or conversational text.",
+                ].join("\n")
+              : [
+                  "Your previous response failed structured schema validation.",
+                  "",
+                  "VALIDATION ERRORS:",
+                  ...errorList.map((e: string) => `- ${e}`),
+                  "",
+                  "AUTHORITATIVE EXPECTED SCHEMA:",
+                  JSON.stringify(structuredSchema.schema, null, 2),
+                  "",
+                  "REPAIR INSTRUCTIONS:",
+                  "1. Fix all schema validation errors listed above.",
+                  "2. Preserve your intended semantic code changes and explanation.",
+                  "3. For MODIFY actions, you MUST NOT output full file content or isDeleted. You MUST output targeted edits with non-empty edits[] array:",
+                  '   { "path": "...", "action": "modify", "description": "...", "edits": [ { "oldText": "...", "newText": "..." } ] }',
+                  '4. For CREATE actions, output: { "path": "...", "action": "create", "content": "...", "description": "..." }',
+                  '5. For DELETE actions, output: { "path": "...", "action": "delete", "isDeleted": true, "content": "", "description": "..." }',
+                  "6. Respond ONLY with the corrected valid JSON object matching the schema. Do not output markdown code fences or conversational text.",
+                ].join("\n");
 
             const assistantContent = (lastError.details?.rawContent as string) || (lastError.details?.rawPayloadSnippet as string) || "";
             preparedOptions = {
@@ -636,6 +672,9 @@ export class LLMGateway {
     try {
       parsed = JSON.parse(rawContent);
     } catch (parseErr: any) {
+      const isManifestCorrection =
+        stage === PipelineStages.MANIFEST_GENERATION &&
+        telemetryContext.attempt === 1;
       throw new LLMInvalidJsonError(
         `Failed to parse structured model response as valid JSON: ${parseErr.message}`,
         {
@@ -643,7 +682,8 @@ export class LLMGateway {
           model,
           rawPayloadSnippet: rawContent.slice(0, 300),
         },
-        parseErr
+        parseErr,
+        isManifestCorrection
       );
     }
 
@@ -673,8 +713,9 @@ export class LLMGateway {
 
     if (!validationResult || validationResult.valid !== true) {
       const isRetryable =
-        stage === PipelineStages.CODE_GENERATION &&
-        telemetryContext.attempt === 1;
+        stage === PipelineStages.INTENT_CLASSIFICATION ||
+        ((stage === PipelineStages.CODE_GENERATION || stage === PipelineStages.MANIFEST_GENERATION) &&
+          telemetryContext.attempt === 1);
       throw new LLMSchemaInvalidError(
         `Structured model response failed schema validation: ${(validationResult?.errors || []).join("; ")}`,
         {

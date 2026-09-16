@@ -7,6 +7,7 @@ import {
   detectAllActiveEntryRoots,
   detectRepositoryArchitecture,
 } from "../planning/RepositoryArchitectureDetector";
+import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 
 interface FeatureValidationAdvisory {
   findings: Array<{
@@ -78,6 +79,20 @@ const featureValidationAdvisorySchema = {
   },
 };
 
+function isTrustedDependencyCleanup(
+  change: AgentFileChange,
+  contract?: ExecutionContract,
+): boolean {
+  if (!contract || change.action !== "modify" || change.isDeleted === true) return false;
+
+  const changePath = normalizeRepoPath(change.path);
+  return Boolean(contract.actionObligations?.some((obligation) =>
+    obligation.role === "DEPENDENCY_CLEANUP" &&
+    obligation.requiredAction === "modify" &&
+    normalizeRepoPath(obligation.path) === changePath
+  ));
+}
+
 export class ValidationDetector {
   static async runFeatureValidation(
     changes: AgentFileChange[],
@@ -148,8 +163,12 @@ export class ValidationDetector {
       const projectFilesOnly = rawSnapshotFiles.filter((f) => f.path && !f.path.startsWith("benchmarks/") && !f.path.startsWith("node_modules/"));
       const rawStaticResult = StaticValidationEngine.validate(projectFilesOnly, changes);
 
-      const changedFilePaths = new Set(changes.map((c) => c.path));
-      const relevantIssues = rawStaticResult.issues.filter((i) => changedFilePaths.has(i.file));
+      const changedFilePaths = new Set(changes.map((c) => c.path.replace(/\\/g, "/").replace(/^\.\//, "")));
+      const relevantIssues = rawStaticResult.issues.filter((i) => {
+        const fileNorm = i.file.replace(/\\/g, "/").replace(/^\.\//, "");
+        const relatedNorm = i.relatedFile?.replace(/\\/g, "/").replace(/^\.\//, "");
+        return changedFilePaths.has(fileNorm) || (Boolean(relatedNorm) && changedFilePaths.has(relatedNorm!));
+      });
       const relevantPassed = !relevantIssues.some((i) => i.severity === "FAIL");
       const staticResult = {
         ...rawStaticResult,
@@ -170,20 +189,21 @@ export class ValidationDetector {
       const frontendChanges = changes.filter((c) => {
         if (isDelete(c)) return false;
         const norm = c.path.replace(/\\/g, "/").toLowerCase();
+        const isScriptedFrontendEntry = /(?:^|\/)(?:app|pages|components|routes?)(?:\/|$)/.test(norm) &&
+          /(?:page|layout|route|navigation|sidebar|header|component)\.(?:ts|js)$/.test(norm);
         return (
           norm.endsWith(".tsx") ||
           norm.endsWith(".jsx") ||
           norm.endsWith(".css") ||
           norm.endsWith(".scss") ||
           norm.endsWith(".html") ||
-          (norm.endsWith(".ts") && !norm.endsWith(".d.ts") && !norm.includes(".test.") && !norm.includes(".spec.")) ||
-          (norm.endsWith(".js") && !norm.includes(".test.") && !norm.includes(".spec."))
+          isScriptedFrontendEntry
         );
       });
 
       const hasFrontendChanges = frontendChanges.length > 0;
       const isUiTaskFromContract = contract
-        ? contract.environment === "REACT_TS" || contract.taskType === "NEW_FEATURE"
+        ? (contract.environment === "REACT_TS" || contract.taskType === "NEW_FEATURE") && hasFrontendChanges
         : hasFrontendChanges;
 
       let activeTargetSatisfied = true;
@@ -223,14 +243,25 @@ export class ValidationDetector {
               return false;
             };
 
-            const hasActiveModification = frontendChanges.some(isChangeActive);
+            const cleanupChanges = frontendChanges.filter((change) =>
+              isTrustedDependencyCleanup(change, contract)
+            );
+            const reachabilityRequiredChanges = frontendChanges.filter((change) =>
+              !isTrustedDependencyCleanup(change, contract)
+            );
+            const allChangesSatisfyIntent = reachabilityRequiredChanges.length === 0 ||
+              reachabilityRequiredChanges.some(isChangeActive);
 
-            if (!hasActiveModification) {
+            if (!allChangesSatisfyIntent) {
               activeTargetSatisfied = false;
               activeTargetDetails = "Modified UI target is not reachable from any active frontend entry point.";
             } else {
               activeTargetSatisfied = true;
-              activeTargetDetails = "Active target reachability verified";
+              activeTargetDetails = cleanupChanges.length === frontendChanges.length
+                ? "Trusted dependency cleanup obligation verified"
+                : cleanupChanges.length > 0
+                ? "Active target reachability and trusted dependency cleanup obligation verified"
+                : "Active target reachability verified";
             }
           }
         }

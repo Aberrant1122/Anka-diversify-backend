@@ -1,3 +1,5 @@
+import fs from "fs";
+import { withAuthoritySnapshot } from "./AuthorityWorktree";
 import { normalizeRepoPath } from "./SemanticContextResolver";
 import {
   isAuthenticRepositoryObservation,
@@ -29,6 +31,7 @@ export type RepositoryEvidenceProvenance =
   | "ARCHITECTURE_DETECTOR";
 
 export interface RepositoryEvidence {
+  readonly repositoryRevision?: string;
   id: string; // Backend-generated unique ID (e.g. "evi_1", "evi_2")
   kind: RepositoryEvidenceKind;
   filePath: string;
@@ -67,12 +70,16 @@ export class RepositoryEvidenceStore {
   private counter = 0;
   private readonly repositoryId: string;
   private readonly defaultWorkspace?: string;
+  private readonly canonicalWorkspaceRoot?: string;
   private readonly authorityEligibleEvidence = new WeakSet<object>();
 
   constructor(repositoryId: string = "default-repo", defaultWorkspace?: string) {
     this.repositoryId = repositoryId;
     this.defaultWorkspace = defaultWorkspace;
+    if (defaultWorkspace && fs.existsSync(defaultWorkspace)) this.canonicalWorkspaceRoot = fs.realpathSync(defaultWorkspace);
   }
+
+  public getCanonicalWorkspaceRoot(): string | undefined { return this.canonicalWorkspaceRoot; }
 
   public getRepositoryId(): string {
     return this.repositoryId;
@@ -83,7 +90,7 @@ export class RepositoryEvidenceStore {
   }
 
   /**
-   * Generates a deterministic, collision-free backend ID.
+   * Generates a store-local unique backend ID; IDs are references, not secrets.
    */
   private generateId(): string {
     this.counter++;
@@ -112,8 +119,8 @@ export class RepositoryEvidenceStore {
   }
 
   public observeRepository(params: AddEvidenceParams): RepositoryEvidence {
-    if (!this.defaultWorkspace) return this.addEvidence(params);
-    const receipt = RepositoryObservationTools.observe(this.repositoryId, this.defaultWorkspace, params);
+    if (!this.defaultWorkspace || !this.canonicalWorkspaceRoot) return this.addEvidence(params);
+    const receipt = withAuthoritySnapshot(this.defaultWorkspace, () => RepositoryObservationTools.observe(this.repositoryId, this.defaultWorkspace!, params));
     return receipt ? this.recordObservation(receipt) ?? this.addEvidence(params) : this.addEvidence(params);
   }
 
@@ -132,30 +139,30 @@ export class RepositoryEvidenceStore {
       metadata: details.metadata,
       workspace: receipt.workspaceRoot,
       repositoryId: receipt.repositoryId,
-    }, true);
+    }, true, details.repositoryRevision);
   }
 
   public isAuthorityEligible(evidence: RepositoryEvidence): boolean {
     return this.authorityEligibleEvidence.has(evidence) && this.idMap.get(evidence.id) === evidence;
   }
 
-  private insertEvidence(params: AddEvidenceParams, authorityEligible: boolean): RepositoryEvidence {
+  private insertEvidence(params: AddEvidenceParams, authorityEligible: boolean, repositoryRevision?: string): RepositoryEvidence {
     const normFile = normalizeRepoPath(params.filePath);
     const normSource = params.sourceFile ? normalizeRepoPath(params.sourceFile) : undefined;
     const repoId = params.repositoryId || this.repositoryId;
     const ws = params.workspace || this.defaultWorkspace;
 
-    const signature = this.buildSignature(params);
+    const signature = `${this.buildSignature(params)}:${authorityEligible ? repositoryRevision : "advisory"}`;
     const existingId = this.signatureMap.get(signature);
     if (existingId) {
       const existing = this.idMap.get(existingId)!;
-      if (authorityEligible) this.authorityEligibleEvidence.add(existing);
       return existing;
     }
 
     const id = this.generateId();
     const evidence: RepositoryEvidence = Object.freeze({
       id,
+      repositoryRevision,
       kind: params.kind,
       filePath: normFile,
       symbol: params.symbol,

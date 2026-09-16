@@ -1,3 +1,6 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { CodeGenerator } from "../generation/CodeGenerator";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
 import { EvidenceBoundWriteSetResolver, PlannedChange } from "../contracts/EvidenceBoundWriteSetResolver";
@@ -488,11 +491,15 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
   // 5. Exact Repair Test (Evidence Store + Resolver + CodeGen + Scope Enforcer)
   // ─────────────────────────────────────────────────────────────
   test("9. Exact repair flow: real source diagnostic normalized -> ingested -> cited -> authorized -> generated within scope", async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "pass4-diagnostic-"));
+    fs.mkdirSync(path.join(workspace, "src"));
+    fs.writeFileSync(path.join(workspace, "src/app.ts"), "const broken = 1");
     // 1. Diagnostic normalized
     const rawCompilerError = "src/app.ts(6,10): error TS1005: ';' expected.";
     const normalized = DiagnosticNormalizer.normalize(rawCompilerError, {
       repositoryId: "test-repair-proj",
       checkpointId: "chk-baseline",
+      workspaceRoot: workspace,
     });
 
     expect(normalized).toHaveLength(1);
@@ -502,7 +509,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
     expect(normalized[0].code).toBe("TS1005");
 
     // 2. DIAGNOSTIC evidence exists in RepositoryEvidenceStore before manifest planning
-    const store = new RepositoryEvidenceStore("test-repair-proj");
+    const store = new RepositoryEvidenceStore("test-repair-proj", workspace);
     const addedEvidence = DiagnosticNormalizer.ingestSourceDiagnostics(normalized, store, "chk-baseline");
 
     expect(addedEvidence).toHaveLength(1);
@@ -654,6 +661,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
 
     expect(scopeCheck.valid).toBe(true);
     expect(scopeCheck.errors).toHaveLength(0);
+    fs.rmSync(workspace, { recursive: true, force: true });
   });
 
   // ─────────────────────────────────────────────────────────────

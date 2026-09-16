@@ -249,7 +249,8 @@ MINIMALITY & SCOPE GUIDELINES
 3. Do NOT modify global entry points (app/layout.*, global configuration, package.json, global providers) unless the requested change genuinely requires them.
 4. Whenever you create a new stylesheet (*.css / *.module.css), ensure the component using it (or app/layout.tsx) declares the stylesheet in its dependencies and imports it. Never leave created stylesheets orphaned.
 5. Check REPOSITORY DESIGN SYSTEM context. Prefer reusing existing components (Card, Button, Sidebar, Header, Badge, etc.) when compatible with the requested feature rather than inventing duplicate primitives.
-6. CITE EVIDENCE: For every file, you MUST cite 1 or more evidence IDs from the provided VERIFIED REPOSITORY EVIDENCE in "evidenceIds": ["evi_..."]. For MODIFY, cite existence and structural/symbol/route relation evidence. For CREATE, cite integration evidence (e.g. the component/route that will integrate it).
+6. AUTHORIZATION BOUNDARY: You propose planning intent only. Do not emit evidenceIds or any other authorization token; the backend independently binds current-revision deterministic evidence.
+7. REPOSITORY CREATE SCOPE: Propose action "create" only when the original user request explicitly names the exact new repository path. When no exact new path was requested, implement the feature by modifying the smallest coherent set of verified existing files. Integration metadata alone does not authorize a new path.
 
 Respond ONLY with valid JSON:
 {
@@ -258,7 +259,6 @@ Respond ONLY with valid JSON:
       "path": "relative/path/from/project/root.ts",
       "action": "create" | "modify" | "delete",
       "dependencies": ["array", "of", "import", "paths"],
-      "evidenceIds": ["evi_..."],
       "description": "Human-readable purpose of this file"
     }
   ],

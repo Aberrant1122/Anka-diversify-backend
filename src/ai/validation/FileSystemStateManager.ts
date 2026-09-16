@@ -1,5 +1,7 @@
+import { canonicalRepositoryPath } from "../repository/RepositoryBoundary";
 import fs from "fs";
 import path from "path";
+import { MutationTransaction } from "../runtime/MutationTransaction";
 import { AgentFileChange, FileEditingPrimitive } from "../shared/types";
 import { CapabilityAction, CapabilityDecision, CapabilityGuard } from "../runtime/CapabilityGuard";
 import {
@@ -112,21 +114,8 @@ export function assertSafeWorktreePath(targetPath: string, worktreeRoot: string)
 }
 
 function canonicalMutationPath(targetPath: string, worktreeRoot: string): string {
-  const resolvedRoot = path.resolve(worktreeRoot);
-  const canonicalRoot = fs.realpathSync(resolvedRoot);
-  const resolvedTarget = path.resolve(resolvedRoot, targetPath);
-  let existingAncestor = resolvedTarget;
-  while (!fs.existsSync(existingAncestor)) {
-    const parent = path.dirname(existingAncestor);
-    if (parent === existingAncestor) throw new RepairInfrastructureError("Unable to resolve mutation target.");
-    existingAncestor = parent;
-  }
-  const canonicalAncestor = fs.realpathSync(existingAncestor);
-  const canonicalTarget = path.resolve(canonicalAncestor, path.relative(existingAncestor, resolvedTarget));
-  const relative = path.relative(canonicalRoot, canonicalTarget);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new RepairInfrastructureError(`Path safety violation: mutation target "${targetPath}" resolves outside the worktree.`);
-  }
+  const canonicalTarget = canonicalRepositoryPath(worktreeRoot, targetPath, true);
+  if (!canonicalTarget) throw new RepairInfrastructureError(`Path safety violation: mutation target "${targetPath}" resolves outside the worktree.`);
   return canonicalTarget;
 }
 
@@ -138,6 +127,7 @@ export class FileSystemStateManager {
   constructor(
     private readonly capabilityGuard: CapabilityGuard = CapabilityGuard.denyAll(),
     private readonly capabilityScopeId: string = "UNAUTHORIZED",
+    public readonly mutationTransaction?: MutationTransaction,
   ) {}
 
   /**
@@ -147,11 +137,10 @@ export class FileSystemStateManager {
   async snapshot(changes: AgentFileChange[], localPath: string | null | undefined): Promise<void> {
     if (!localPath) return;
 
-    this.authorizeChanges(changes, localPath);
-
     for (const change of changes) {
       if (!change.path) continue;
       const normalizedPath = change.path.replace(/\\/g, "/");
+      if (this.mutationTransaction) this.authorizedMutationPaths.add(normalizedPath);
       if (this.originalState.has(normalizedPath)) continue;
 
       const absPath = assertSafeWorktreePath(change.path, localPath);
@@ -177,6 +166,13 @@ export class FileSystemStateManager {
       throw new RepairInfrastructureError("Cannot apply file changes: localPath is null or undefined.");
     }
 
+    if (this.mutationTransaction) {
+      this.mutationTransaction.assertPrimaryRoot(localPath);
+      await this.snapshot(changes, localPath);
+      this.mutationTransaction.applyChanges(changes);
+      return;
+    }
+
     try {
       const stat = await fs.promises.stat(localPath);
       if (!stat.isDirectory()) {
@@ -194,6 +190,13 @@ export class FileSystemStateManager {
   /** Guarded primitive entry point. It has no authority to validate or verify a task. */
   async applyPrimitives(primitives: readonly FileEditingPrimitive[], localPath: string | null | undefined): Promise<void> {
     if (!localPath) throw new RepairInfrastructureError("Cannot apply editing primitives: localPath is null or undefined.");
+    if (this.mutationTransaction) {
+      this.mutationTransaction.assertPrimaryRoot(localPath);
+      await this.snapshot(primitives.map(primitive => ({ path: primitive.path, content: "", description: primitive.description,
+        action: primitiveAction(primitive) === "FILE_CREATE" ? "create" : primitiveAction(primitive) === "FILE_DELETE" ? "delete" : "modify", editPrimitive: primitive })), localPath);
+      this.mutationTransaction.applyPrimitives(primitives);
+      return;
+    }
     await this.applyPrimitiveBatch(primitives, localPath);
   }
 
@@ -220,6 +223,7 @@ export class FileSystemStateManager {
     const initial = new Map<string, Buffer | null>();
     const virtual = new Map<string, Buffer | null>();
     const finalByPath = new Map<string, Buffer | null>();
+    const primitiveByPath = new Map<string, FileEditingPrimitive>();
     const materialized = primitives.map((primitive, index) => {
       const absolutePath = canonicalMutationPath(primitive.path, localPath);
       if (!initial.has(absolutePath)) {
@@ -230,6 +234,7 @@ export class FileSystemStateManager {
       const result = materializeEditingPrimitive(primitive, virtual.get(absolutePath) ?? null);
       virtual.set(absolutePath, result.after);
       finalByPath.set(absolutePath, result.after);
+      primitiveByPath.set(absolutePath, primitive);
       const expected = expectedChanges?.[index];
       if (expected) {
         const actualContent = result.after?.toString("utf8") ?? "";
@@ -241,21 +246,31 @@ export class FileSystemStateManager {
       return result;
     });
 
+    if (finalByPath.size && !this.capabilityGuard.beginMutation()) {
+      throw new CapabilityAuthorizationError("CAPABILITY_POLICY_MISSING", "Worktree revision changed before mutation; reacquire authority.");
+    }
     try {
       for (const [absolutePath, after] of finalByPath) {
+        const primitive = primitiveByPath.get(absolutePath)!;
+        const assertDestinationUnchanged = () => {
+          if (canonicalMutationPath(primitive.path, localPath) !== absolutePath) {
+            throw new RepairInfrastructureError("Mutation destination changed during transaction preparation.");
+          }
+        };
+        assertDestinationUnchanged();
         const observed = readCurrentBytes(absolutePath);
         const expectedBefore = initial.get(absolutePath) ?? null;
         const unchanged = observed === null
           ? expectedBefore === null
           : expectedBefore !== null && fingerprintBytes(observed) === fingerprintBytes(expectedBefore);
         if (!unchanged) {
-          const primitive = primitives.find((item) => canonicalMutationPath(item.path, localPath) === absolutePath)!;
           throw new EditingConflictError("STALE_SOURCE", "Target bytes changed during primitive materialization.", primitive.path);
         }
         if (after === null) {
           await fs.promises.rm(absolutePath, { force: false });
         } else {
           await fs.promises.mkdir(path.dirname(absolutePath), { recursive: true });
+          assertDestinationUnchanged();
           await fs.promises.writeFile(absolutePath, after);
         }
       }
@@ -276,6 +291,11 @@ export class FileSystemStateManager {
    * Restores all snapshotted files to their exact pre-repair state.
    */
   async rollback(localPath: string | null | undefined): Promise<void> {
+    if (this.mutationTransaction) {
+      if (!localPath) throw new RepairInfrastructureError("Transaction rollback requires its bound primary workspace.");
+      this.mutationTransaction.rollbackPrimary(localPath);
+      return;
+    }
     if (!localPath || this.originalState.size === 0) return;
 
     for (const [relativePath, originalContent] of this.originalState.entries()) {
@@ -293,7 +313,7 @@ export class FileSystemStateManager {
           await fs.promises.writeFile(finalAbs, originalContent);
         }
       } catch (err) {
-        console.error(`[FileSystemStateManager] Failed to rollback file "${relativePath}":`, err);
+        throw new RepairInfrastructureError(`Failed to rollback file "${relativePath}".`, err);
       }
     }
   }
@@ -302,11 +322,16 @@ export class FileSystemStateManager {
    * Commit transaction: clears the snapshot state map.
    */
   commit(): void {
+    this.mutationTransaction?.complete();
     this.originalState.clear();
     this.authorizedMutationPaths.clear();
   }
 
   getExecutedMutations(): readonly ExecutedFileMutation[] {
+    if (this.mutationTransaction) return this.mutationTransaction.changes.map(change => ({
+      path: change.path, action: change.action === "create" ? "FILE_CREATE" : change.action === "delete" ? "FILE_DELETE" : "FILE_MODIFY",
+      content: change.content, description: change.description,
+    }));
     return Object.freeze([...this.executedMutations]);
   }
 
@@ -330,6 +355,7 @@ export class FileSystemStateManager {
   }
 
   private authorizePrimitives(primitives: readonly FileEditingPrimitive[], localPath: string): CapabilityAction[] {
+    this.mutationTransaction?.assertPrimaryRoot(localPath);
     const actions: CapabilityAction[] = [];
     for (const primitive of primitives) {
       assertSafeWorktreePath(primitive.path, localPath);

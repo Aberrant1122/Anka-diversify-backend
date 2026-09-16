@@ -95,10 +95,12 @@ describe("Strict Implementation Pass 3B — Diagnostic Grounding + Repository St
   // Test 4: Planner-cited diagnostic can authorize repair
   test("4. Valid source diagnostic cited by planner authorizes repair MODIFY", () => {
     const rawError = "app/page.tsx(17,5): error TS2322: Type 'string' is not assignable to type 'number'.";
-    const diags = DiagnosticNormalizer.normalize(rawError, { checkpointId: "stage-1" });
+    fs.mkdirSync(path.join(tempDir, "app"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, "app/page.tsx"), "export const Page = () => null;");
+    const diags = DiagnosticNormalizer.normalize(rawError, { checkpointId: "stage-1", workspaceRoot: tempDir });
 
-    const store = new RepositoryEvidenceStore("repo-1");
-    const fileEvidence = store.addEvidence({
+    const store = new RepositoryEvidenceStore("repo-1", tempDir);
+    const fileEvidence = store.observeRepository({
       kind: "FILE",
       filePath: "app/page.tsx",
       provenance: "REPO_READ",
@@ -164,10 +166,12 @@ describe("Strict Implementation Pass 3B — Diagnostic Grounding + Repository St
   // Test 5: Stale diagnostic rejected after repository state changes
   test("5. Stale diagnostic from prior stage cannot authorize modification in next stage", () => {
     const rawError = "app/page.tsx(17,5): error TS2322: Type 'string' is not assignable to type 'number'.";
-    const diags = DiagnosticNormalizer.normalize(rawError, { checkpointId: "stage-1" });
+    fs.mkdirSync(path.join(tempDir, "app"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, "app/page.tsx"), "export const Page = () => null;");
+    const diags = DiagnosticNormalizer.normalize(rawError, { checkpointId: "stage-1", workspaceRoot: tempDir });
 
-    const store = new RepositoryEvidenceStore("repo-1");
-    const fileEvidence = store.addEvidence({
+    const store = new RepositoryEvidenceStore("repo-1", tempDir);
+    const fileEvidence = store.observeRepository({
       kind: "FILE",
       filePath: "app/page.tsx",
       provenance: "REPO_READ",

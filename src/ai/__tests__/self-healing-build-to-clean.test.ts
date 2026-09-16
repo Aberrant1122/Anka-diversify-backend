@@ -18,6 +18,11 @@ import { ValidationRunner } from "../validation/ValidationRunner";
 import * as sharedUtils from "../shared/utils";
 import { AgentFileChange } from "../shared/types";
 import { FileManifest } from "../../types";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
+import { MutationTransaction } from "../runtime/MutationTransaction";
+import { reconcileExecutionManifest } from "../runtime/ExecutionManifest";
+import { LLMGateway } from "../gateway/LLMGateway";
+import { fingerprintBytes } from "../editing/EditingPrimitives";
 
 
 function createScopedFsManager(
@@ -134,294 +139,61 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  test("4. GOLDEN SEQUENCE: 7 sequential distinct repairable errors exceed previous 5-repair ceiling and succeed", async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
-    const srcDir = path.join(tempDir, "src");
-    fs.mkdirSync(srcDir, { recursive: true });
-    fs.writeFileSync(path.join(srcDir, "calculator.ts"), "export const v = 1;", "utf8");
-
-    const initialChanges: AgentFileChange[] = [
-      { path: "src/calculator.ts", content: "export const v = 1;", action: "modify", description: "Calculator variable" },
-    ];
-
-    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
-    await fsManager.snapshot(initialChanges, tempDir);
-
-    // Simulate 6 distinct failing builds followed by a clean build on Build 7:
-    // Build 1: TS2322 (Type mismatch)
-    // Build 2: CLIENT_DIRECTIVE_REQUIRED (Next.js client directive)
-    // Build 3: CSS_PARSE (CSS invalid selector)
-    // Build 4: TS2307 (Cannot find module)
-    // Build 5: TS2345 (Argument type mismatch)
-    // Build 6: JSX_ERROR (JSX syntax error)
-    // Build 7: Clean build (PASS)
-    const failureOutputs = [
-      "src/calculator.ts(10,5): error TS2322: Type 'number' is not assignable to type 'string'.",
-      "src/calculator.tsx(5,1): error CLIENT_DIRECTIVE_REQUIRED: useState requires 'use client' directive.",
-      "src/styles.css(12,1): error CSS_PARSE: Invalid pseudo-class selector.",
-      "src/calculator.ts(2,1): error TS2304: Cannot find name 'computePercentage'.",
-      "src/calculator.ts(15,8): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.",
-      "src/calculator.tsx(20,3): error TS17004: Cannot use JSX unless the '--jsx' flag is provided.",
-    ];
-
-    let callCount = 0;
-    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
-      callCount++;
-      if (callCount <= failureOutputs.length) {
-        return {
-          success: false,
-          errors: failureOutputs[callCount - 1],
-        };
-      }
-      return {
-        success: true,
-        errors: "",
-      };
+  async function runProgressFixture(initialCount: number, neutral = false) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "anka-monotonic-progress-"));
+    const file = "src/calculator.ts";
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, file), "0");
+    const changes: AgentFileChange[] = [{ path: file, action: "modify", content: String(initialCount), description: "initial" }];
+    const scope = mutationFixtureScope(root, changes);
+    const manifest = reconcileExecutionManifest(scope, null);
+    const tx = MutationTransaction.create(scope, manifest);
+    const manager = new FileSystemStateManager(CapabilityGuard.forTransaction(tx, tx.primary), tx.id, tx);
+    const builds = jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async (_changes, workspace) => {
+      const count = Number(fs.readFileSync(path.join(workspace!, file), "utf8"));
+      const remaining = neutral && count ? 1 : count;
+      return { success: !remaining, errors: Array.from({ length: remaining }, (_, index) =>
+        file + "(1,1): error TS2304: Cannot find name missing_" + index + ".").join("\n") };
     });
+    const model = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockImplementation(async () => {
+      const before = fs.readFileSync(path.join(root, file), "utf8");
+      return { content: { operations: [{ op: "replace_exact", path: file, expectedFileHash: fingerprintBytes(before),
+        oldText: before, newText: String(Number(before) + (neutral ? 1 : -1)) }] } } as Awaited<ReturnType<LLMGateway["callStructured"]>>;
+    });
+    try {
+      const result = await SelfHealingEngine.runSelfHealingLoop(changes, root, ["fixture-check"], "system", "Modify src/calculator.ts",
+        manager, "fixture-project", undefined, manifest);
+      return { result, builds: builds.mock.calls.length, modelCalls: model.mock.calls.length,
+        receipts: tx.transitions.length, content: fs.readFileSync(path.join(root, file), "utf8") };
+    } finally {
+      tx.abort();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
 
-    let repairIdx = 0;
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockImplementation(async () => {
-            repairIdx++;
-            return {
-              choices: [
-                {
-                  finish_reason: "stop",
-                  message: {
-                    content: JSON.stringify({
-                      repaired: true,
-                      patchExplanation: `Resolve error step ${repairIdx}`,
-                      changes: [
-                        {
-                          path: "src/calculator.ts",
-                          action: "modify",
-                          description: `Resolve error step ${repairIdx}`,
-                          edits: [
-                            {
-                              oldText: `export const v = ${repairIdx};`,
-                              newText: `export const v = ${repairIdx + 1};`,
-                            },
-                          ],
-                        },
-                      ],
-                    }),
-                  },
-                },
-              ],
-            };
-          }),
-        },
-      },
-    };
-
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    const res = await SelfHealingEngine.runSelfHealingLoop(
-      initialChanges,
-      tempDir,
-      ["npm run build"],
-      "system prompt",
-      "fix all sequential errors",
-      fsManager,
-      undefined,
-      undefined,
-      dummyManifest,
-      { pipeline: "STANDALONE", targetPaths: ["src/calculator.ts"] } as any,
-    );
-
-    // Verified: Engine continued past attempt 5 and succeeded on attempt 7!
-    expect(res.success).toBe(true);
-    expect(res.attempts).toBe(7);
-    expect(callCount).toBe(7);
-    expect(res.validationDetails?.finalStatus).toBe("BUILD_CLEAN");
-    expect(res.validationDetails?.modelRepairAttempts).toBe(6);
-    expect(res.validationDetails?.patchesApplied).toBe(6);
-    expect(res.validationDetails?.distinctFailuresResolvedCount).toBeGreaterThanOrEqual(5);
-    expect(res.validationDetails?.resolvedFailureSequence).toEqual(
-      expect.arrayContaining(["TS2322", "CLIENT_DIRECTIVE_REQUIRED", "CSS_PARSE", "TS2304", "TS2345", "TS17004"])
-    );
+  test("4. GOLDEN SEQUENCE: seven monotonic repairs exceed the previous five-repair ceiling", async () => {
+    const { result, modelCalls, builds, receipts, content } = await runProgressFixture(7);
+    expect(result).toMatchObject({ success: true, attempts: 7, patchesAppliedCount: 7, repositoryClean: true });
+    expect(modelCalls).toBe(7);
+    expect(builds).toBe(9); // Baseline, initial candidate, and seven disposable validations.
+    expect(receipts).toBe(8);
+    expect(content).toBe("0");
   });
 
-  test("5. Decreasing compiler error count (3 -> 2 -> 1 -> PASS) is valid progress and allows continuation", async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
-    const srcDir = path.join(tempDir, "src");
-    fs.mkdirSync(srcDir, { recursive: true });
-    fs.writeFileSync(path.join(srcDir, "calculator.ts"), "export const v = 1;", "utf8");
-
-    const initialChanges: AgentFileChange[] = [
-      { path: "src/calculator.ts", content: "export const v = 1;", action: "modify", description: "Calculator variable" },
-    ];
-
-    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
-    await fsManager.snapshot(initialChanges, tempDir);
-
-    let callCount = 0;
-    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
-      callCount++;
-      if (callCount === 1) {
-        return {
-          success: false,
-          errors: "src/calculator.ts(1,1): error TS2304: Cannot find name 'a'.\nsrc/calculator.ts(2,1): error TS2304: Cannot find name 'b'.\nsrc/calculator.ts(3,1): error TS2304: Cannot find name 'c'.",
-        };
-      }
-      if (callCount === 2) {
-        return {
-          success: false,
-          errors: "src/calculator.ts(2,1): error TS2304: Cannot find name 'b'.\nsrc/calculator.ts(3,1): error TS2304: Cannot find name 'c'.",
-        };
-      }
-      if (callCount === 3) {
-        return {
-          success: false,
-          errors: "src/calculator.ts(3,1): error TS2304: Cannot find name 'c'.",
-        };
-      }
-      return {
-        success: true,
-        errors: "",
-      };
-    });
-
-    let repairIdx = 0;
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockImplementation(async () => {
-            repairIdx++;
-            return {
-              choices: [
-                {
-                  finish_reason: "stop",
-                  message: {
-                    content: JSON.stringify({
-                      repaired: true,
-                      patchExplanation: `Resolve error ${repairIdx}`,
-                      changes: [
-                        {
-                          path: "src/calculator.ts",
-                          action: "modify",
-                          description: `Resolve error ${repairIdx}`,
-                          edits: [
-                            {
-                              oldText: `export const v = ${repairIdx};`,
-                              newText: `export const v = ${repairIdx + 1};`,
-                            },
-                          ],
-                        },
-                      ],
-                    }),
-                  },
-                },
-              ],
-            };
-          }),
-        },
-      },
-    };
-
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    const res = await SelfHealingEngine.runSelfHealingLoop(
-      initialChanges,
-      tempDir,
-      ["npm run build"],
-      "system prompt",
-      "fix all errors",
-      fsManager,
-      undefined,
-      undefined,
-      dummyManifest,
-      { pipeline: "STANDALONE", targetPaths: ["src/calculator.ts"] } as any,
-    );
-
-    expect(res.success).toBe(true);
-    expect(res.attempts).toBe(4);
-    expect(callCount).toBe(4);
-    expect(res.validationDetails?.finalStatus).toBe("BUILD_CLEAN");
-
-    fs.rmSync(tempDir, { recursive: true, force: true });
+  test("5. Decreasing compiler error count (3 -> 2 -> 1 -> PASS) permits promotion", async () => {
+    const { result, modelCalls, builds, receipts } = await runProgressFixture(3);
+    expect(result).toMatchObject({ success: true, patchesAppliedCount: 3 });
+    expect(modelCalls).toBe(3);
+    expect(builds).toBe(5);
+    expect(receipts).toBe(4);
   });
 
-  test("6. Identical failure persisting after 2 applied repairs halts with NO_REPAIR_PROGRESS", async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-test-sh-"));
-    const srcDir = path.join(tempDir, "src");
-    fs.mkdirSync(srcDir, { recursive: true });
-    fs.writeFileSync(path.join(srcDir, "calculator.ts"), "export const v = 1;", "utf8");
-
-    const initialChanges: AgentFileChange[] = [
-      { path: "src/calculator.ts", content: "export const v = 1;", action: "modify", description: "Calculator variable" },
-    ];
-
-    const fsManager = createScopedFsManager(tempDir, "sh-stage", [{ path: "src/calculator.ts", action: "FILE_MODIFY" }]);
-    await fsManager.snapshot(initialChanges, tempDir);
-
-    let callCount = 0;
-    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
-      callCount++;
-      return {
-        success: false,
-        errors: "src/calculator.ts(1, 1): error TS2322: Type 'number' is not assignable to type 'string'.",
-      };
-    });
-
-    let proposalCount = 0;
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockImplementation(async () => {
-            proposalCount++;
-            return {
-              choices: [
-                {
-                  finish_reason: "stop",
-                  message: {
-                    content: JSON.stringify({
-                      repaired: true,
-                      patchExplanation: `Attempt fix ${proposalCount}`,
-                      changes: [
-                        {
-                          path: "src/calculator.ts",
-                          action: "modify",
-                          description: `Attempt fix ${proposalCount}`,
-                          edits: [
-                            {
-                              oldText: `export const v = ${proposalCount};`,
-                              newText: `export const v = ${proposalCount + 1};`,
-                            },
-                          ],
-                        },
-                      ],
-                    }),
-                  },
-                },
-              ],
-            };
-          }),
-        },
-      },
-    };
-
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    const res = await SelfHealingEngine.runSelfHealingLoop(
-      initialChanges,
-      tempDir,
-      ["npm run build"],
-      "system prompt",
-      "fix error",
-      fsManager,
-      undefined,
-      undefined,
-      dummyManifest,
-      { pipeline: "STANDALONE", targetPaths: ["src/calculator.ts"] } as any,
-    );
-
-    expect(res.success).toBe(false);
-    expect(res.errorType).toBe("NO_REPAIR_PROGRESS");
-    expect(res.validationDetails?.finalStatus).toBe("FAILED");
-    expect(callCount).toBeLessThanOrEqual(3);
+  test("6. Identical failure after two neutral repairs halts with REPAIR_UNRESOLVED", async () => {
+    const { result, modelCalls, builds, receipts } = await runProgressFixture(1, true);
+    expect(result).toMatchObject({ success: false, errorType: "REPAIR_UNRESOLVED", attempts: 2 });
+    expect(modelCalls).toBe(2);
+    expect(builds).toBe(4);
+    expect(receipts).toBe(3);
   });
 
   test("7. Repeated identical repair proposal stops immediately with REPEATED_REPAIR_PROPOSAL", async () => {
@@ -558,7 +330,8 @@ describe("Step 1, 2 & 3 — BUILD-TO-CLEAN SelfHealing with Golden Sequence & Te
         dummyManifest,
         { pipeline: "REPOSITORY", targetPaths: ["src/calculator.ts"] } as any,
       )
-    ).rejects.toThrow(/unauthorized path|LLMSchemaInvalidError|SCOPE_VIOLATION/);
+    ).resolves.toMatchObject({ success: false, errorType: "REPAIR_UNRESOLVED" });
+    expect(fs.existsSync(path.join(tempDir, "src/undeclared-helper.ts"))).toBe(false);
 
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
