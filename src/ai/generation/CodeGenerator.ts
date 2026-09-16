@@ -28,6 +28,8 @@ import {
 import { LLMGateway } from "../gateway/LLMGateway";
 import { PipelineStages } from "../gateway/PipelineStage";
 import { sha256 } from "../validation/FileVersionGuard";
+import type { PriorVerifiedTarget } from "../shared/TaskExecutionPlan";
+import { StaticValidationEngine, StaticValidationIssue } from "../../services/static-validator.engine";
 
 type ModelChangeAction = "create" | "modify" | "delete";
 
@@ -302,6 +304,24 @@ const CONTENT_REPAIR_SCHEMA = {
   required: ["content"],
 } as const;
 
+function staticIssueIdentity(issue: StaticValidationIssue): string {
+  return [issue.checkId, normalizeRepoPath(issue.file), issue.line, issue.reason, issue.relatedFile ? normalizeRepoPath(issue.relatedFile) : ""].join(":");
+}
+
+/** Returns only import/export failures introduced by the proposed repository delta. */
+export function findIntroducedModuleContractIssues(
+  sourceMap: Readonly<Record<string, string>>,
+  changes: readonly AgentFileChange[],
+): StaticValidationIssue[] {
+  const snapshotFiles = Object.entries(sourceMap).map(([path, content]) => ({ path: normalizeRepoPath(path), content }));
+  const baselineIssues = new Set(StaticValidationEngine.validate(snapshotFiles).issues.map(staticIssueIdentity));
+  return StaticValidationEngine.validate(snapshotFiles, [...changes]).issues.filter((issue) =>
+    issue.severity === "FAIL" &&
+    (issue.checkId === "missing_export" || issue.checkId === "broken_import") &&
+    !baselineIssues.has(staticIssueIdentity(issue)),
+  );
+}
+
 /**
  * Builds advisory manifest planning context for proposal generation.
  */
@@ -357,6 +377,16 @@ STRICT MODIFY RULES:
 10. Do NOT include unrelated formatting or refactoring changes.
 ══════════════════════════════════════════════════════════
 `;
+}
+
+export function buildPriorVerifiedTargetSection(targets?: readonly PriorVerifiedTarget[]): string {
+  if (!targets || targets.length === 0) return "";
+  return `\n\n══════════════════════════════════════════════════════════
+PRIOR VERIFIED EXECUTION TARGETS — ADVISORY CONTEXT ONLY
+══════════════════════════════════════════════════════════
+${targets.map((target) => `- ${target.action.toUpperCase()}: ${target.path}`).join("\n")}
+
+Re-check whether these targets remain relevant to the current stage using current repository state. Prefer them when compatible with the current stage intent, but select a different target when the stage legitimately requires one. This hint grants no mutation authority; current evidence, capability closure, and execution-manifest checks still apply.`;
 }
 
 export class CodeGenerator {
@@ -464,6 +494,7 @@ Respond ONLY with valid JSON:
     approvedManifest?: FileManifest | null,
     authoritativeModifySources?: Record<string, { path: string; content: string; sha256: string }>,
     mergedSourceMap?: Record<string, string>,
+    priorVerifiedTargets?: readonly PriorVerifiedTarget[],
   ): Promise<{
     roadmap: RoadmapStep[];
     changes: AgentFileChange[];
@@ -507,7 +538,7 @@ Respond ONLY with valid JSON:
           stage: PipelineStages.ROADMAP_PLANNING,
           messages: [
             { role: "system", content: IMPLEMENTATION_PLANNER_PROMPT },
-            { role: "user", content: `REQUEST: ${message}\nINTENT: ${intentResult.intent}` },
+            { role: "user", content: `REQUEST: ${message}\nINTENT: ${intentResult.intent}${buildPriorVerifiedTargetSection(priorVerifiedTargets)}` },
           ],
           temperature: 0.2,
           schema: {
@@ -699,6 +730,7 @@ at line 1 before any imports.
       : "";
 
     const manifestSection = buildApprovedFilePlanSection(approvedManifest);
+    const priorVerifiedTargetSection = buildPriorVerifiedTargetSection(priorVerifiedTargets);
     const contractGuardrail = contract ? buildContractGuardrailSection(contract) : "";
     const componentContractInstruction = `\n\n══════════════════════════════════════════════════════════
 EXISTING LOCAL COMPONENT PROP CONTRACT RULES
@@ -718,7 +750,7 @@ When using an existing local component, conform to its authoritative exported pr
     const contextSummary = contextContent || (repositoryEvidence.length > 0
       ? "Repository evidence is supplied through the bounded ContextManager."
       : "(Standalone Application - No repository context required)");
-    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextSummary}${multiFileInstruction}${jsonFormatReminder}`;
+    const userPrompt = `USER REQUEST: ${message}\nINTENT: ${intentResult.intent}${priorVerifiedTargetSection}\nROADMAP PLAN:\n${JSON.stringify(roadmap, null, 2)}\n\nCONTEXT:\n${contextSummary}${multiFileInstruction}${jsonFormatReminder}`;
 
     const completion = await gateway.callStructured<CodeGenerationPayload>({
       stage: PipelineStages.CODE_GENERATION,
@@ -742,8 +774,10 @@ When using an existing local component, conform to its authoritative exported pr
     // transaction/validation boundary decide whether they may be materialized.
 
     // ── Resolve raw LLM proposals into AgentFileChange[] ──
-    const hasManifestContext = approvedManifest && Array.isArray(approvedManifest.files) && approvedManifest.files.length > 0;
-    const shouldUseStructuredResolution = hasManifestContext && !isStandaloneWeb && (manifestHasCreateOrModify || !isDeleteTask);
+    const proposalRequiresStructuredResolution = rawChanges.some((raw) =>
+      raw.action === "modify" || Array.isArray(raw.edits)
+    );
+    const shouldUseStructuredResolution = !isStandaloneWeb && proposalRequiresStructuredResolution;
 
     let changes: AgentFileChange[];
     let expectedSourceHashes: Record<string, string> | undefined;
@@ -753,10 +787,13 @@ When using an existing local component, conform to its authoritative exported pr
       const initialProposals: GeneratedChangeProposal[] = rawChanges.map((raw: any) => {
         const action = (raw.action || "modify").toLowerCase();
         if (action === "create") {
+          if (raw.content === undefined || raw.content === null) {
+            throw new Error(`[INVALID_GENERATION_PROPOSAL] CREATE proposal for "${raw.path}" is missing content.`);
+          }
           return {
             path: raw.path,
             action: "create" as const,
-            content: raw.content || "",
+            content: raw.content,
             description: raw.description || "",
           };
         } else if (action === "delete") {
@@ -934,7 +971,7 @@ When using an existing local component, conform to its authoritative exported pr
         patchTelemetry.patchCorrectionSucceeded = !anyFailed;
       }
 
-      // Re-run deterministic proposal resolution across the complete set
+      // Re-run deterministic proposal resolution across the complete set.
       let resolution: ResolutionResult = resolveGenerationProposals(
         proposals,
         effectiveResolutionSourceMap,
@@ -948,6 +985,55 @@ When using an existing local component, conform to its authoritative exported pr
               : ""
           }`
         );
+      }
+
+      // A syntactically valid patch may still break an existing local module
+      // contract across files (for example, removing a named export retained by
+      // an authorized importer). Detect that before any transaction is opened,
+      // correct only the offending authorized proposal once, then revalidate the
+      // complete delta against the same immutable source map.
+      let contractIssues = findIntroducedModuleContractIssues(effectiveResolutionSourceMap, resolution.changes);
+      if (contractIssues.length > 0) {
+        const affectedPaths = [...new Set(contractIssues.map((issue) => normalizeRepoPath(issue.relatedFile || issue.file)))];
+        if (affectedPaths.length > 3) {
+          throw new Error(`[GENERATED_CONTRACT_INVALID] Bounded correction cap exceeded for introduced module-contract failures: ${affectedPaths.join(", ")}`);
+        }
+
+        for (const affectedPath of affectedPaths) {
+          const proposalIndex = proposals.findIndex((proposal) => normalizeRepoPath(proposal.path) === affectedPath);
+          const proposal = proposals[proposalIndex];
+          if (!proposal || proposal.action !== "modify") {
+            throw new Error(`[GENERATED_CONTRACT_INVALID] Introduced module-contract failure has no correctable MODIFY proposal: ${affectedPath}`);
+          }
+          const currentContent = Object.entries(effectiveResolutionSourceMap)
+            .find(([sourcePath]) => normalizeRepoPath(sourcePath) === affectedPath)?.[1];
+          if (currentContent === undefined) {
+            throw new Error(`[GENERATED_CONTRACT_INVALID] Authoritative source is unavailable for module-contract correction: ${affectedPath}`);
+          }
+          const fileIssues = contractIssues.filter((issue) => normalizeRepoPath(issue.relatedFile || issue.file) === affectedPath);
+          const correction = await PatchCorrectionEngine.correctPatch({
+            filePath: proposal.path,
+            currentContent,
+            userMessage: message,
+            manifestAction: "modify",
+            failedEdits: proposal.edits,
+            errorCode: "PUBLIC_CONTRACT_DRIFT",
+            errorMessage: fileIssues.map((issue) => `${issue.file}:${issue.line} ${issue.reason}`).join("; "),
+          });
+          if (!correction.succeeded || !correction.correctedEdits?.length) {
+            throw new Error(`[GENERATED_CONTRACT_INVALID] Bounded module-contract correction failed for "${proposal.path}": ${correction.error || "Unknown error"}`);
+          }
+          proposals[proposalIndex] = { ...proposal, edits: correction.correctedEdits };
+        }
+
+        resolution = resolveGenerationProposals(proposals, effectiveResolutionSourceMap);
+        if (!resolution.success) {
+          throw new Error(`[GENERATED_CONTRACT_INVALID] Corrected proposal resolution failed: ${resolution.error.code}: ${resolution.error.message}`);
+        }
+        contractIssues = findIntroducedModuleContractIssues(effectiveResolutionSourceMap, resolution.changes);
+        if (contractIssues.length > 0) {
+          throw new Error(`[GENERATED_CONTRACT_INVALID] Introduced module contract remains invalid after bounded correction: ${contractIssues.map((issue) => `${issue.file}:${issue.line} ${issue.reason}`).join("; ")}`);
+        }
       }
 
       changes = resolution.changes;
@@ -978,24 +1064,32 @@ When using an existing local component, conform to its authoritative exported pr
           };
         }
         if (action === "create") {
+          if (raw.content === undefined || raw.content === null) {
+            throw new Error(`[INVALID_GENERATION_PROPOSAL] CREATE proposal for "${raw.path}" is missing content.`);
+          }
           return {
             path: raw.path,
-            content: raw.content || "",
+            content: raw.content,
             description,
             action,
-            editPrimitive: { type: "CREATE_FILE", path: raw.path, content: raw.content || "", description },
+            editPrimitive: { type: "CREATE_FILE", path: raw.path, content: raw.content, description },
           };
+        }
+        if (raw.content === undefined || raw.content === null) {
+          throw new Error(
+            `[INVALID_MODIFY_PROPOSAL] MODIFY proposal for "${raw.path}" has neither structured edits nor explicit replacement content.`
+          );
         }
         if (currentSource !== undefined) expectedSourceHashes![normalizedPath] = sha256(currentSource);
         return {
           path: raw.path,
-          content: raw.content || "",
+          content: raw.content,
           description,
           action: "modify",
           editPrimitive: {
             type: "REPLACE_FILE",
             path: raw.path,
-            content: raw.content || "",
+            content: raw.content,
             description,
             expectedSourceFingerprint: currentSource === undefined ? undefined : sha256(currentSource),
           },

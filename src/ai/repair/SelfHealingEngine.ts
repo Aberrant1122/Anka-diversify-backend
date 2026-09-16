@@ -1,10 +1,11 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { runTransactionalRepair } from "./TransactionalRepair";
 import { AgentFileChange, AgentProgressEvent, ExecutionContract } from "../shared/types";
 import { FileManifest, RootBuildFailure, ValidationDetails, BaselineDiagnostic } from "../../types";
 import { ValidationRunner } from "../validation/ValidationRunner";
-import { FileSystemStateManager, RepairInfrastructureError } from "../validation/FileSystemStateManager";
+import { FileSystemStateManager, RepairInfrastructureError, CapabilityAuthorizationError } from "../validation/FileSystemStateManager";
 import { SecurityPolicy } from "../security/SecurityPolicy";
 import { ImportValidator } from "../validation/ImportValidator";
 import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
@@ -13,7 +14,9 @@ import { ErrorDiagnosticsParser, DiagnosticError, PublicContractGuard, Determini
 import { SurgicalPatchEngine, SurgicalPatchChunk } from "./SurgicalPatchEngine";
 import { applyPatchToFile } from "../patch/PatchApplicator";
 import { EditingConflictError } from "../editing/EditingPrimitives";
-import { LLMGateway } from "../gateway/LLMGateway";
+import { LLMGateway, LLMStructuredCallOptions, LLMCallResult } from "../gateway/LLMGateway";
+import { LLMError } from "../gateway/LLMError";
+import { MutationFailure } from "../runtime/MutationCompiler";
 import { PipelineStages } from "../gateway/PipelineStage";
 
 interface DependencyRepairPayload {
@@ -24,6 +27,20 @@ interface ModelRepairPayload {
   repaired?: boolean;
   patchExplanation?: string;
   changes: RepairChangeProposal[];
+}
+
+async function boundedRepairStructured<T>(options: LLMStructuredCallOptions<T>): Promise<LLMCallResult<T>> {
+  let feedback = "";
+  for (let correction = 0; correction < 3; correction++) {
+    try {
+      return await LLMGateway.getInstance().callStructured<T>({ ...options, messages: [...options.messages,
+        ...(feedback ? [{ role: "user" as const, content: feedback }] : [])] });
+    } catch (error) {
+      if (!(error instanceof LLMError) || !["LLM_SCHEMA_INVALID", "LLM_INVALID_JSON", "LLM_TRUNCATED"].includes(error.code)) throw error;
+      feedback = `REPAIR_SCHEMA_INVALID: ${error.message}. Correct the structured response. Every replacement needs nonempty exact oldText from the supplied current source; empty oldText is never insertion.`;
+    }
+  }
+  throw new MutationFailure("REPAIR_UNRESOLVED", "Repair schema remained invalid after two structured correction retries.");
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -131,6 +148,7 @@ export const MAX_IDENTICAL_REPAIR_PROPOSAL = 1;
 export const MAX_REPAIR_WALL_TIME_MS = 600000; // 10 minutes
 
 export const SPECIFIC_GATE_ERRORS = new Set([
+  "REPAIR_UNRESOLVED",
   "STALE_REPAIR_SOURCE",
   "SCOPE_VIOLATION",
   "UNAUTHORIZED_SCOPE_ERROR",
@@ -251,6 +269,9 @@ export class SelfHealingEngine {
     repositoryClean?: boolean;
     deltaResult?: BaselineDeltaResult;
   }> {
+    if (fsManager?.mutationTransaction) {
+      return runTransactionalRepair({ transaction: fsManager.mutationTransaction, initialChanges, originalTask: originalMessage, commands, onProgress, targetedBaselineDiagnostics });
+    }
     const isRepositoryMode = executionContract?.pipeline === "REPOSITORY";
 
     const executableValidationCommands = commands
@@ -323,6 +344,7 @@ export class SelfHealingEngine {
       return info ? info.content : undefined;
     };
 
+    try {
     for (let attempt = 1; attempt <= MAX_TOTAL_REPAIR_CYCLES; attempt++) {
       totalCyclesExecuted = attempt;
       const attemptStart = performance.now();
@@ -426,6 +448,7 @@ export class SelfHealingEngine {
             await fsManager.apply(pendingChanges, localPath);
             pendingChanges = [];
           } catch (err: any) {
+            if (err instanceof CapabilityAuthorizationError) throw new MutationFailure("TRANSACTION_INVALIDATED", err.message);
             if (err instanceof RepairInfrastructureError || err instanceof EditingConflictError) {
               return {
                 finalChanges: currentChanges,
@@ -813,7 +836,7 @@ export class SelfHealingEngine {
                 .map((change) => normalizedSafeRepairPath(change.path))
                 .filter((value): value is string => Boolean(value)),
             );
-            const depResult = await LLMGateway.getInstance().callStructured<DependencyRepairPayload>({
+            const depResult = await boundedRepairStructured<DependencyRepairPayload>({
               stage: PipelineStages.REPAIR,
               messages: [
                 {
@@ -1308,7 +1331,7 @@ export class SelfHealingEngine {
             .map((repairPath) => normalizedSafeRepairPath(repairPath))
             .filter((value): value is string => Boolean(value)),
         );
-        const repairResult = await LLMGateway.getInstance().callStructured<ModelRepairPayload>({
+        const repairResult = await boundedRepairStructured<ModelRepairPayload>({
           stage: PipelineStages.REPAIR,
           messages: [
             { role: "system", content: prompt.system },
@@ -1698,6 +1721,17 @@ export class SelfHealingEngine {
         } catch (parseErr: any) {
           previousErrors = `[REPAIR_JSON_PARSE_ERROR] Failed parsing repair proposal: ${parseErr?.message || parseErr}`;
         }
+      }
+    }
+
+    } catch (error) {
+      if (error instanceof CapabilityAuthorizationError) {
+        lastErrorType = "TRANSACTION_INVALIDATED";
+        previousErrors = error.message;
+      } else {
+      if (!(error instanceof MutationFailure)) throw error;
+      lastErrorType = error.code;
+      previousErrors = error.message;
       }
     }
 

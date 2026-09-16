@@ -89,8 +89,8 @@ export class LLMTruncationError extends LLMError {
 }
 
 export class LLMInvalidJsonError extends LLMError {
-  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown) {
-    super(message, "LLM_INVALID_JSON", details, false, cause);
+  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown, isRetryable: boolean = false) {
+    super(message, "LLM_INVALID_JSON", details, isRetryable, cause);
     this.name = "LLMInvalidJsonError";
   }
 }

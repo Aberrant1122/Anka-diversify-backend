@@ -74,20 +74,26 @@ describe("Checkpoint 10 safe editing primitives", () => {
     fs.writeFileSync(path.join(workspace, "src/a.ts"), "existing");
     const editor = manager("create", [{ path: "src/a.ts", action: "FILE_CREATE" }]);
     await expect(editor.applyPrimitives([primitive({ type: "CREATE_FILE", path: "src/a.ts", content: "new", description: "create" })], workspace))
-      .rejects.toMatchObject({ code: "CREATE_TARGET_EXISTS" });
+      .rejects.toMatchObject({ code: "CAPABILITY_PATH_NOT_DECLARED" });
+    expect(() => materializeEditingPrimitive(primitive({ type: "CREATE_FILE", path: "src/a.ts", content: "new", description: "primitive existence check" }), Buffer.from("existing")))
+      .toThrow(expect.objectContaining({ code: "CREATE_TARGET_EXISTS" }));
     expect(fs.readFileSync(path.join(workspace, "src/a.ts"), "utf8")).toBe("existing");
   });
 
   test("6 modify missing file fails", async () => {
     const editor = manager("modify", [{ path: "src/missing.ts", action: "FILE_MODIFY" }]);
     await expect(editor.applyPrimitives([primitive({ type: "REPLACE_FILE", path: "src/missing.ts", content: "new", description: "modify" })], workspace))
-      .rejects.toMatchObject({ code: "MODIFY_TARGET_MISSING" });
+      .rejects.toMatchObject({ code: "CAPABILITY_PATH_NOT_DECLARED" });
+    expect(() => materializeEditingPrimitive(primitive({ type: "REPLACE_FILE", path: "src/a.ts", content: "new", description: "primitive existence check" }), null))
+      .toThrow(expect.objectContaining({ code: "MODIFY_TARGET_MISSING" }));
   });
 
   test("7 delete missing file deterministically fails", async () => {
     const editor = manager("delete", [{ path: "src/missing.ts", action: "FILE_DELETE" }]);
     await expect(editor.applyPrimitives([primitive({ type: "DELETE_FILE", path: "src/missing.ts", description: "delete" })], workspace))
-      .rejects.toMatchObject({ code: "DELETE_TARGET_MISSING" });
+      .rejects.toMatchObject({ code: "CAPABILITY_PATH_NOT_DECLARED" });
+    expect(() => materializeEditingPrimitive(primitive({ type: "DELETE_FILE", path: "src/a.ts", content: "new", description: "primitive existence check" }), null))
+      .toThrow(expect.objectContaining({ code: "DELETE_TARGET_MISSING" }));
   });
 
   test("8 insert-before exact unique anchor succeeds", () => {
@@ -145,7 +151,7 @@ describe("Checkpoint 10 safe editing primitives", () => {
       stageId: "group-fail", localPath: workspace, authorizedCapabilityScope: scope("group-fail", [
         { path: "src/a.ts", action: "FILE_MODIFY" }, { path: "src/b.ts", action: "FILE_MODIFY" },
       ]), changes,
-    })).rejects.toMatchObject({ code: "TARGET_NOT_FOUND" });
+    })).rejects.toMatchObject({ code: "EDIT_ANCHOR_NOT_FOUND" });
     expect(fs.readFileSync(path.join(workspace, "src/a.ts"), "utf8")).toBe("a0");
   });
 
@@ -159,7 +165,7 @@ describe("Checkpoint 10 safe editing primitives", () => {
     await expect(ValidationCoordinator.applyLocalActionGroup({
       stageId: "failed", localPath: workspace, authorizedCapabilityScope: scope("failed", [{ path: "src/a.ts", action: "FILE_MODIFY" }]), journal,
       changes: [{ path: "src/a.ts", action: "modify", content: "a2", description: "stale", editPrimitive: primitive({ type: "REPLACE_FILE", path: "src/a.ts", content: "a2", description: "stale", expectedSourceFingerprint: fingerprintBytes("a0") }) }],
-    })).rejects.toMatchObject({ code: "STALE_SOURCE" });
+    })).rejects.toMatchObject({ code: "FILE_HASH_MISMATCH" });
     expect(fs.readFileSync(path.join(workspace, "src/a.ts"), "utf8")).toBe("a1");
     expect(journal.verifiedCheckpoints()).toHaveLength(1);
   });
@@ -220,7 +226,7 @@ describe("Checkpoint 10 safe editing primitives", () => {
     await expect(ValidationCoordinator.applyLocalActionGroup({
       stageId: "revision", localPath: workspace, authorizedCapabilityScope: scope("revision", [{ path: "src/a.ts", action: "FILE_MODIFY" }]), journal,
       changes: [{ path: "src/a.ts", action: "modify", content: "next", description: "stale", editPrimitive: primitive({ type: "REPLACE_FILE", path: "src/a.ts", content: "next", description: "stale", expectedSourceFingerprint: fingerprintBytes("old") }) }],
-    })).rejects.toBeInstanceOf(EditingConflictError);
+    })).rejects.toMatchObject({ code: "FILE_HASH_MISMATCH" });
     expect(journal.snapshot()[0]).toMatchObject({ status: "ROLLED_BACK" });
     expect(journal.verifiedCheckpoints()).toHaveLength(0);
   });

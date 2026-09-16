@@ -1,4 +1,6 @@
 import { AuthorizedCapabilityScope, CapabilityGrant, CapabilityGuard } from "../runtime/CapabilityGuard";
+import { MutationTransaction } from "../runtime/MutationTransaction";
+import { fingerprintBytes } from "../editing/EditingPrimitives";
 import { ErrorDiagnosticsParser } from "../../services/surgical-repair.engine";
 import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
@@ -282,6 +284,7 @@ function createScopedFsManager(
   worktree: string,
   stageId: string,
   grants: readonly CapabilityGrant[],
+  manifest?: FileManifest,
 ): FileSystemStateManager {
   const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({
     workspaceRoot: worktree,
@@ -291,12 +294,19 @@ function createScopedFsManager(
   if (!authorizedScope) {
     throw new Error(`Failed to create AuthorizedCapabilityScope for ${stageId}`);
   }
-  const guard = CapabilityGuard.create({
-    workspaceRoot: worktree,
-    scopeId: stageId,
-    authorizedScope,
-  });
-  return new FileSystemStateManager(guard, stageId);
+  const resolvedManifest = manifest ?? {
+    manifestVersion: "1.0.0",
+    totalFiles: grants.length,
+    files: grants.map(g => ({
+      path: g.path,
+      action: (g.action === "FILE_CREATE" ? "create" : g.action === "FILE_DELETE" ? "delete" : "modify") as "create" | "delete" | "modify",
+      description: "grant",
+      dependencies: [],
+    })),
+  };
+  const tx = MutationTransaction.create(authorizedScope, resolvedManifest);
+  const guard = CapabilityGuard.forTransaction(tx, tx.primary);
+  return new FileSystemStateManager(guard, stageId, tx);
 }
 
   describe("Section 3: Exact Full Live Self-Healing Regression Test", () => {
@@ -322,12 +332,18 @@ function createScopedFsManager(
 
       const approvedManifest: FileManifest = {
         manifestVersion: "1.0.0",
-        totalFiles: 1,
+        totalFiles: 2,
         files: [
           {
             path: "src/app.ts",
             action: "modify",
             description: "App component",
+            dependencies: [],
+          },
+          {
+            path: "src/index.ts",
+            action: "modify",
+            description: "Index entry",
             dependencies: [],
           },
         ],
@@ -356,34 +372,31 @@ function createScopedFsManager(
       jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
         buildCallCount++;
         if (buildCallCount === 1) {
-          // Cycle 1: initial check fails on missing express
-          return {
-            success: false,
-            errors: `./src/index.ts:1:21\nType error: Cannot find module 'express' or its corresponding type declarations.`,
-          };
+          // Baseline is clean
+          return { success: true, errors: "" };
         }
         if (buildCallCount === 2) {
-          // Cycle 1: retry build after removing express reveals TS2614
+          // Current before repair introduces TS2307 and TS2614
           return {
             success: false,
-            errors: `./src/index.ts:2:10\nType error: Module '"./app"' has no exported member 'App'. Did you mean to use 'import App from "./app"' instead?`,
+            errors: `./src/index.ts:1:21\nType error: Cannot find module 'express' or its corresponding type declarations.\n\n./src/index.ts:2:10\nType error: Module '"./app"' has no exported member 'App'. Did you mean to use 'import App from "./app"' instead?`,
           };
         }
         if (buildCallCount === 3) {
-          // Cycle 2: initial check for Cycle 2 reveals TS2614
+          // Cycle 1 candidate (express removed): reveals TS2614 and TS6133
           return {
             success: false,
-            errors: `./src/index.ts:2:10\nType error: Module '"./app"' has no exported member 'App'. Did you mean to use 'import App from "./app"' instead?`,
+            errors: `./src/index.ts:2:10\nType error: Module '"./app"' has no exported member 'App'. Did you mean to use 'import App from "./app"' instead?\n\n./src/index.ts:3:7\nType error: 'port' is declared but its value is never read.`,
           };
         }
         if (buildCallCount === 4) {
-          // Cycle 3: initial check for Cycle 3 reveals TS6133 unused port
+          // Cycle 2 candidate (TS2614 fixed): leaves only TS6133
           return {
             success: false,
             errors: `./src/index.ts:3:7\nType error: 'port' is declared but its value is never read.`,
           };
         }
-        // Cycle 4: build succeeds after removing unused port
+        // Cycle 3 candidate (deterministic TS6133 repair): clean build
         return { success: true, errors: "" };
       });
 
@@ -393,8 +406,10 @@ function createScopedFsManager(
           completions: {
             create: jest.fn().mockImplementation(async () => {
               completionCount++;
+              const indexFileContent = fs.readFileSync(path.join(srcDir, "index.ts"), "utf8");
+              const hash = fingerprintBytes(Buffer.from(indexFileContent, "utf8"));
               if (completionCount === 1) {
-                // Cycle 1 MISSING_DEP repair: removes express and leaves unused port
+                // Cycle 1: removes express and leaves unused port
                 return {
                   choices: [
                     {
@@ -402,10 +417,13 @@ function createScopedFsManager(
                       index: 0,
                       message: {
                         content: JSON.stringify({
-                          changes: [
+                          operations: [
                             {
+                              op: "replace_exact",
                               path: "src/index.ts",
-                              content: `import { App } from './app';\n\nconst port = process.env.PORT || 3000;\n\nexport default App;\n`,
+                              expectedFileHash: hash,
+                              oldText: initialIndexContent,
+                              newText: `import { App } from './app';\n\nconst port = process.env.PORT || 3000;\n\nexport default App;\n`,
                             },
                           ],
                         }),
@@ -414,57 +432,21 @@ function createScopedFsManager(
                   ],
                 };
               }
-              if (completionCount === 2) {
-                // Cycle 2 normal repair: fixes TS2614 import { App } -> import App
-                return {
-                  choices: [
-                    {
-                      finish_reason: "stop",
-                      index: 0,
-                      message: {
-                        content: JSON.stringify({
-                          repaired: true,
-                          patchExplanation: "Fix default import of App",
-                          changes: [
-                            {
-                              path: "src/index.ts",
-                              action: "modify",
-                              description: "Fix default import of App",
-                              edits: [
-                                {
-                                  oldText: "import { App } from './app';",
-                                  newText: "import App from './app';",
-                                },
-                              ],
-                            },
-                          ],
-                        }),
-                      },
-                    },
-                  ],
-                };
-              }
-              // Cycle 3 normal repair: removes unused port
+              // Cycle 2: fixes TS2614 import { App } -> import App
               return {
                 choices: [
-                    {
-                      finish_reason: "stop",
-                      index: 0,
-                      message: {
+                  {
+                    finish_reason: "stop",
+                    index: 0,
+                    message: {
                       content: JSON.stringify({
-                        repaired: true,
-                        patchExplanation: "Remove unused port declaration",
-                        changes: [
+                        operations: [
                           {
+                            op: "replace_exact",
                             path: "src/index.ts",
-                            action: "modify",
-                            description: "Fix import or declaration",
-                            edits: [
-                              {
-                                oldText: "const port = process.env.PORT || 3000;\n\n",
-                                newText: "",
-                              },
-                            ],
+                            expectedFileHash: hash,
+                            oldText: "import { App } from './app';",
+                            newText: "import App from './app';",
                           },
                         ],
                       }),
@@ -479,7 +461,12 @@ function createScopedFsManager(
 
       (getOpenAI as unknown as jest.Mock).mockReturnValue(mockOpenAI);
 
-      const fsManager = createScopedFsManager(tempDir, "ts6133-stage", [{ path: "src/app.ts", action: "FILE_MODIFY" }, { path: "src/index.ts", action: "FILE_MODIFY" }]);
+      const fsManager = createScopedFsManager(
+        tempDir,
+        "ts6133-stage",
+        [{ path: "src/app.ts", action: "FILE_MODIFY" }, { path: "src/index.ts", action: "FILE_MODIFY" }],
+        approvedManifest,
+      );
       await fsManager.snapshot(
         [
           { path: "src/app.ts", content: initialAppContent, action: "modify", description: "App" },
@@ -504,6 +491,7 @@ function createScopedFsManager(
         "HEAD",
       );
 
+      console.log("SECTION 3 RESULT:", { success: result.success, errorType: result.errorType, errorLog: result.errorLog, attempts: result.attempts });
       expect(result.success).toBe(true);
       expect(result.repaired).toBe(true);
       const diskContent = fs.readFileSync(path.join(srcDir, "index.ts"), "utf8");

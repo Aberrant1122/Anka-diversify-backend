@@ -1,5 +1,7 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
 
 const mockProjectFindUnique = jest.fn();
 const mockPhaseArtifactFindFirst = jest.fn();
@@ -87,6 +89,11 @@ function classification(overrides: Partial<TaskClassificationResult> = {}): Task
 }
 
 describe("Checkpoint 4 AgentPipeline decomposition", () => {
+  let authorityFixture: string | undefined;
+  afterEach(() => {
+    if (authorityFixture) fs.rmSync(authorityFixture, { recursive: true, force: true });
+    authorityFixture = undefined;
+  });
   beforeEach(() => {
     jest.restoreAllMocks();
     mockProjectFindUnique.mockReset();
@@ -164,6 +171,11 @@ describe("Checkpoint 4 AgentPipeline decomposition", () => {
   });
 
   test("ValidationCoordinator commits only after deterministic validation gates pass", async () => {
+    authorityFixture = fs.mkdtempSync(path.join(os.tmpdir(), "anka-coordinator-authority-"));
+    fs.mkdirSync(path.join(authorityFixture, "src"));
+    fs.writeFileSync(path.join(authorityFixture, "src/index.ts"), "export const value = 1;");
+    const authorizedCapabilityScope = mutationFixtureScope(authorityFixture,
+      [{ path: "src/index.ts", action: "modify", content: "export const value = 2;", description: "fix" }], "project-1", "stage-1");
     const snapshot = repositorySnapshot();
     const plan: TaskExecutionPlan = {
       id: "plan-1",
@@ -231,7 +243,7 @@ describe("Checkpoint 4 AgentPipeline decomposition", () => {
 
     const result = await ValidationCoordinator.validate({
       acceptedChanges: [{ path: "src/index.ts", content: "export const value = 2;", action: "modify", description: "fix" }],
-      effectiveLocalPath: "C:\\fixture",
+      effectiveLocalPath: authorityFixture,
       effectiveSnapshot: snapshot,
       executionContract: {
         goal: "fix it",
@@ -258,7 +270,8 @@ describe("Checkpoint 4 AgentPipeline decomposition", () => {
       systemPrompt: "system",
       requestMessage: "fix it",
       projectId: "project-1",
-      approvedManifest: null,
+      approvedManifest: { manifestVersion: "1", totalFiles: 1, files: [{ path: "src/index.ts", action: "modify", description: "fix", dependencies: [] }] },
+      authorizedCapabilityScope,
     });
 
     expect(result.gateSuccess).toBe(true);

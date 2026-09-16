@@ -1,3 +1,6 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { ExecutionContract, FileManifest } from "../../types";
 import { AgentPipeline } from "../orchestration/AgentPipeline";
@@ -13,11 +16,11 @@ jest.mock("@prisma/client", () => {
   return {
     PrismaClient: jest.fn().mockImplementation(() => ({
       project: {
-        findUnique: jest.fn().mockResolvedValue({
-          localPath: "/tmp/mock-project",
+        findUnique: jest.fn().mockImplementation(async () => ({
+          localPath: process.env.CANONICAL_EXISTING_FILES_TEST_ROOT,
           githubUrl: "https://github.com/mock/repo",
           githubToken: "mock-token",
-        }),
+        })),
       },
       phaseArtifact: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -53,8 +56,19 @@ describe("Canonical existingFiles Grounding Regression Tests", () => {
   };
 
   const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalTestRoot = process.env.CANONICAL_EXISTING_FILES_TEST_ROOT;
+  let tempDir: string;
 
   beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-canonical-existing-files-"));
+    fs.mkdirSync(path.join(tempDir, "src", "services"), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, "src", "models"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, "src", "services", "user.service.ts"),
+      'import { User } from "../models/user";\nexport function formatUser(user: User) { return user; }\n'
+    );
+    fs.writeFileSync(path.join(tempDir, "src", "models", "user.ts"), "export interface User { id: string; }\n");
+    process.env.CANONICAL_EXISTING_FILES_TEST_ROOT = tempDir;
     process.env.OPENAI_API_KEY = "test-mock-api-key";
     jest.clearAllMocks();
     jest.spyOn(MemoryPersistence, "getOrCreateSession").mockResolvedValue({ id: "test-sess", title: "test" } as any);
@@ -72,6 +86,12 @@ describe("Canonical existingFiles Grounding Regression Tests", () => {
 
   afterEach(() => {
     process.env.OPENAI_API_KEY = originalApiKey;
+    if (originalTestRoot === undefined) {
+      delete process.env.CANONICAL_EXISTING_FILES_TEST_ROOT;
+    } else {
+      process.env.CANONICAL_EXISTING_FILES_TEST_ROOT = originalTestRoot;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
     jest.restoreAllMocks();
   });
 
@@ -98,7 +118,7 @@ describe("Canonical existingFiles Grounding Regression Tests", () => {
       },
     });
 
-    jest.spyOn(RepositoryScanner, "ensureLocalWorkspace").mockResolvedValue("/tmp/mock-project");
+    jest.spyOn(RepositoryScanner, "ensureLocalWorkspace").mockResolvedValue(tempDir);
     jest.spyOn(RepositoryScanner, "getEffectiveSnapshot").mockReturnValue({
       repoName: "test-project",
       defaultBranch: "main",

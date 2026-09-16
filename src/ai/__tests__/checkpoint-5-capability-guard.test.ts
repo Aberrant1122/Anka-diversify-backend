@@ -240,7 +240,7 @@ describe("Checkpoint 5: CapabilityGuard", () => {
 
     await expect(manager.apply([
       { path: "src/missing.ts", action: "modify", content: "bypass", description: "action mismatch" },
-    ], workspace)).rejects.toMatchObject({ code: "MODIFY_TARGET_MISSING" });
+    ], workspace)).rejects.toMatchObject({ code: "CAPABILITY_PATH_NOT_DECLARED" });
     expect(fs.existsSync(path.join(workspace, "src", "missing.ts"))).toBe(false);
   });
 

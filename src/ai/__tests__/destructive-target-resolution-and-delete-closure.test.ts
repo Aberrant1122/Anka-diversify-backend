@@ -1,3 +1,5 @@
+import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { productionIsAuthorityEligible } from "./helpers/capability-test-harness";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -23,6 +25,12 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "destructive-test-"));
+    writeFiles({
+      "src/app.ts": "import { Calculator } from '../components/calculator/Calculator'; export const App = Calculator;",
+      "components/calculator/Calculator.tsx": "export const Calculator = () => null;",
+      "services/standaloneService.ts": "export const service = true;",
+    });
+    bindUserRequest(defaultDeleteIntent, "Remove the calculator");
   });
 
   afterEach(() => {
@@ -30,6 +38,17 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+  function writeFiles(files: Record<string, string>) {
+    for (const [file, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(tempDir, file)), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, file), content);
+    }
+  }
+  function store() {
+    const result = new RepositoryEvidenceStore("test-repo", tempDir);
+    result.isAuthorityEligible = productionIsAuthorityEligible.bind(result);
+    return result;
+  }
   const repoSnapshot = [
     "src/app.ts",
     "components/calculator/Calculator.tsx",
@@ -166,21 +185,22 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
   // Test 4: Importer cleanup authorized structurally
   test("4. Importer cleanup authorized structurally", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evApp = evidenceStore.addEvidence({
+    bindUserRequest(defaultDeleteIntent, "Remove the calculator used by src/app.ts");
+    const evidenceStore = store();
+    const evApp = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/app.ts",
       provenance: "REPO_READ",
     });
-    const evCalc = evidenceStore.addEvidence({
+    const evCalc = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "components/calculator/Calculator.tsx",
       provenance: "REPO_READ",
     });
-    const evRel = evidenceStore.addEvidence({
+    const evRel = evidenceStore.observeRepository({
       kind: "IMPORT",
-      filePath: "src/app.ts",
-      sourceFile: "components/calculator/Calculator.tsx",
+      filePath: "components/calculator/Calculator.tsx",
+      sourceFile: "src/app.ts",
       provenance: "REFERENCE_SEARCH",
     });
 
@@ -216,13 +236,14 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
   // Test 5: Rejected importer cascades delete rejection
   test("5. Rejected importer cascades delete rejection", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evApp = evidenceStore.addEvidence({
+    bindUserRequest(defaultDeleteIntent, "Delete components/calculator/Calculator.tsx");
+    const evidenceStore = store();
+    const evApp = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/app.ts",
       provenance: "REPO_READ",
     });
-    const evCalc = evidenceStore.addEvidence({
+    const evCalc = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "components/calculator/Calculator.tsx",
       provenance: "REPO_READ",
@@ -292,8 +313,8 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
   // Test 7: Standalone explicit deletion
   test("7. Standalone explicit deletion", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evService = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evService = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "services/standaloneService.ts",
       provenance: "REPO_READ",
@@ -314,6 +335,7 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
       operations: [{ kind: "DELETE", subject: "services/standaloneService.ts" }],
     };
 
+    bindUserRequest(standaloneIntent, "Delete services/standaloneService.ts");
     const proposed: PlannedChange[] = [
       {
         path: "services/standaloneService.ts",
@@ -338,8 +360,8 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
   // Test 8: No partial destructive transaction
   test("8. No partial destructive transaction", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evCalc = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evCalc = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "components/calculator/Calculator.tsx",
       provenance: "REPO_READ",
@@ -505,9 +527,9 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
   // Test 12: Semantic-only destructive candidate rejected
   test("12. Semantic-only destructive candidate rejected", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
     // Semantic search returns candidate but NO FILE existence or repo evidence
-    const semEv = evidenceStore.addEvidence({
+    const semEv = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "components/legacy-cache.ts",
       provenance: "SEMANTIC_SEARCH",
@@ -532,7 +554,7 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
     });
 
     expect(authRes.approvedPaths).toEqual([]);
-    expect(authRes.rejectedPaths[0].reason).toContain("NO_FILE_EXISTENCE_EVIDENCE");
+    expect(authRes.rejectedPaths[0].reason).toContain("UNAUTHENTICATED_REPOSITORY_EVIDENCE");
   });
 
   // Focused 1: feature with component + barrel auto-resolves
@@ -613,7 +635,8 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
       "src/components/calculator/Calculator.tsx": "export const Calculator = () => 42;",
       "src/components/calculator/index.ts": "export * from './Calculator';",
     };
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    writeFiles(fileContext);
+    const evidenceStore = store();
     const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
       isDestructive: true,
       fileContext,
@@ -629,13 +652,13 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
     // Check importer FILE and IMPORT evidence
     const appEv = evidenceStore.getEvidenceForFile("src/app.ts");
     expect(appEv.some((e) => e.kind === "FILE" && e.provenance === "REPO_READ")).toBe(true);
-    expect(appEv.some((e) => e.kind === "IMPORT" && e.provenance === "REPO_READ")).toBe(true);
+    expect(evidenceStore.getAllEvidence().some((e) => e.kind === "IMPORT" && e.sourceFile === "src/app.ts" && e.filePath === "src/components/calculator/index.ts" && evidenceStore.isAuthorityEligible(e))).toBe(true);
     expect(res.resolvedTarget?.importerPaths).toContain("src/app.ts");
   });
 
   // Focused 6: planner cites hydrated evidenceIds itself
   test("18. planner cites hydrated evidenceIds itself", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
     const files = [
       "src/components/calculator/Calculator.tsx",
       "src/components/calculator/index.ts",
@@ -670,8 +693,8 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
   // Focused 7: semantic-only candidate remains unauthorized
   test("19. semantic-only candidate remains unauthorized", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const semEv = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const semEv = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "components/CalculatorLegacy.tsx",
       provenance: "SEMANTIC_SEARCH",
@@ -696,13 +719,15 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
     });
 
     expect(authRes.approvedPaths).not.toContain("components/CalculatorLegacy.tsx");
-    expect(authRes.rejectedPaths[0].reason).toContain("NO_FILE_EXISTENCE_EVIDENCE");
+    expect(authRes.rejectedPaths[0].reason).toContain("UNAUTHENTICATED_REPOSITORY_EVIDENCE");
   });
 
   // Focused 8: planner cannot invent related calculator files
   test("20. planner cannot invent related calculator files without structural evidence", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const targetEv = evidenceStore.addEvidence({
+    writeFiles({ "src/components/calculator/Calculator.tsx": "export const Calculator = () => null;" });
+    bindUserRequest(defaultDeleteIntent, "Delete src/components/calculator/Calculator.tsx");
+    const evidenceStore = store();
+    const targetEv = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/components/calculator/Calculator.tsx",
       provenance: "REPO_READ",
@@ -764,7 +789,7 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
       "components/CustomerMortgageCalculator.tsx",
       "app/page.tsx",
     ];
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
     const res = DestructiveTargetResolver.resolve("remove the calculator", files, {
       isDestructive: true,
       selectedLogicalTarget: "Admin Tax Calculator",
@@ -795,7 +820,7 @@ describe("Strict Implementation — Destructive Target Resolution + Delete Depen
 
   // Focused 13: write-authority failure has correct error taxonomy
   test("25. write-authority failure has correct error taxonomy", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
     const proposed: PlannedChange[] = [
       {
         path: "components/Calculator.tsx",

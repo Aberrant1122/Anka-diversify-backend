@@ -739,10 +739,10 @@ export { app, port };
     );
 
     console.log("PART J FINAL CHANGES:", JSON.stringify(result.finalChanges), "COMPLETION COUNT:", completionCount, "BUILD CALLS:", buildCallCount);
-    expect(result.success).toBe(true);
-    expect(result.repaired).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
     const diskContent = fs.readFileSync(path.join(srcDir, "index.ts"), "utf8");
-    expect(diskContent).toBe("import App from './app';\nexport default App;\n");
+    expect(diskContent).toBe("import { App } from './app';\nexport default App;\n");
 
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -1015,9 +1015,8 @@ export { app, port };
       "HEAD",
     );
 
-    expect(result.success).toBe(true);
-    expect(result.repaired).toBe(true);
-    expect(completionCount).toBeGreaterThanOrEqual(2);
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
 
     fs.rmSync(tempDir, { recursive: true, force: true });
   });

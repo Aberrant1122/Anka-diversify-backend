@@ -1,3 +1,5 @@
+import { createTaskIntentSpec } from "../shared/TaskIntentSpec";
+import { DeterministicRelationEvidenceAcquirer } from "../contracts/DeterministicRelationEvidenceAcquirer";
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret-key-that-is-long-enough-32-chars";
 process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -92,6 +94,10 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
         dependencies: [],
       };
     });
+    const intentSpec = createTaskIntentSpec(input.approvedGrants.map((grant) => `${grant.action} ${grant.path}`).join("; "), {
+      taskType: "BUG_FIX", intent: "BUG_FIX", risk: "LOW", estimatedComplexity: "SMALL", confidence: 1, requiresClarification: false, reasoning: "Independent fixture request",
+    });
+    intentSpec.destructive = input.approvedGrants.some((grant) => grant.action === "FILE_DELETE");
     return EvidenceBoundWriteSetResolver.resolve({
       policy: {
         maxFiles: 20,
@@ -103,13 +109,7 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
         pipeline: "STANDARD",
         repositoryRequired: true,
       } as any,
-      intentSpec: {
-        taskType: "BUG_FIX",
-        description: "test",
-        riskLevel: "LOW",
-        destructive: input.approvedGrants.some((grant) => grant.action === "FILE_DELETE"),
-        explicitUserPaths: input.approvedGrants.map((grant) => grant.path),
-      } as any,
+      intentSpec,
       proposedChanges,
       evidenceStore: store,
       existingFiles: input.approvedGrants.map((grant) => grant.path),
@@ -593,6 +593,9 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
 
   // S. Full behavioral-task evidence-bound propagation succeeds
   test("S: full behavioral-task evidence-bound propagation succeeds", async () => {
+    const routePath = "app/records/[id]/page.tsx";
+    fs.mkdirSync(path.dirname(path.join(tempDir, routePath)), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, routePath), "import '../../../src/index'; export default function Page() { return null; }");
     jest.spyOn(IntentClassifier, "classifyIntentAndAmbiguity").mockResolvedValue({
       intent: "BUG_FIX",
       taskType: "BUG_FIX",
@@ -610,13 +613,8 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
         filePath: "src/index.ts",
         provenance: "REPO_READ",
       });
-      const symbolEvidence = evidenceStore.observeRepository({
-        kind: "SYMBOL",
-        filePath: "src/index.ts",
-        provenance: "AST_GRAPH",
-        symbol: "console",
-      });
-      targetEvidenceIds = [fileEvidence.id, symbolEvidence.id];
+      DeterministicRelationEvidenceAcquirer.acquire({ candidatePaths: ["src/index.ts"], intentSpec: args[6], evidenceStore, repositoryId: "proj-1", workspaceRoot: tempDir, existingFiles: [routePath, "src/index.ts"] });
+      targetEvidenceIds = evidenceStore.getEvidenceForFile("src/index.ts").filter((e: { id: string }) => evidenceStore.isAuthorityEligible(e)).map((e: { id: string }) => e.id);
       return {
         optimizedContext: { fileContext: {} },
         executionMemory: { inspectedFiles: new Set(["src/index.ts"]) },
@@ -646,7 +644,7 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
       baseRevision: "hash-1",
     });
 
-    const sampleRequest: ChatRequest = { message: "Opening a record detail page shows zero associated items", sessionId: "sess-1" };
+    const sampleRequest: ChatRequest = { message: "Opening /records/example shows zero associated items", sessionId: "sess-1" };
     const response = await AgentPipeline.runCodingAgent("user-1", "proj-1", sampleRequest, undefined, {
       effectiveLocalPath: tempDir,
       authorizedCapabilityScope: initialScope!,
@@ -685,7 +683,11 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
       group: actionGroup,
       transaction,
       journal,
-      executeActions: async () => {},
+      executeActions: async () => {
+        await transaction.apply([
+          { path: "src/index.ts", action: "modify", content: "denied", description: "unauthorized" },
+        ]);
+      },
       validate: () => ({ passed: true, checks: [] } as any),
     })).rejects.toThrow();
 
@@ -822,7 +824,7 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
     expect(base?.deriveExecutionScope(auth, { stageId: "stage-b", baseRevision: "rev-a" })).toBeNull();
   });
 
-  test("live HEAD replay is rejected while dirtiness on the same HEAD is accepted", () => {
+  test("live HEAD replay and changed dirty worktree revisions are rejected", () => {
     execFileSync("git", ["init"], { cwd: tempDir });
     execFileSync("git", ["config", "user.email", "hotfix04@example.invalid"], { cwd: tempDir });
     execFileSync("git", ["config", "user.name", "Hotfix 04"], { cwd: tempDir });
@@ -850,7 +852,7 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
 
     fs.appendFileSync(targetFilePath, "\n// dirty", "utf8");
     const dirtyGuard = CapabilityGuard.create({ workspaceRoot: tempDir, scopeId: "stage-live", authorizedScope: derived! });
-    expect(dirtyGuard.authorize({ path: "src/index.ts", action: "FILE_MODIFY", scopeId: "stage-live" }).allowed).toBe(true);
+    expect(dirtyGuard.authorize({ path: "src/index.ts", action: "FILE_MODIFY", scopeId: "stage-live" }).allowed).toBe(false);
 
     execFileSync("git", ["add", "src/index.ts"], { cwd: tempDir });
     execFileSync("git", ["commit", "-m", "head-b"], { cwd: tempDir });

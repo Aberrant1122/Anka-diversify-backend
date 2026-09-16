@@ -15,6 +15,8 @@ import { ValidationRunner } from "../validation/ValidationRunner";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { FileManifest, ExecutionContract, AgentFileChange } from "../../types";
 import * as sharedUtils from "../shared/utils";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
+import { CapabilityGuard } from "../runtime/CapabilityGuard";
 
 describe("Dependency-Aware Generation and Missing-Dependency Routing (Section J)", () => {
   let tempDir: string;
@@ -48,6 +50,21 @@ describe("Dependency-Aware Generation and Missing-Dependency Routing (Section J)
     contextScope: ["app/page.tsx"],
     diffCriticEnabled: true,
   };
+
+  function createAuthorizedFsManager(dir: string, changes: AgentFileChange[], projectId = "proj-1") {
+    for (const c of changes) {
+      if (c.action === "modify" || !c.action) {
+        const fullPath = path.join(dir, c.path);
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        if (!fs.existsSync(fullPath)) {
+          fs.writeFileSync(fullPath, c.content || "", "utf8");
+        }
+      }
+    }
+    const scope = mutationFixtureScope(dir, changes, projectId, "stage-1");
+    const guard = CapabilityGuard.create({ workspaceRoot: dir, scopeId: "stage-1", authorizedScope: scope });
+    return new FileSystemStateManager(guard, "stage-1");
+  }
 
   // ── TEST 1: Installed react import accepted ─────────────────────────────────
   test("TEST 1: Installed react import is accepted by ManifestValidator & ImportValidator", () => {
@@ -234,13 +251,16 @@ describe("Dependency-Aware Generation and Missing-Dependency Routing (Section J)
     };
     jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
+    const changes12: AgentFileChange[] = [{ path: "app/components/Calculator.tsx", action: "create", content: "import { evaluate } from 'mathjs';", description: "calc" }];
+    const fsManager12 = createAuthorizedFsManager(tempDir, changes12, "proj-1");
+
     const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/components/Calculator.tsx", action: "create", content: "import { evaluate } from 'mathjs';", description: "calc" }],
+      changes12,
       tempDir,
       ["npm run build"],
       "prompt",
       "create calculator",
-      new FileSystemStateManager(),
+      fsManager12,
       "proj-1",
       undefined,
       { files: [{ path: "app/components/Calculator.tsx", action: "create", dependencies: [], description: "calc" }], totalFiles: 1, manifestVersion: "1.0.0" },
@@ -299,13 +319,16 @@ describe("Dependency-Aware Generation and Missing-Dependency Routing (Section J)
     };
     jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
 
+    const changes13: AgentFileChange[] = [{ path: "app/page.tsx", action: "modify", content: "const a: string = foo;\n", description: "page" }];
+    const fsManager13 = createAuthorizedFsManager(tempDir, changes13, "proj-1");
+
     const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/page.tsx", action: "modify", content: "const a: string = foo;\n", description: "page" }],
+      changes13,
       tempDir,
       ["npm run build"],
       "prompt",
       "fix",
-      new FileSystemStateManager(),
+      fsManager13,
       "proj-1",
       undefined,
       { files: [{ path: "app/page.tsx", action: "modify", dependencies: [], description: "page" }], totalFiles: 1, manifestVersion: "1.0.0" },

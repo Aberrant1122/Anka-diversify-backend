@@ -6,6 +6,7 @@ import { TaskExecutionPlan, TaskExecutionStage } from "../shared/TaskExecutionPl
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { RepositoryStateRefresher } from "../repository/RepositoryStateRefresher";
 import { CapabilityGuard } from "../runtime/CapabilityGuard";
+import { MutationTransaction } from "../runtime/MutationTransaction";
 
 const IGNORED_DIRS = new Set([
   ".git",
@@ -103,11 +104,12 @@ export class StageExecutionTransaction {
     stageId: string,
     localPath?: string | null,
     capabilityGuard: CapabilityGuard = CapabilityGuard.denyAll(),
+    mutationTransaction?: MutationTransaction,
   ): Promise<StageExecutionTransaction> {
     const checkpointId = `chk_${stageId}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const initialFiles = new Set<string>();
     const initialContentMap = new Map<string, string>();
-    const fsManager = new FileSystemStateManager(capabilityGuard, stageId);
+    const fsManager = new FileSystemStateManager(capabilityGuard, mutationTransaction?.id ?? stageId, mutationTransaction);
 
     const normalizedLocalPath = localPath ? path.resolve(localPath) : null;
 
@@ -160,8 +162,8 @@ export class StageExecutionTransaction {
    */
   public async commit(): Promise<void> {
     if (this.checkpoint.rolledBack || this.checkpoint.committed) return;
-    this.checkpoint.committed = true;
     this.checkpoint.fsManager.commit();
+    this.checkpoint.committed = true;
     if (this.checkpoint.localPath) {
       try {
         await RepositoryStateRefresher.refreshRepositoryState({
@@ -186,16 +188,11 @@ export class StageExecutionTransaction {
     if (this.checkpoint.rolledBack || this.checkpoint.committed || !this.checkpoint.localPath) {
       return;
     }
-    this.checkpoint.rolledBack = true;
-
     const localPath = this.checkpoint.localPath;
 
     // 1. FilesystemStateManager rollback for all tracked/snapshotted files
-    try {
-      await this.checkpoint.fsManager.rollback(localPath);
-    } catch (err) {
-      console.error(`[StageTransaction] fsManager.rollback error for stage "${this.checkpoint.stageId}":`, err);
-    }
+    await this.checkpoint.fsManager.rollback(localPath);
+    this.checkpoint.rolledBack = true;
 
     // All rollback writes are restricted to paths previously authorized and touched by fsManager.
     if (fs.existsSync(localPath)) {

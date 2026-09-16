@@ -1,3 +1,4 @@
+import { bindUserRequest } from "../repository/TrustedTaskContext";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -22,7 +23,8 @@ describe("Hotfix 05 — pre-execution authority closure", () => {
   beforeEach(() => { workspace = fs.mkdtempSync(path.join(os.tmpdir(), "anka-hf05-")); fs.mkdirSync(path.join(workspace, "src")); });
   afterEach(() => fs.rmSync(workspace, { recursive: true, force: true }));
 
-  test("late generated target is authorized only after authentic deterministic relation evidence", () => {
+  test("late generated target is authorized only after a task-rooted authentic relation", () => {
+    bindUserRequest(intent, "Repair src/consumer.ts");
     fs.writeFileSync(path.join(workspace, "src", "consumer.ts"), "import { loadItems } from './implementation'; loadItems();");
     fs.writeFileSync(path.join(workspace, "src", "implementation.ts"), "export function loadItems() { return []; }");
     const evidence = new RepositoryEvidenceStore("repo", workspace);
@@ -33,6 +35,7 @@ describe("Hotfix 05 — pre-execution authority closure", () => {
   });
 
   test("unrelated generated file rejects the entire atomic group before execution", () => {
+    bindUserRequest(intent, "Repair src/a.ts");
     fs.writeFileSync(path.join(workspace, "src", "a.ts"), "export const a = 1;");
     fs.writeFileSync(path.join(workspace, "src", "b.ts"), "export const b = 1;");
     const evidence = new RepositoryEvidenceStore("repo", workspace);

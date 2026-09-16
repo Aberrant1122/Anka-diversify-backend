@@ -1,10 +1,16 @@
+import { TaskRootedAuthorizationVerifier } from "../contracts/TaskRootedAuthorizationProof";
+import { withAuthoritySnapshot } from "./AuthorityWorktree";
 import { RepositoryToolEngine } from "../../services/repository-tool.engine";
-import { RepositoryEvidenceStore, RepositoryEvidence } from "./RepositoryEvidenceStore";
+import { RepositoryEvidenceStore } from "./RepositoryEvidenceStore";
 import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { RepositoryArchitectureSummary } from "../planning/RepositoryArchitectureDetector";
 import { normalizeRepoPath } from "./SemanticContextResolver";
 import { LLMGateway } from "../gateway/LLMGateway";
 import { PipelineStages } from "../gateway/PipelineStage";
+import { TaskAnchorResolver } from "./TaskAnchorResolver";
+import { isApiArchitectureTask } from "./StaticApiArchitecture";
+import { DestructiveTargetResolver } from "../contracts/DestructiveTargetResolver";
+import { trustedUserRequest } from "./TrustedTaskContext";
 
 export interface InvestigationToolCall {
   tool: string;
@@ -65,10 +71,6 @@ function normalizeExactRepositoryTarget(value: unknown): string | null {
   return normalized;
 }
 
-function isMaterializedRepositoryEvidence(evidence: RepositoryEvidence): boolean {
-  return evidence.provenance !== "SEMANTIC_SEARCH" && normalizeExactRepositoryTarget(evidence.filePath) !== null;
-}
-
 function validateInvestigationToolParams(tool: string, params: Record<string, unknown>): boolean {
   const allowedByTool: Record<string, string[]> = {
     repo_readFile: ["filePath", "startLine", "endLine"],
@@ -123,6 +125,8 @@ export class RepositoryInvestigationAgent {
   private architectureSummary?: RepositoryArchitectureSummary;
   private maxRounds: number;
   private openaiClient?: any;
+  private localPath?: string | null;
+  private ambiguousRuntimeRoutes: string[] = [];
 
   constructor(options: RepositoryInvestigationOptions) {
     this.toolEngine = options.toolEngine;
@@ -131,6 +135,7 @@ export class RepositoryInvestigationAgent {
     this.architectureSummary = options.architectureSummary;
     this.maxRounds = options.maxRounds || 5;
     this.openaiClient = options.openaiClient;
+    this.localPath = options.localPath ?? options.evidenceStore.getDefaultWorkspace() ?? null;
   }
 
   /**
@@ -143,6 +148,42 @@ export class RepositoryInvestigationAgent {
     let roundNumber = 1;
     let readyToPlan = false;
     let missingEvidence: string[] = [];
+
+    // Resolve natural-language destructive targets before readiness is checked.
+    // The resolver derives the target from the trusted request and current
+    // repository state; semantic candidates and model output grant no authority.
+    if (this.intentSpec.destructive && !this.intentSpec.resolvedTarget && this.localPath) {
+      const repositoryFiles = typeof this.toolEngine.getIndexedFilePaths === "function"
+        ? this.toolEngine.getIndexedFilePaths()
+        : [];
+      const resolution = DestructiveTargetResolver.resolve(
+        trustedUserRequest(this.intentSpec) || this.intentSpec.goal,
+        repositoryFiles,
+        {
+          isDestructive: true,
+          taskType: this.intentSpec.taskType,
+          evidenceStore: this.evidenceStore,
+          repositoryId: this.evidenceStore.getRepositoryId(),
+          localPath: this.localPath,
+        },
+      );
+      if (resolution.status === "RESOLVED" && resolution.resolvedTarget) {
+        this.intentSpec.resolvedTarget = resolution.resolvedTarget;
+      }
+    }
+
+    const routeAnchors = TaskAnchorResolver.resolve({
+      intentSpec: this.intentSpec,
+      repositoryFiles: typeof this.toolEngine.getIndexedFilePaths === "function" ? this.toolEngine.getIndexedFilePaths() : [],
+      repositoryId: this.evidenceStore.getRepositoryId(),
+      workspaceRoot: this.localPath || undefined,
+      evidenceStore: this.evidenceStore,
+    });
+    this.ambiguousRuntimeRoutes = [...routeAnchors.ambiguousRoutes, ...routeAnchors.ambiguousApiResources.map((resource) => `API resource ${resource}`)];
+    for (const anchor of [...routeAnchors.anchors.map((item) => item.filePath), ...routeAnchors.apiAnchors, ...routeAnchors.testAnchors]) allExploredFiles.add(normalizeRepoPath(anchor));
+    if (this.ambiguousRuntimeRoutes.length > 0) {
+      missingEvidence.push(`Task route resolution is ambiguous: ${this.ambiguousRuntimeRoutes.join(", ")}`);
+    }
 
     // Pre-seed known architectural entry points into evidence store
     if (this.architectureSummary?.existingEntryPoints) {
@@ -175,7 +216,7 @@ export class RepositoryInvestigationAgent {
       console.log(`[INVESTIGATION] round=${roundNumber} goal="${this.intentSpec.goal}"`);
 
       // 1. Get tool decisions from model or evidence-based planner
-      const nextActions = await this.decideNextToolCalls(roundNumber, executedHashes);
+      let nextActions = await this.decideNextToolCalls(roundNumber, executedHashes);
 
       if (nextActions.readyToPlan) {
         const stopCheck = this.evaluateStopConditions();
@@ -188,9 +229,12 @@ export class RepositoryInvestigationAgent {
       }
 
       if (!nextActions.toolCalls || nextActions.toolCalls.length === 0) {
-        // No further tools to call
-        console.log(`[INVESTIGATION] round=${roundNumber} readyToPlan=false No more tool calls proposed.`);
-        break;
+        const followUp = this.fallbackToolPlanner(roundNumber, executedHashes);
+        if (followUp.toolCalls.length === 0) {
+          console.log(`[INVESTIGATION] round=${roundNumber} readyToPlan=false reason="${missingEvidence.join("; ") || "No deterministic follow-up remains"}"`);
+          break;
+        }
+        nextActions = followUp;
       }
 
       // 2. Execute approved tools read-only and materialize verified evidence
@@ -384,28 +428,33 @@ INSTRUCTIONS:
           });
         }
       }
-      // Inspect component / UI structure
-      calls.push({
-        tool: "repo_findComponent",
-        params: { componentName: "App" },
-        reason: "Inspect root application component",
-      });
+      if (isApiArchitectureTask(this.intentSpec.goal)) {
+        calls.push({
+          tool: "repo_searchArchitecture",
+          params: { query: this.intentSpec.goal, layer: "business" },
+          reason: "Inspect the existing API business-layer architecture",
+        });
+      } else {
+        calls.push({
+          tool: "repo_findComponent",
+          params: { componentName: "App" },
+          reason: "Inspect root application component",
+        });
+      }
     } else {
       // Round 2+: Materialize candidates and follow references
       for (const ev of currentEvidence) {
-        if (ev.kind === "FILE" && !ev.symbol) {
+        if (ev.provenance === "SEMANTIC_SEARCH" && !currentEvidence.some((candidate) =>
+          candidate.provenance === "REPO_READ" && normalizeRepoPath(candidate.filePath) === normalizeRepoPath(ev.filePath))) {
           calls.push({
-            tool: "repo_findReferences",
-            params: { symbolName: ev.filePath },
-            reason: `Trace callers and imports for investigated file: ${ev.filePath}`,
+            tool: "repo_readFile",
+            params: { filePath: ev.filePath },
+            reason: `Materialize semantic candidate from current worktree: ${ev.filePath}`,
           });
         }
       }
 
       // Check if we have enough evidence
-      if (currentEvidence.length >= 1) {
-        return { readyToPlan: true, toolCalls: [], reason: "Discovered sufficient repository evidence." };
-      }
     }
 
     const filtered = calls.filter((c) => !executedHashes.has(`${c.tool}:${JSON.stringify(c.params)}`));
@@ -491,9 +540,18 @@ INSTRUCTIONS:
     // 5. repo_findReferences confirms import / call link between source and target
     if (toolName === "repo_findReferences" && Array.isArray(parsed.references)) {
       for (const ref of parsed.references) {
+        // A reference is a two-file fact.  A returned usage location without a
+        // verified target is existence-only and must never be upgraded to
+        // authority-eligible REFERENCE evidence.
+        const targetFile = normalizeExactRepositoryTarget(ref.targetFile || params.sourceFilePath);
+        const sourceFile = normalizeExactRepositoryTarget(ref.file);
+        if (!targetFile || !sourceFile || sourceFile === targetFile || ref.referenceType === "definition") {
+          continue;
+        }
         this.evidenceStore.observeRepository({
           kind: "REFERENCE",
-          filePath: ref.file,
+          filePath: targetFile,
+          sourceFile,
           symbol: params.symbolName,
           provenance: "REFERENCE_SEARCH",
           metadata: { referenceType: ref.referenceType, line: ref.line },
@@ -509,12 +567,18 @@ INSTRUCTIONS:
         if (hit.filePath) {
           const check = this.toolEngine.readFile({ filePath: hit.filePath });
           if (check.found) {
-            this.evidenceStore.observeRepository({
+            this.evidenceStore.addEvidence({
               kind: "FILE",
               filePath: hit.filePath,
               symbol: hit.symbolName,
               provenance: "SEMANTIC_SEARCH",
               metadata: { relevanceScore: hit.relevanceScore },
+            });
+            this.evidenceStore.observeRepository({
+              kind: "FILE",
+              filePath: check.filePath,
+              provenance: "REPO_READ",
+              metadata: { materializedFrom: "SEMANTIC_SEARCH", totalLines: check.totalLines },
             });
             allExploredFiles.add(normalizeRepoPath(hit.filePath));
           }
@@ -560,6 +624,11 @@ INSTRUCTIONS:
     const allEvidence = this.evidenceStore.getAllEvidence();
     const missing: string[] = [];
 
+    if (this.ambiguousRuntimeRoutes.length > 0) {
+      missing.push(`Runtime route resolution is ambiguous: ${this.ambiguousRuntimeRoutes.join(", ")}`);
+      return { ready: false, missing };
+    }
+
     if (allEvidence.length === 0) {
       missing.push("No verified repository evidence discovered yet.");
       return { ready: false, missing };
@@ -567,7 +636,7 @@ INSTRUCTIONS:
 
     const materializedEvidencePaths = new Set(
       allEvidence
-        .filter(isMaterializedRepositoryEvidence)
+        .filter((evidence) => this.evidenceStore.isAuthorityEligible(evidence) && evidence.provenance !== "SEMANTIC_SEARCH")
         .map((e) => normalizeExactRepositoryTarget(e.filePath))
         .filter((path): path is string => path !== null),
     );
@@ -605,6 +674,19 @@ INSTRUCTIONS:
         .filter((target) => !materializedEvidencePaths.has(target));
       if (missingDestructiveTargets.length > 0) {
         missing.push(`Destructive repository target(s) lack exact materialized evidence: ${missingDestructiveTargets.join(", ")}`);
+        return { ready: false, missing };
+      }
+    }
+
+    const isMutationTask = this.intentSpec.taskType !== "UNKNOWN" || this.intentSpec.operations.some((operation) =>
+      operation.kind === "CREATE" || operation.kind === "MODIFY" || operation.kind === "DELETE" ||
+      operation.kind === "REPAIR" || operation.kind === "REFACTOR");
+    if (isMutationTask) {
+      const workspace = this.evidenceStore.getDefaultWorkspace();
+      const hasDeterministicTaskGrounding = !!workspace && !!this.evidenceStore.getCanonicalWorkspaceRoot() && withAuthoritySnapshot(workspace, () =>
+        TaskRootedAuthorizationVerifier.roots(this.evidenceStore, this.intentSpec).length > 0);
+      if (!hasDeterministicTaskGrounding) {
+        missing.push("Mutation planning requires deterministic task-grounded evidence; semantic candidates and FILE reads establish discovery or existence only.");
         return { ready: false, missing };
       }
     }

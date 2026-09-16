@@ -1,3 +1,5 @@
+import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { DeterministicRelationEvidenceAcquirer } from "../contracts/DeterministicRelationEvidenceAcquirer";
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -189,6 +191,8 @@ describe("Hotfix 03: Route References Must Not Become Filesystem Write Authority
       const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "hotfix03-evidence-"));
       fs.mkdirSync(path.join(workspace, "lib"), { recursive: true });
       fs.writeFileSync(path.join(workspace, "lib", "mock-data.ts"), "export function getTasksByProject() {}", "utf8");
+      fs.mkdirSync(path.join(workspace, "app/projects/[id]"), { recursive: true });
+      fs.writeFileSync(path.join(workspace, "app/projects/[id]/page.tsx"), "import { getTasksByProject } from '../../../lib/mock-data'; export default getTasksByProject;");
       const evidenceStore = new RepositoryEvidenceStore("proj-1", workspace);
       const fileEvidence = evidenceStore.observeRepository({
         kind: "FILE",
@@ -215,6 +219,8 @@ describe("Hotfix 03: Route References Must Not Become Filesystem Write Authority
         requiresClarification: false,
       };
 
+      bindUserRequest(intentSpec, "Fix associated backlog tasks rendering at /projects/proj-1");
+      DeterministicRelationEvidenceAcquirer.acquire({ candidatePaths: ["lib/mock-data.ts"], intentSpec, evidenceStore, repositoryId: "proj-1", workspaceRoot: workspace, existingFiles: sampleRepoFiles });
       const policy = buildPolicyContract(intentSpec, sampleRepoFiles);
 
       const proposedChanges: PlannedChange[] = [

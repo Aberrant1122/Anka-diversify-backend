@@ -1,3 +1,7 @@
+import fs from "fs";
+import os from "os";
+import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { productionIsAuthorityEligible } from "./helpers/capability-test-harness";
 import path from "path";
 import { EvidenceBoundWriteSetResolver, PlannedChange } from "../contracts/EvidenceBoundWriteSetResolver";
 import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
@@ -10,6 +14,39 @@ import { RepositoryToolEngine } from "../../services/repository-tool.engine";
 import { RepositoryInvestigationAgent } from "../repository/RepositoryInvestigationAgent";
 
 describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority Tests", () => {
+  let workspace: string;
+  const fixtureFiles: Record<string, string> = {
+    "src/App.tsx": "export function App() { return null; }",
+    "src/components/Header.tsx": "import { Button } from './Button'; export function Header() { return Button(); }",
+    "src/components/Button.tsx": "export function Button() { return null; }",
+    "src/components/PrimaryButton.tsx": "export function PrimaryButton() { return null; }",
+    "src/Button.tsx": "export function Button() { return null; }",
+    "src/workspace/ZenMode.tsx": "export const ZenMode = () => null;",
+    "src/nav.tsx": "export const Navbar = () => null;",
+    "src/ForeignService.ts": "export const foreignService = true;",
+    "src/legacy.ts": "export const legacy = true;",
+    "src/unrelated/Dashboard.tsx": "export const Dashboard = () => null;",
+    "packages/frontend/src/App.tsx": "export const App = () => null;",
+  };
+  beforeEach(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), "phase2-rooted-"));
+    for (const [file, content] of Object.entries(fixtureFiles)) {
+      fs.mkdirSync(path.dirname(path.join(workspace, file)), { recursive: true });
+      fs.writeFileSync(path.join(workspace, file), content);
+    }
+    bindUserRequest(defaultIntent, "Add user profile settings");
+  });
+  afterEach(() => { fs.rmSync(workspace, { recursive: true, force: true }); });
+  function store(repositoryId = "test-repo") {
+    const result = new RepositoryEvidenceStore(repositoryId, workspace);
+    result.isAuthorityEligible = productionIsAuthorityEligible.bind(result);
+    return result;
+  }
+  function task(request: string): TaskIntentSpec {
+    const result = { ...defaultIntent };
+    bindUserRequest(result, request);
+    return result;
+  }
   const defaultPolicy: PolicyContract = {
     goal: "Add user profile settings",
     taskType: "NEW_FEATURE",
@@ -49,13 +86,13 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
       { path: "src/App.tsx", content: "import React from 'react'; export function App() { return <div>App</div>; }" },
       { path: "src/components/Header.tsx", content: "export function Header() { return <header>Header</header>; }" },
     ];
-    const toolEngine = new RepositoryToolEngine(fakeSnapshot);
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const toolEngine = new RepositoryToolEngine(fakeSnapshot, workspace);
+    const evidenceStore = store();
 
     const agent = new RepositoryInvestigationAgent({
       toolEngine,
       evidenceStore,
-      intentSpec: defaultIntent,
+      intentSpec: task("Update src/App.tsx"),
     });
 
     const result = await agent.investigate();
@@ -71,7 +108,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
       { path: "src/controllers/auth.controller.ts", content: "import { AuthService } from '../services/auth';" },
     ];
     const toolEngine = new RepositoryToolEngine(fakeSnapshot);
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
 
     const intent: TaskIntentSpec = {
       ...defaultIntent,
@@ -93,7 +130,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 3. Evidence IDs backend-generated
   test("3. Evidence IDs are strictly backend-generated with 'evi_' prefix", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
     const ev = evidenceStore.addEvidence({
       kind: "FILE",
       filePath: "src/components/Header.tsx",
@@ -106,7 +143,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 4. Invented evidence ID rejected
   test("4. Invented / hallucinated evidence IDs are rejected by resolver", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
+    const evidenceStore = store();
     const proposed: PlannedChange[] = [
       {
         path: "src/App.tsx",
@@ -131,8 +168,8 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 5. Semantic-only candidate rejected
   test("5. Semantic candidate without verifiable file existence is rejected", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const ev = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const ev = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/GhostComponent.tsx",
       provenance: "SEMANTIC_SEARCH",
@@ -157,13 +194,13 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
     });
 
     expect(res.approvedPaths).toHaveLength(0);
-    expect(res.rejectedPaths.some((r) => r.reason.includes("does not exist in repository"))).toBe(true);
+    expect(res.rejectedPaths.some((r) => r.reason.includes("UNAUTHENTICATED_REPOSITORY_EVIDENCE"))).toBe(true);
   });
 
   // 6. Read-file evidence proves existence only; relation required
   test("6. FILE existence alone does not authorize MODIFY without task relation", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const ev = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const ev = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/App.tsx",
       provenance: "REPO_READ",
@@ -188,13 +225,14 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
       existingFiles: ["src/App.tsx"],
     });
     expect(resWithoutRelation.approvedPaths).not.toContain("src/App.tsx");
-    expect(resWithoutRelation.rejectedPaths.some((r) => r.path === "src/App.tsx" && r.reason.includes("relation"))).toBe(true);
+    expect(resWithoutRelation.rejectedPaths.some((r) => r.path === "src/App.tsx" && r.reason.includes("NO_TASK_OR_STRUCTURAL_RELATION"))).toBe(true);
 
     // With relation evidence added (e.g. explicit user path or symbol/reference), MODIFY is authorized
     const intentWithExplicitPath: TaskIntentSpec = {
       ...defaultIntent,
       explicitUserPaths: ["src/App.tsx"],
     };
+    bindUserRequest(intentWithExplicitPath, "Update src/App.tsx");
     const resWithRelation = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
       intentSpec: intentWithExplicitPath,
@@ -207,13 +245,13 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 7. Import / reference evidence accepted
   test("7. Reference evidence proves relationship to callers", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evFile = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evFile = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/components/Button.tsx",
       provenance: "REPO_READ",
     });
-    const evRef = evidenceStore.addEvidence({
+    const evRef = evidenceStore.observeRepository({
       kind: "REFERENCE",
       filePath: "src/components/Button.tsx",
       sourceFile: "src/components/Header.tsx",
@@ -232,7 +270,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
     const res = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
-      intentSpec: defaultIntent,
+      intentSpec: task("Update the button rendered by src/components/Header.tsx"),
       proposedChanges: proposed,
       evidenceStore,
       existingFiles: ["src/components/Button.tsx", "src/components/Header.tsx"],
@@ -243,8 +281,8 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 8. CREATE requires integration evidence
   test("8. CREATE is authorized when parent modification imports it", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evHeader = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evHeader = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/components/Header.tsx",
       provenance: "REPO_READ",
@@ -269,7 +307,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
     const res = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
-      intentSpec: defaultIntent,
+      intentSpec: task("Create src/components/ThemeToggle.tsx and integrate it in src/components/Header.tsx"),
       proposedChanges: proposed,
       evidenceStore,
       existingFiles: ["src/components/Header.tsx"],
@@ -281,8 +319,8 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 9. Orphan CREATE rejected
   test("9. Orphan CREATE without integration proof is rejected", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evHeader = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evHeader = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/components/Header.tsx",
       provenance: "REPO_READ",
@@ -307,13 +345,13 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
     });
 
     expect(res.approvedPaths).not.toContain("src/components/OrphanWidget.tsx");
-    expect(res.rejectedPaths.some((r) => r.path === "src/components/OrphanWidget.tsx" && r.reason.includes("Orphan CREATE"))).toBe(true);
+    expect(res.rejectedPaths.some((r) => r.path === "src/components/OrphanWidget.tsx" && r.reason.includes("NO_TASK_OR_STRUCTURAL_RELATION"))).toBe(true);
   });
 
   // 10. DELETE requires structured destructive intent
   test("10. DELETE operation without destructive intent is rejected", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const ev = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const ev = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/legacy.ts",
       provenance: "REPO_READ",
@@ -324,6 +362,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
       destructive: false, // NOT destructive
     };
 
+    bindUserRequest(constructiveIntent, "Update src/legacy.ts");
     const proposed: PlannedChange[] = [
       {
         path: "src/legacy.ts",
@@ -336,6 +375,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
     const constructivePolicy: PolicyContract = {
       ...defaultPolicy,
+      forbiddenActions: [],
       allowedActions: ["modify_file", "create_files", "delete_file"],
     };
 
@@ -353,18 +393,18 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 11. Active entry is not automatic authority
   test("11. Active entry points are not auto-added unless proposed by planner", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    evidenceStore.addEvidence({
+    const evidenceStore = store();
+    evidenceStore.observeRepository({
       kind: "ENTRY_POINT",
       filePath: "src/App.tsx",
       provenance: "ARCHITECTURE_DETECTOR",
     });
-    const evButton = evidenceStore.addEvidence({
+    const evButton = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/components/Button.tsx",
       provenance: "REPO_READ",
     });
-    const evBtnSym = evidenceStore.addEvidence({
+    const evBtnSym = evidenceStore.observeRepository({
       kind: "SYMBOL",
       filePath: "src/components/Button.tsx",
       symbol: "Button",
@@ -383,7 +423,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
     const res = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
-      intentSpec: defaultIntent,
+      intentSpec: task("Update src/components/Button.tsx"),
       proposedChanges: proposed,
       evidenceStore,
       existingFiles: ["src/App.tsx", "src/components/Button.tsx"],
@@ -395,8 +435,8 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 12. Stylesheet ownership evidence
   test("12. Stylesheet requires proven import or dependency evidence", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evApp = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evApp = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/App.tsx",
       provenance: "REPO_READ",
@@ -421,7 +461,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
     const res = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
-      intentSpec: defaultIntent,
+      intentSpec: task("Create src/theme.css and integrate it in src/App.tsx"),
       proposedChanges: proposed,
       evidenceStore,
       existingFiles: ["src/App.tsx"],
@@ -432,8 +472,8 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 13. Unrelated candidate rejection
   test("13. High-score unrelated candidate is rejected without task evidence", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evUnrelated = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evUnrelated = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/unrelated/Dashboard.tsx",
       provenance: "SEMANTIC_SEARCH",
@@ -459,13 +499,13 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
     // Unrelated candidate rejected
     expect(res.approvedPaths).not.toContain("src/unrelated/Dashboard.tsx");
-    expect(res.rejectedPaths.some((r) => r.path === "src/unrelated/Dashboard.tsx" && r.reason.includes("relation"))).toBe(true);
+    expect(res.rejectedPaths.some((r) => r.path === "src/unrelated/Dashboard.tsx" && r.reason.includes("UNAUTHENTICATED_REPOSITORY_EVIDENCE"))).toBe(true);
   });
 
   // 14. Monorepo workspace isolation
   test("14. Monorepo workspace boundaries are enforced", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const ev = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const ev = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "packages/frontend/src/App.tsx",
       provenance: "REPO_READ",
@@ -501,8 +541,8 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 15. Multi-repo evidence isolation
   test("15. Evidence from foreign repository cannot authorize target repo write", () => {
-    const evidenceStore = new RepositoryEvidenceStore("repo-A");
-    const evForeign = evidenceStore.addEvidence({
+    const evidenceStore = store("repo-A");
+    const evForeign = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/ForeignService.ts",
       provenance: "REPO_READ",
@@ -525,7 +565,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
       proposedChanges: proposed,
       evidenceStore,
       existingFiles: ["src/ForeignService.ts"],
-      targetRepositoryId: "repo-A", // Target is repo-A
+      targetRepositoryId: "repo-B", // Authenticated observation belongs to repo-A
     });
 
     expect(res.approvedPaths).toHaveLength(0);
@@ -534,13 +574,13 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 16. Manifest receives exact final write set
   test("16. ExecutionContract targetPaths matches approved write set exactly", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const ev = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const ev = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/Button.tsx",
       provenance: "REPO_READ",
     });
-    const evSym = evidenceStore.addEvidence({
+    const evSym = evidenceStore.observeRepository({
       kind: "SYMBOL",
       filePath: "src/Button.tsx",
       symbol: "Button",
@@ -553,7 +593,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
     const res = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
-      intentSpec: defaultIntent,
+      intentSpec: task("Update src/Button.tsx"),
       proposedChanges: proposed,
       evidenceStore,
       existingFiles: ["src/Button.tsx"],
@@ -594,13 +634,13 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
   // 18. Local change remains local
   test("18. Local change task only authorizes the local target", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const evBtn = evidenceStore.addEvidence({
+    const evidenceStore = store();
+    const evBtn = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/components/PrimaryButton.tsx",
       provenance: "REPO_READ",
     });
-    const evBtnSym = evidenceStore.addEvidence({
+    const evBtnSym = evidenceStore.observeRepository({
       kind: "SYMBOL",
       filePath: "src/components/PrimaryButton.tsx",
       symbol: "PrimaryButton",
@@ -619,7 +659,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
 
     const res = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
-      intentSpec: defaultIntent,
+      intentSpec: task("Change the text in src/components/PrimaryButton.tsx"),
       proposedChanges: proposed,
       evidenceStore,
       existingFiles: ["src/components/PrimaryButton.tsx", "src/App.tsx", "src/index.css"],
@@ -631,14 +671,14 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
   });
 
   // 19. Unknown feature works through investigation
-  test("19. Unknown feature 'zen workspace switch' works via evidence investigation", () => {
-    const evidenceStore = new RepositoryEvidenceStore("test-repo");
-    const ev = evidenceStore.addEvidence({
+  test("19. Unknown feature name plus a real symbol cannot establish a task root", () => {
+    const evidenceStore = store();
+    const ev = evidenceStore.observeRepository({
       kind: "FILE",
       filePath: "src/workspace/ZenMode.tsx",
       provenance: "REPO_READ",
     });
-    const evSym = evidenceStore.addEvidence({
+    const evSym = evidenceStore.observeRepository({
       kind: "SYMBOL",
       filePath: "src/workspace/ZenMode.tsx",
       symbol: "ZenMode",
@@ -663,33 +703,35 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
       existingFiles: ["src/workspace/ZenMode.tsx"],
     });
 
-    expect(res.approvedPaths).toContain("src/workspace/ZenMode.tsx");
+    expect(res.approvedPaths).toEqual([]);
+    expect(res.rejectedPaths[0].reason).toContain("NO_TASK_OR_STRUCTURAL_RELATION");
   });
 
   // 20. Identical task semantics with different wording produce equivalent behavior
   test("20. Rephrased prompts with identical semantics authorize the same target paths", () => {
-    const evidenceStore1 = new RepositoryEvidenceStore("test-repo");
-    const ev1 = evidenceStore1.addEvidence({ kind: "FILE", filePath: "src/nav.tsx", provenance: "REPO_READ" });
-    const evSym1 = evidenceStore1.addEvidence({ kind: "SYMBOL", filePath: "src/nav.tsx", symbol: "Navbar", provenance: "AST_GRAPH" });
+    const evidenceStore1 = store();
+    const ev1 = evidenceStore1.observeRepository({ kind: "FILE", filePath: "src/nav.tsx", provenance: "REPO_READ" });
+    const evSym1 = evidenceStore1.observeRepository({ kind: "SYMBOL", filePath: "src/nav.tsx", symbol: "Navbar", provenance: "AST_GRAPH" });
     const res1 = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
-      intentSpec: { ...defaultIntent, goal: "Add logout button to navbar" },
+      intentSpec: task("Add logout button to src/nav.tsx"),
       proposedChanges: [{ path: "src/nav.tsx", action: "modify", reason: "Logout button", evidenceIds: [ev1.id, evSym1.id], dependencies: [] }],
       evidenceStore: evidenceStore1,
       existingFiles: ["src/nav.tsx"],
     });
 
-    const evidenceStore2 = new RepositoryEvidenceStore("test-repo");
-    const ev2 = evidenceStore2.addEvidence({ kind: "FILE", filePath: "src/nav.tsx", provenance: "REPO_READ" });
-    const evSym2 = evidenceStore2.addEvidence({ kind: "SYMBOL", filePath: "src/nav.tsx", symbol: "Navbar", provenance: "AST_GRAPH" });
+    const evidenceStore2 = store();
+    const ev2 = evidenceStore2.observeRepository({ kind: "FILE", filePath: "src/nav.tsx", provenance: "REPO_READ" });
+    const evSym2 = evidenceStore2.observeRepository({ kind: "SYMBOL", filePath: "src/nav.tsx", symbol: "Navbar", provenance: "AST_GRAPH" });
     const res2 = EvidenceBoundWriteSetResolver.resolve({
       policy: defaultPolicy,
-      intentSpec: { ...defaultIntent, goal: "Put a sign out action inside the navigation bar" },
+      intentSpec: task("Put a sign out action inside src/nav.tsx"),
       proposedChanges: [{ path: "src/nav.tsx", action: "modify", reason: "Sign out action", evidenceIds: [ev2.id, evSym2.id], dependencies: [] }],
       evidenceStore: evidenceStore2,
       existingFiles: ["src/nav.tsx"],
     });
 
     expect(res1.approvedPaths).toEqual(res2.approvedPaths);
+    expect(res1.approvedPaths).toEqual(["src/nav.tsx"]);
   });
 });

@@ -5,6 +5,10 @@ import { SurgicalPatchEngine, ErrorDiagnosticsParser } from "../../services/surg
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import { FileSystemStateManager } from "../validation/FileSystemStateManager";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
+import { reconcileExecutionManifest } from "../runtime/ExecutionManifest";
+import { MutationTransaction } from "../runtime/MutationTransaction";
+import { CapabilityGuard } from "../runtime/CapabilityGuard";
 
 describe("Deterministic TypeScript Duplicate-Export Surgical Repair (Steps A-H)", () => {
   let tempDir: string;
@@ -144,7 +148,9 @@ export default Calculator;
 export { CalculatorButton, CalculatorDisplay };
 `;
 
-    const fsManager = new FileSystemStateManager();
+    fs.mkdirSync(path.join(tempDir, "components"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, calcFile), initialContent, "utf8");
+
     const initialChanges = [
       {
         path: calcFile,
@@ -154,9 +160,12 @@ export { CalculatorButton, CalculatorDisplay };
       },
     ];
 
-    const approvedManifest = {
-      files: [{ path: calcFile, action: "modify" as const, reason: "Calculator" }],
-    };
+    const scope = mutationFixtureScope(tempDir, initialChanges, "proj-test-surgical", "surgical-stage");
+    const manifest = reconcileExecutionManifest(scope, null);
+    const tx = MutationTransaction.create(scope, manifest);
+    const fsManager = new FileSystemStateManager(CapabilityGuard.forTransaction(tx, tx.primary), tx.id, tx);
+
+    const approvedManifest = manifest;
 
     const executionContract = {
       allowedFiles: [calcFile],
@@ -168,13 +177,17 @@ export { CalculatorButton, CalculatorDisplay };
     jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
       buildAttempts++;
       if (buildAttempts === 1) {
-        // First build fails with Next.js type error about duplicate CalculatorButton
+        // Baseline check succeeds (clean baseline before agent change)
+        return { success: true, errors: "" };
+      }
+      if (buildAttempts === 2) {
+        // Current build with initialChanges fails with Next.js type error about duplicate CalculatorButton
         return {
           success: false,
           errors: `./components/Calculator.tsx:4:14\nType error: Cannot redeclare exported variable 'CalculatorButton'.`,
         };
       }
-      // After surgical removal of line 17, second build succeeds!
+      // After surgical removal of duplicate export, candidate build succeeds!
       return {
         success: true,
         errors: "",

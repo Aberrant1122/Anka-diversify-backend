@@ -1,13 +1,18 @@
+import { repositoryPath } from "../repository/RepositoryBoundary";
 import fs from "fs";
 import path from "path";
+import { MutationTransaction, ExecutionWorkspaceBinding } from "./MutationTransaction";
+import { MutationFailure, MutationFailureCode } from "./MutationCompiler";
 import {
   EvidenceBoundAuthorization,
   isAuthenticEvidenceBoundAuthorization,
+  isCurrentEvidenceAuthorization,
 } from "../contracts/EvidenceBoundWriteSetResolver";
 
 export type CapabilityAction = "FILE_CREATE" | "FILE_MODIFY" | "FILE_DELETE";
 
 export type CapabilityDenialCode =
+  | MutationFailureCode
   | "CAPABILITY_POLICY_MISSING"
   | "CAPABILITY_REQUEST_MALFORMED"
   | "CAPABILITY_ACTION_UNKNOWN"
@@ -72,6 +77,9 @@ const KNOWN_ACTIONS: readonly CapabilityAction[] = ["FILE_CREATE", "FILE_MODIFY"
 const AUTHORITY_MARKER = Symbol("backend capability authority");
 
 const authenticCapabilityScopes = new WeakSet<object>();
+const scopeAuthorizations = new WeakMap<object, EvidenceBoundAuthorization>();
+const guardAuthorizations = new WeakMap<object, EvidenceBoundAuthorization>();
+const transactionGuards = new WeakMap<object, { transaction: MutationTransaction; binding: ExecutionWorkspaceBinding }>();
 
 function requireText(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -91,18 +99,6 @@ function isWithin(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function canonicalizeTarget(workspaceRoot: string, normalizedPath: string): string {
-  const absoluteTarget = path.resolve(workspaceRoot, normalizedPath);
-  let existingAncestor = absoluteTarget;
-  while (!fs.existsSync(existingAncestor)) {
-    const parent = path.dirname(existingAncestor);
-    if (parent === existingAncestor) break;
-    existingAncestor = parent;
-  }
-  const canonicalAncestor = fs.realpathSync(existingAncestor);
-  const unresolvedSuffix = path.relative(existingAncestor, absoluteTarget);
-  return path.resolve(canonicalAncestor, unresolvedSuffix);
-}
 
 function readLiveGitHead(workspaceRoot: string): string | null {
   try {
@@ -180,6 +176,12 @@ export class AuthorizedCapabilityScope {
     return this.marker === AUTHORITY_MARKER && authenticCapabilityScopes.has(this);
   }
 
+  /** Read-only provenance for the trusted mutation runtime; never issues authority. */
+  public currentExecutionAuthorization(): EvidenceBoundAuthorization | null {
+    const authorization = scopeAuthorizations.get(this);
+    return this.isAuthentic() && authorization && isCurrentEvidenceAuthorization(authorization) ? authorization : null;
+  }
+
   /**
    * Derives a new immutable execution capability scope ONLY from an authentic base scope
    * AND an authentic EvidenceBoundAuthorization artifact issued by EvidenceBoundWriteSetResolver.
@@ -191,7 +193,7 @@ export class AuthorizedCapabilityScope {
     if (!this.isAuthentic() || !(this instanceof AuthorizedCapabilityScope)) {
       return null;
     }
-    if (!isAuthenticEvidenceBoundAuthorization(evidenceAuthorization)) {
+    if (!isAuthenticEvidenceBoundAuthorization(evidenceAuthorization) || !isCurrentEvidenceAuthorization(evidenceAuthorization)) {
       return null;
     }
 
@@ -260,7 +262,9 @@ export class AuthorizedCapabilityScope {
     // A derived scope is exact to this authorization; it never carries base or prior-stage writes.
     const mode = Object.freeze({ kind: "EXACT_PATHS" as const, grants: Object.freeze([...approvedGrants]) });
     const effectiveRevision = this.baseRevision || authRevision || context?.baseRevision;
-    return new AuthorizedCapabilityScope(derivedAuthorityId, this.workspaceRoot, this.source, mode, effectiveRevision, this.repositoryIdBinding, this.runId);
+    const scope = new AuthorizedCapabilityScope(derivedAuthorityId, this.workspaceRoot, this.source, mode, effectiveRevision, this.repositoryIdBinding, this.runId);
+    scopeAuthorizations.set(scope, evidenceAuthorization);
+    return scope;
   }
 
   private static createExactAuthority(
@@ -300,6 +304,15 @@ export class AuthorizedCapabilityScope {
 export class CapabilityGuard {
   private constructor(private readonly policy: CapabilityPolicy | null) {}
 
+  public static forTransaction(transaction: MutationTransaction, binding: ExecutionWorkspaceBinding): CapabilityGuard {
+    // verify uses module-private identity maps, not supplied IDs or root metadata.
+    MutationTransaction.prototype.verify.call(transaction, binding);
+    const guard = new CapabilityGuard(null);
+    transactionGuards.set(guard, { transaction, binding });
+    Object.freeze(guard);
+    return guard;
+  }
+
   public static denyAll(): CapabilityGuard {
     const guard = new CapabilityGuard(null);
     Object.freeze(guard);
@@ -335,6 +348,8 @@ export class CapabilityGuard {
       if (!liveHead || liveHead !== authorizedScope.baseRevision.toLowerCase()) return CapabilityGuard.denyAll();
     }
 
+    const authorization = scopeAuthorizations.get(authorizedScope);
+    if (authorizedScope.mode.grants.length && (!authorization || !isCurrentEvidenceAuthorization(authorization))) return CapabilityGuard.denyAll();
     const authorityGrants = authorizedScope.mode.grants;
     const mutableGrants = new Map<string, Set<CapabilityAction>>();
     for (const grant of authorityGrants) {
@@ -358,11 +373,32 @@ export class CapabilityGuard {
       grants: Object.freeze(immutableGrants),
     });
     const guard = new CapabilityGuard(policy);
+    if (authorization) guardAuthorizations.set(guard, authorization);
     Object.freeze(guard);
     return guard;
   }
 
+  /** Final transaction boundary, after async preparation and before any write. */
+  public beginMutation(): boolean {
+    const bound = transactionGuards.get(this);
+    if (bound) { bound.transaction.verify(bound.binding); return true; }
+    const authorization = guardAuthorizations.get(this);
+    if (!authorization || !isCurrentEvidenceAuthorization(authorization)) return false;
+    return true;
+  }
+
   public authorize(request: CapabilityRequest): CapabilityDecision {
+    const bound = transactionGuards.get(this);
+    if (bound) {
+      if (!request || request.scopeId !== bound.transaction.id) return { allowed: false, code: "CAPABILITY_SCOPE_MISMATCH", reason: "Transaction scope mismatch." };
+      try {
+        bound.transaction.authorize(bound.binding, request.path, request.action);
+        return { allowed: true, code: "CAPABILITY_ALLOWED", normalizedPath: request.path };
+      } catch (error) {
+        if (!(error instanceof MutationFailure)) throw error;
+        return { allowed: false, code: error.code, reason: error.message };
+      }
+    }
     if (!this.policy) {
       return { allowed: false, code: "CAPABILITY_POLICY_MISSING", reason: "No valid capability policy was supplied." };
     }
@@ -385,21 +421,21 @@ export class CapabilityGuard {
       return { allowed: false, code: "CAPABILITY_PATH_OUTSIDE_WORKSPACE", reason: `Path "${request.path}" escapes the authorized workspace.` };
     }
 
-    try {
-      const canonicalTarget = canonicalizeTarget(this.policy.workspaceRoot, normalizedPath);
-      if (!isWithin(this.policy.canonicalWorkspaceRoot, canonicalTarget)) {
-        return { allowed: false, code: "CAPABILITY_PATH_OUTSIDE_WORKSPACE", reason: `Path "${request.path}" resolves outside the authorized workspace.` };
-      }
-    } catch (cause: unknown) {
-      return { allowed: false, code: "CAPABILITY_TECHNICAL_FAILURE", reason: `Unable to canonicalize capability target "${request.path}".`, technical: true, cause };
+    if (!repositoryPath(this.policy.workspaceRoot, normalizedPath, true)) {
+      return { allowed: false, code: "CAPABILITY_PATH_OUTSIDE_WORKSPACE", reason: "Target escapes the canonical repository boundary." };
     }
-
     const declaredActions = this.policy.grants[normalizedPath];
     if (!declaredActions) {
       return { allowed: false, code: "CAPABILITY_PATH_NOT_DECLARED", reason: `Path "${normalizedPath}" is not in the authorized write-set.` };
     }
-    if (!declaredActions.includes(request.action)) {
+    const hasAction = declaredActions.includes(request.action) ||
+      (request.action === "FILE_MODIFY" && declaredActions.includes("FILE_CREATE"));
+    if (!hasAction) {
       return { allowed: false, code: "CAPABILITY_ACTION_NOT_DECLARED", reason: `Action "${request.action}" is not authorized for "${normalizedPath}".` };
+    }
+    const authorization = guardAuthorizations.get(this);
+    if (!authorization || !isCurrentEvidenceAuthorization(authorization)) {
+      return { allowed: false, code: "CAPABILITY_POLICY_MISSING", reason: "Worktree changed since authorization; a trusted transaction or fresh evidence is required." };
     }
     return { allowed: true, code: "CAPABILITY_ALLOWED", normalizedPath };
   }

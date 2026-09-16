@@ -129,16 +129,19 @@ export interface EpicProposal {
 
 export interface ProjectHealth {
   score: number;
-  status: "healthy" | "warning" | "critical";
-  flags: string[];
-  recommendations: string[];
-  stats: {
+  status: "HEALTHY" | "FAIR" | "WARNING" | "AT_RISK";
+  progress: {
     totalTasks: number;
     completedTasks: number;
-    overdueTasks: number;
-    inProgressTasks: number;
-    completionRate: number;
+    percent: number | null;
   };
+  activity: { lastActivityAt: string | null; daysSinceActivity: number | null };
+  repository: { connected: boolean; indexed: boolean; trackedFiles: number; lastSyncedAt: string | null };
+  blockers: { count: number };
+  overdue: { count: number };
+  inProgress: { count: number };
+  recommendations: Array<{ code: string; message: string }>;
+  calculatedAt: string;
 }
 
 export interface PullRequest {
@@ -607,6 +610,11 @@ export interface AgentResponse {
     readonly reviewId?: string;
     readonly reviewUrl?: string;
     readonly ciStatus: "NOT_REQUESTED" | "PENDING" | "PASSED" | "FAILED" | "UNKNOWN";
+  };
+  gitApproval?: {
+    readonly approvalId: string;
+    readonly changedPaths: readonly string[];
+    readonly expiresAt: string;
   };
   agentLoop?: {
     outcome: "AWAITING_COMPLETION_EVALUATION" | "CLARIFICATION_REQUIRED" | "TECHNICAL_FAILURE" | "AUTHORIZATION_DENIED" | "VALIDATION_FAILURE" | "BUDGET_EXHAUSTED" | "MAX_ITERATIONS_REACHED";

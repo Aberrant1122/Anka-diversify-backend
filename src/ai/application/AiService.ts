@@ -5,6 +5,7 @@ import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { PullRequestReviewer } from "../github/PullRequestReviewer";
 import { PullRequestDescription } from "../github/PullRequestDescription";
 import { ChatRequest, ChatResponse, AgentProgressEvent, AgentResponse, ProjectHealth, PRReview } from "../shared/types";
+import { ProjectSidebarService } from "../../services/project-sidebar.service";
 
 export class AiService {
   private static instance: AiService;
@@ -39,7 +40,7 @@ export class AiService {
   }
 
   async getProjectHealth(projectId: string): Promise<ProjectHealth> {
-    return this.projectChatService.getProjectHealth(projectId);
+    return ProjectSidebarService.getProjectHealth(projectId);
   }
 
   async suggestSprintTasks(projectId: string, sprintId: string, capacity?: number) {

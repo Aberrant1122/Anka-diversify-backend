@@ -214,7 +214,7 @@ describe("Checkpoint 12 adversarial matrix and production readiness", () => {
       localPath: prepared.worktreePath,
       authorizedCapabilityScope: scope(prepared.worktreePath, "denied", []),
       changes: [{ path: "src/value.ts", action: "modify", content: "model says authorized", description: "attack" }],
-    })).rejects.toMatchObject({ code: "CAPABILITY_PATH_NOT_DECLARED" });
+    })).rejects.toMatchObject({ code: "TRANSACTION_INVALIDATED" });
     expect(fs.readFileSync(target, "utf8")).toBe(original);
 
     const runtime = TaskRuntime.create({
@@ -269,7 +269,7 @@ describe("Checkpoint 12 adversarial matrix and production readiness", () => {
         },
       ],
       journal,
-    })).rejects.toMatchObject({ code: "TARGET_NOT_FOUND" });
+    })).rejects.toMatchObject({ code: "EDIT_ANCHOR_NOT_FOUND" });
     expect(fs.readFileSync(target, "utf8")).toBe("verified-a\n");
     expect(journal.snapshot().map((entry) => entry.status)).toEqual(["VERIFIED", "ROLLED_BACK"]);
   });
@@ -416,7 +416,7 @@ describe("Checkpoint 12 adversarial matrix and production readiness", () => {
           changes: [{ path: "src/value.ts", action: "modify", content: "malicious edit\n", description: "unauthorized" }],
           journal,
         })
-      ).rejects.toMatchObject({ code: "CAPABILITY_PATH_NOT_DECLARED" });
+      ).rejects.toMatchObject({ code: "TRANSACTION_INVALIDATED" });
 
       expect(fs.readFileSync(targetPath, "utf8")).toBe(originalBytes);
       expect(journal.verifiedCheckpoints()).toHaveLength(0);
@@ -446,7 +446,7 @@ describe("Checkpoint 12 adversarial matrix and production readiness", () => {
           ],
           journal,
         })
-      ).rejects.toMatchObject({ code: "TARGET_NOT_FOUND" });
+      ).rejects.toMatchObject({ code: "EDIT_ANCHOR_NOT_FOUND" });
 
       expect(fs.readFileSync(targetPath, "utf8")).toBe(originalBytes);
       expect(journal.verifiedCheckpoints()).toHaveLength(0);
@@ -484,7 +484,7 @@ describe("Checkpoint 12 adversarial matrix and production readiness", () => {
           ],
           journal,
         })
-      ).rejects.toMatchObject({ code: "TARGET_NOT_FOUND" });
+      ).rejects.toMatchObject({ code: "EDIT_ANCHOR_NOT_FOUND" });
 
       expect(journal.verifiedCheckpoints()).toHaveLength(1);
       expect(fs.readFileSync(targetPath, "utf8")).toBe("export const value = 'verified-loop1';\n");

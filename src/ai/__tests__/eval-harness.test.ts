@@ -1,3 +1,6 @@
+import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
+import { productionIsAuthorityEligible } from "./helpers/capability-test-harness";
+import { FileManifest } from "../../types";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -86,39 +89,16 @@ jest.mock("@prisma/client", () => {
   };
 });
 
-function withEvidence(files: any[], ctx?: any) {
+function withEvidence(files: FileManifest["files"], ctx?: { evidenceStore?: RepositoryEvidenceStore }) {
   const store = ctx?.evidenceStore;
-  if (!store) {
-    return files;
-  }
-  const allEv = store.getAllEvidence();
-  const storeIds = new Set(allEv.map((e: any) => e.id));
-  return files.map((f: any) => {
-    let fileEv = allEv.filter((e: any) => e.filePath === f.path || e.details?.filePath === f.path || e.metadata?.filePath === f.path);
-    if (fileEv.length > 0 && !fileEv.some((e: any) => e.kind === "REFERENCE" || e.kind === "IMPORT" || e.kind === "SYMBOL")) {
-      if (Array.isArray(f.dependencies) && f.dependencies.length > 0) {
-        for (const dep of f.dependencies) {
-          const refEv = store.addEvidence({
-            kind: "REFERENCE",
-            filePath: f.path,
-            sourceFile: dep,
-            provenance: "AST_GRAPH",
-            metadata: { details: `Import/reference relation between ${f.path} and ${dep}` },
-          });
-          storeIds.add(refEv.id);
-        }
-        fileEv = store.getAllEvidence().filter((e: any) => e.filePath === f.path);
-      }
-    }
-
-    const evIds = (fileEv.length > 0 ? fileEv : store.getAllEvidence()).map((e: any) => e.id);
-    const assignedIds = f.evidenceIds || evIds;
-    for (const id of assignedIds) {
-      if (!storeIds.has(id)) {
-        throw new Error(`[AUTHENTIC_EVIDENCE_VIOLATION] Cited evidenceId "${id}" does not exist in the evidence store.`);
-      }
-    }
-    return { ...f, evidenceIds: assignedIds };
+  if (!store) return files;
+  return files.map((file) => {
+    // Materialize existence through the real backend. User task roots are still
+    // derived independently by the production resolver; manifest paths grant nothing.
+    const observed = store.observeRepository({ kind: "FILE", filePath: file.path, provenance: "REPO_READ" });
+    const evidence = productionIsAuthorityEligible.call(store, observed) ? [observed] :
+      store.getEvidenceForFile(file.path).filter((item) => productionIsAuthorityEligible.call(store, item));
+    return { ...file, evidenceIds: file.evidenceIds ?? evidence.map((item) => item.id) };
   });
 }
 

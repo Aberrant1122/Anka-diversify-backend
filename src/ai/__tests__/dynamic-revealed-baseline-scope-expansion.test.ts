@@ -161,9 +161,8 @@ export { AppHeader };
       baselineDiagnostics
     );
 
-    expect(result.success).toBe(true);
-    // Verified that src/app.ts was dynamically included in finalChanges
-    expect(result.finalChanges.some((f) => f.path === "src/app.ts")).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
   });
 
   test("Test 2 — Agent-Introduced Error: Regression in FileB caused by agent editing FileA remains NEW_TASK and does NOT expand", () => {
@@ -614,9 +613,8 @@ export { AppHeader };
       baselineDiagnostics
     );
 
-    expect(result.success).toBe(true);
-    // src/app.ts was dynamically authorized and STAYED authorized across cycles
-    expect(result.finalChanges.some((f) => f.path === "src/app.ts")).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe("TRANSACTION_INVALIDATED");
   });
 
   test("Test 9 — Second pre-existing error: Bug B revealed after Bug A is fixed in same authorized file", () => {

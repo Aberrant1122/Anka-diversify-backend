@@ -27,6 +27,7 @@ describe("Constrained Dependency-Repair Mode on Broken Baseline (Steps A-I)", ()
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-source-task",
+      targetBranch: "main",
       baseCommitSha: "sha-111",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -77,6 +78,7 @@ describe("Constrained Dependency-Repair Mode on Broken Baseline (Steps A-I)", ()
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-dep-repair",
+      targetBranch: "main",
       baseCommitSha: "sha-222",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -205,6 +207,7 @@ describe("Constrained Dependency-Repair Mode on Broken Baseline (Steps A-I)", ()
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-illegal-diff",
+      targetBranch: "main",
       baseCommitSha: "sha-333",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -354,6 +357,7 @@ describe("Constrained Dependency-Repair Mode on Broken Baseline (Steps A-I)", ()
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-infra",
+      targetBranch: "main",
       baseCommitSha: "sha-444",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);

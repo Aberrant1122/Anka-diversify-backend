@@ -16,6 +16,7 @@ import {
   ResolvedTaskTarget,
   TaskExecutionPlan,
   TaskExecutionStage,
+  PriorVerifiedTarget,
 } from "../shared/TaskExecutionPlan";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { BaselineDiagnostic, FileManifest } from "../../types";
@@ -33,14 +34,53 @@ import { ManifestGenerator } from "../generation/ManifestGenerator";
 import { getOpenAI } from "../shared/utils";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { BaselineDeltaVerifier } from "../../services/baseline-delta.verifier";
-import { TargetScopeExpander } from "../contracts/TargetScopeExpander";
+import { matchesModuleSpecifier, TargetScopeExpander } from "../contracts/TargetScopeExpander";
 import { EvidenceBoundWriteSetResolver, PlannedChange } from "../contracts/EvidenceBoundWriteSetResolver";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { ManifestCorrectionEngine } from "../planning/ManifestCorrectionEngine";
 import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
 import { TaskDecomposer } from "../generation/TaskDecomposer";
+import { DeterministicRelationEvidenceAcquirer } from "../contracts/DeterministicRelationEvidenceAcquirer";
+import { authoritySnapshot } from "../repository/AuthorityWorktree";
 
 const prisma = new PrismaClient();
+
+/**
+ * Converts model planning fields into resolver input by replacing every
+ * evidenceIds value with current, backend-authenticated evidence. Legacy model
+ * IDs are never read, so they cannot grant, deny, or poison authorization.
+ */
+export function bindBackendManifestEvidence(input: {
+  files: FileManifest["files"];
+  obligations: readonly FileActionObligation[];
+  acquiredEvidence: ReadonlyMap<string, readonly string[]>;
+  evidenceStore: RepositoryEvidenceStore;
+  currentRevision?: string;
+}): PlannedChange[] {
+  const obligationByPath = new Map(
+    input.obligations.map((obligation) => [normalizeRepoPath(obligation.path), obligation])
+  );
+  const isCurrentAuthorityId = (id: string): boolean => {
+    const evidence = input.evidenceStore.getEvidence(id);
+    return !!evidence &&
+      input.evidenceStore.isAuthorityEligible(evidence) &&
+      (!input.currentRevision || evidence.repositoryRevision === input.currentRevision);
+  };
+
+  return input.files.map((file) => {
+    const normalizedPath = normalizeRepoPath(file.path);
+    const obligation = obligationByPath.get(normalizedPath);
+    const trustedObligationIds = (obligation?.evidenceIds || []).filter(isCurrentAuthorityId);
+    const acquiredIds = (input.acquiredEvidence.get(normalizedPath) || []).filter(isCurrentAuthorityId);
+    return {
+      path: normalizedPath,
+      action: obligation?.requiredAction ?? file.action,
+      reason: file.description || `Proposed ${file.action} for ${normalizedPath}`,
+      evidenceIds: Array.from(new Set(trustedObligationIds.length > 0 ? trustedObligationIds : acquiredIds)),
+      dependencies: file.dependencies || [],
+    };
+  });
+}
 
 export interface AgentPlanningInput {
   request: ChatRequest;
@@ -96,6 +136,7 @@ export interface AgentManifestPlanningInput {
   knowledgeGraph: ExtendedKnowledgeGraph;
   clarificationData: ReturnType<typeof TaskExecutionPlanManager.parseClarificationInput>;
   finalConfidence: number;
+  priorVerifiedTargets?: PriorVerifiedTarget[];
   onProgress?: (event: AgentProgressEvent) => void;
   authorizedCapabilityScope?: AuthorizedCapabilityScope;
   baseCommitSha?: string;
@@ -220,6 +261,7 @@ export class AgentPlanner {
       clarificationData,
       finalConfidence,
       onProgress,
+      priorVerifiedTargets,
     } = input;
     let executionContract = input.executionContract;
     let activeCapabilityScope = input.authorizedCapabilityScope;
@@ -257,6 +299,30 @@ export class AgentPlanner {
             !relevantPlanningFiles.some((rf) => rf.path === normPath)
           ) {
             relevantPlanningFiles.push({ path: normPath, content: snapFile.content });
+          }
+        }
+      }
+
+      // A prior verified path is a discovery hint only. Re-read it from the
+      // current repository so no prior evidence or revision state crosses the
+      // iteration boundary.
+      for (const target of priorVerifiedTargets || []) {
+        const targetPath = normalizeRepoPath(target.path);
+        const existingIdx = relevantPlanningFiles.findIndex((file) => normalizeRepoPath(file.path) === targetPath);
+        if (existingIdx >= 0) {
+          const [currentFile] = relevantPlanningFiles.splice(existingIdx, 1);
+          relevantPlanningFiles.unshift(currentFile);
+          continue;
+        }
+        const currentSnapshot = rawSnapshotFiles.find((file) => normalizeRepoPath(file.path || "") === targetPath);
+        if (currentSnapshot && typeof currentSnapshot.content === "string") {
+          relevantPlanningFiles.unshift({ path: targetPath, content: currentSnapshot.content });
+        } else if (effectiveLocalPath) {
+          const absolutePath = path.join(effectiveLocalPath, targetPath);
+          if (fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile()) {
+            try {
+              relevantPlanningFiles.unshift({ path: targetPath, content: fs.readFileSync(absolutePath, "utf8") });
+            } catch { }
           }
         }
       }
@@ -424,6 +490,7 @@ export class AgentPlanner {
         evidenceStore,
         resolvedTarget: resolvedTaskTarget,
         actionObligations: executionContract.actionObligations || resolvedTaskTarget?.actionObligations,
+        priorVerifiedTargets,
       };
 
       onProgress?.({
@@ -445,6 +512,28 @@ export class AgentPlanner {
       } catch (e: any) {
         manifestGenerationError = e?.message || String(e);
         console.error("[AgentPipeline] Manifest generation error:", manifestGenerationError);
+      }
+
+      if (!rawManifest && manifestGenerationError) {
+        const failureExplanation = `[Manifest Generation Failed] A valid evidence-citing file plan could not be produced. No code generation or mutation was attempted.\n${manifestGenerationError}`;
+        await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+        return {
+          explanation: failureExplanation,
+          changes: [],
+          commitMessage: "",
+          sessionId: session.id,
+          intent: intentResult.intent,
+          taskType: intentResult.taskType,
+          risk: intentResult.risk,
+          estimatedComplexity: intentResult.estimatedComplexity,
+          targetPath: intentResult.targetPath,
+          confidence: finalConfidence,
+          buildVerified: false,
+          buildErrors: failureExplanation,
+          lifecycleStage: "ManifestValidationFailed",
+          errorCode: "PLANNING_MANIFEST_GENERATION_FAILED",
+        };
       }
 
       if (rawManifest && Array.isArray(rawManifest.files)) {
@@ -664,21 +753,37 @@ export class AgentPlanner {
 
         // Ground manifest requests in deterministic repository evidence. This
         // selects planning candidates and never grants a capability.
-        const proposedPlannedChanges: PlannedChange[] = (rawManifest.files || []).map((f) => {
-          return {
-            path: f.path,
-            action: f.action,
-            reason: f.description || `Proposed ${f.action} for ${f.path}`,
-            evidenceIds: Array.isArray(f.evidenceIds) ? f.evidenceIds : [],
-            dependencies: f.dependencies || [],
-          };
+        const manifestObligations: FileActionObligation[] =
+          executionContract.actionObligations || planningContext.actionObligations || [];
+
+        // Planning candidates are lookup keys only. Re-observe the current
+        // worktree from independently task-grounded roots before resolving the
+        // planning write set; generated paths never seed or widen traversal.
+        const acquiredPlanningEvidence = DeterministicRelationEvidenceAcquirer.acquire({
+          candidatePaths: (rawManifest.files || []).map((file) => file.path),
+          intentSpec: taskIntentSpec,
+          evidenceStore,
+          repositoryId: projectId,
+          workspaceRoot: effectiveLocalPath || undefined,
+          existingFiles: canonicalExistingFiles,
         });
+        const currentPlanningRevision = effectiveLocalPath
+          ? authoritySnapshot(effectiveLocalPath).revision
+          : undefined;
+        const evidenceGroundedPlannedChanges = bindBackendManifestEvidence({
+          files: rawManifest.files || [],
+          obligations: manifestObligations,
+          acquiredEvidence: acquiredPlanningEvidence,
+          evidenceStore,
+          currentRevision: currentPlanningRevision,
+        });
+        const proposedPlannedChanges = evidenceGroundedPlannedChanges;
 
         const effectiveRevision = input.baseCommitSha || (input.projectContext?.repoSnapshot as any)?.revision?.contentHash;
         const planningEvidenceResult = EvidenceBoundWriteSetResolver.resolve({
           policy: policyContract,
           intentSpec: taskIntentSpec,
-          proposedChanges: proposedPlannedChanges,
+          proposedChanges: evidenceGroundedPlannedChanges,
           evidenceStore,
           existingFiles: canonicalExistingFiles,
           monorepo,
@@ -743,7 +848,22 @@ export class AgentPlanner {
 
         // Construct a coherent evidence-grounded planning manifest.
         const approvedSet = new Set(planningEvidenceResult.approvedPaths.map(normalizeRepoPath));
-        const coherentFiles = (rawManifest.files || []).filter((f) => approvedSet.has(normalizeRepoPath(f.path)));
+        const rejectedManifestPaths = (rawManifest.files || [])
+          .map((file) => normalizeRepoPath(file.path))
+          .filter((filePath) => !approvedSet.has(filePath));
+        const coherentFiles = evidenceGroundedPlannedChanges
+          .filter((change) => approvedSet.has(normalizeRepoPath(change.path)))
+          .map((change) => ({
+            path: change.path,
+            action: change.action,
+            description: change.reason,
+            evidenceIds: [...change.evidenceIds],
+            dependencies: (change.dependencies || []).filter((dependency) =>
+              !rejectedManifestPaths.some((rejectedPath) =>
+                matchesModuleSpecifier(change.path, dependency, rejectedPath, monorepo)
+              )
+            ),
+          }));
         const coherentPlanningManifest: FileManifest = {
           files: coherentFiles,
           totalFiles: coherentFiles.length,
@@ -873,10 +993,6 @@ export class AgentPlanner {
       }
     }
     const s6Time = performance.now() - s6Start;
-
-    if (manifestEnabled && !approvedManifest && manifestGenerationError) {
-      console.info(`[MANIFEST_AUDIT] Planning manifest unavailable; continuing from trusted task, repository, and capability facts: ${manifestGenerationError}`);
-    }
 
     return {
       planningComplete: true,

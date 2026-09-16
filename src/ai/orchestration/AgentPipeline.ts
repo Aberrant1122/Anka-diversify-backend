@@ -1,5 +1,8 @@
 import { formatMs } from "../shared/utils";
-import { ChatRequest, AgentResponse, AgentProgressEvent, ExecutionContract } from "../shared/types";
+import { MutationFailure } from "../runtime/MutationCompiler";
+import { CapabilityAuthorizationError } from "../validation/FileSystemStateManager";
+import { reconcileExecutionManifest } from "../runtime/ExecutionManifest";
+import { ChatRequest, AgentResponse, AgentProgressEvent, ExecutionContract, AgentFileChange } from "../shared/types";
 import {
   buildPolicyContract,
   detectReferenceCleanupIntent,
@@ -11,11 +14,11 @@ import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import { CodeGenerator } from "../generation/CodeGenerator";
 import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { PipelineTelemetry } from "./PipelineTelemetry";
-import { PipelineResultBuilder } from "./PipelineResult";
+import { composeLifecycleExplanation, PipelineResultBuilder } from "./PipelineResult";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
 import { PreExecutionAuthorityClosure } from "../contracts/PreExecutionAuthorityClosure";
-import { verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
+import { sha256, verifyFileVersionsFromDisk } from "../validation/FileVersionGuard";
 import { BaselineDiagnostic } from "../../types";
 import { decrypt } from "../../utils/encryption";
 import { AuthoritativeSourceHydrator } from "../manifest/AuthoritativeSourceHydrator";
@@ -77,6 +80,50 @@ function publicCompletionResult(result: CompletionEvaluationResult): NonNullable
   return { outcome: result.outcome, code: result.code, message: result.message };
 }
 
+type RetryFingerprintAction = {
+  action: "FILE_CREATE" | "FILE_MODIFY" | "FILE_DELETE";
+  path: string;
+  contentFingerprint: string;
+};
+
+export function failedActionStateFingerprint(
+  repositoryRevision: string,
+  plan: unknown,
+  actions: readonly RetryFingerprintAction[],
+): string {
+  const planRecord = plan && typeof plan === "object" ? plan as Record<string, unknown> : undefined;
+  const planStages = Array.isArray(planRecord?.stages)
+    ? planRecord.stages.map((stage) => {
+        const record = stage && typeof stage === "object" ? stage as Record<string, unknown> : {};
+        return {
+          id: record.id,
+          title: record.title,
+          description: record.description,
+          dependencies: record.dependencies,
+        };
+      })
+    : [];
+  return sha256(JSON.stringify({
+    repositoryRevision,
+    planStages,
+    actions: actions.map((action) => ({
+      action: action.action,
+      path: normalizeRepoPath(action.path),
+      contentFingerprint: action.contentFingerprint,
+    })),
+  }));
+}
+
+function retryActionsFromChanges(changes: readonly AgentFileChange[]): RetryFingerprintAction[] {
+  return changes.map((change) => ({
+    action: change.action === "delete" || change.isDeleted
+      ? "FILE_DELETE"
+      : change.action === "create" ? "FILE_CREATE" : "FILE_MODIFY",
+    path: change.path,
+    contentFingerprint: sha256(change.action === "delete" || change.isDeleted ? "" : change.content),
+  }));
+}
+
 export class AgentPipeline {
   static async runCodingAgent(
     userId: string,
@@ -86,6 +133,7 @@ export class AgentPipeline {
     options?: {
       effectiveLocalPath?: string;
       baselineDiagnostics?: BaselineDiagnostic[];
+      authorityDiagnostics?: NormalizedDiagnostic[];
       targetedBaselineDiagnostics?: BaselineDiagnostic[];
       isBaselineDeltaTask?: boolean;
       baseCommitSha?: string;
@@ -124,6 +172,8 @@ export class AgentPipeline {
     let preparedObservation: RepositoryObservation | undefined;
     let initialObservation: RepositoryObservation | undefined;
     let preparedFacts: RepositoryProjectFacts | undefined;
+    let currentObservationRevision = "UNOBSERVED";
+    const rejectedFailedActionStates = new Set<string>();
     const workingPlan = WorkingPlan.create({ id: `working-plan:${runtime.snapshot().taskId}` });
     const result = await AgentLoopCoordinator.runPipeline({
       runtime,
@@ -136,6 +186,7 @@ export class AgentPipeline {
         preparedObservation = observation;
         initialObservation ??= observation;
         const revision = observation.currentRevisionHash ?? `unversioned-iteration-${iteration}`;
+        currentObservationRevision = revision;
         const workspace = runtime.workspaceState().withEvidence({
           id: `loop-observation:${iteration}:${revision}`,
           kind: "MATERIALIZED_REPOSITORY",
@@ -154,6 +205,8 @@ export class AgentPipeline {
           repositoryObservation: preparedObservation,
           persistConversation: false,
           persistenceSession,
+          rejectedFailedActionStates,
+          retryStateRevision: currentObservationRevision,
         });
         if (response.taskExecutionPlan) {
           iterationRequest = {
@@ -163,7 +216,12 @@ export class AgentPipeline {
         }
         return { response, journalEntry: journal.snapshot()[before] };
       },
-      onRevisionRequired: (response) => {
+      onRevisionRequired: (response, entry) => {
+        rejectedFailedActionStates.add(failedActionStateFingerprint(
+          currentObservationRevision,
+          response.taskExecutionPlan,
+          entry.proposedActions,
+        ));
         const failedPlan = response.taskExecutionPlan;
         if (!failedPlan) return;
         const retryStages = failedPlan.stages.map((stage, index) =>
@@ -280,6 +338,7 @@ export class AgentPipeline {
     options?: {
       effectiveLocalPath?: string;
       baselineDiagnostics?: BaselineDiagnostic[];
+      authorityDiagnostics?: NormalizedDiagnostic[];
       targetedBaselineDiagnostics?: BaselineDiagnostic[];
       isBaselineDeltaTask?: boolean;
       baseCommitSha?: string;
@@ -416,7 +475,9 @@ export class AgentPipeline {
       options?.rawBaselineErrors ||
       options?.baselineErrors;
 
-    const normalizedDiagnostics: NormalizedDiagnostic[] = [];
+    // Plain options/log strings remain advisory. Only validation-bound receipts
+    // from the backend baseline runner can become diagnostic roots.
+    const normalizedDiagnostics: NormalizedDiagnostic[] = [...(options?.authorityDiagnostics || [])];
     if (typeof rawErrorLog === "string" && rawErrorLog.trim().length > 0) {
       normalizedDiagnostics.push(
         ...DiagnosticNormalizer.normalize(rawErrorLog, {
@@ -561,7 +622,9 @@ export class AgentPipeline {
         `[AgentPipeline] Repair task is already satisfied by an authentic backend diagnostic proof bound to the current repository revision. Returning ALREADY_SATISFIED successful no-op.`
       );
 
-      const advancedPlanResult = TaskExecutionPlanManager.advancePlanStage(taskExecutionPlan);
+      const advancedPlanResult = TaskExecutionPlanManager.advancePlanStage(
+        TaskExecutionPlanManager.clearPriorVerifiedTargets(taskExecutionPlan),
+      );
       const updatedPlan = advancedPlanResult.plan;
       const compoundStatus = updatedPlan.stages.every((s) => s.status === "VERIFIED")
         ? "VERIFIED"
@@ -677,6 +740,7 @@ export class AgentPipeline {
       onProgress,
       authorizedCapabilityScope: options?.authorizedCapabilityScope,
       baseCommitSha: options?.baseCommitSha,
+      priorVerifiedTargets: taskExecutionPlan.priorVerifiedTargets,
     });
     if (!("planningComplete" in manifestPlanning)) {
       return manifestPlanning;
@@ -728,7 +792,7 @@ export class AgentPipeline {
     let roadmapAndDiff;
     try {
       roadmapAndDiff = await CodeGenerator.generateRoadmapAndDiffs(
-        request.message,
+        effectiveGoal,
         intentResult,
         optimizedContext,
         systemPrompt,
@@ -736,11 +800,32 @@ export class AgentPipeline {
         approvedManifest,
         hydrationResult.authoritativeModifySources,
         hydrationResult.mergedSourceMap,
+        taskExecutionPlan.priorVerifiedTargets,
       );
     } catch (genErr: any) {
       throw genErr;
     }
     const s7Time = performance.now() - s7Start;
+
+    const retryStateFingerprint = failedActionStateFingerprint(
+      options?.retryStateRevision ?? currentRevisionHash ?? "UNVERSIONED",
+      taskExecutionPlan,
+      retryActionsFromChanges(roadmapAndDiff.changes),
+    );
+    if (options?.rejectedFailedActionStates instanceof Set && options.rejectedFailedActionStates.has(retryStateFingerprint)) {
+      return {
+        explanation: "ANKA rejected an unchanged candidate that had already failed deterministic validation from the same repository and planning state.",
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        lifecycleStage: "BuildFailed",
+        errorCode: "PLANNING_IDENTICAL_FAILED_ACTION",
+        buildVerified: false,
+        taskVerified: false,
+        repositoryClean: true,
+        repairAttempts: 0,
+      };
+    }
 
     onProgress?.({
       step: 4,
@@ -810,6 +895,15 @@ export class AgentPipeline {
       targetPaths: authorityClosure.result.approvedPaths,
       targetProvenance: Object.fromEntries(authorityClosure.result.approvedPaths.map((path) => [path, "PRE_EXECUTION_EVIDENCE_CLOSURE"])),
     };
+
+    let executionManifest: ReturnType<typeof reconcileExecutionManifest>;
+    try {
+      executionManifest = reconcileExecutionManifest(closureCapabilityScope, approvedManifest);
+    } catch (error) {
+      if (!(error instanceof MutationFailure) && !(error instanceof CapabilityAuthorizationError)) throw error;
+      return { explanation: `[${error.code}] ${error.message}`, changes: [], commitMessage: "", sessionId: session.id,
+        lifecycleStage: "WriteAuthorityRejected", errorCode: error.code };
+    }
 
     // Execution Scope Enforcement Gate (Post-Generation / Pre-Disk)
 
@@ -881,7 +975,9 @@ export class AgentPipeline {
       }
     }
 
-    const validation = await ValidationCoordinator.validate({
+    let validation: Awaited<ReturnType<typeof ValidationCoordinator.validate>>;
+    try {
+    validation = await ValidationCoordinator.validate({
       acceptedChanges: criticResult.accepted,
       effectiveLocalPath,
       effectiveSnapshot,
@@ -892,7 +988,7 @@ export class AgentPipeline {
       systemPrompt,
       requestMessage: request.message,
       projectId,
-      approvedManifest,
+      approvedManifest: executionManifest,
       authorizedCapabilityScope: closureCapabilityScope,
       onProgress,
       baselineDiagnostics: options?.baselineDiagnostics,
@@ -901,6 +997,11 @@ export class AgentPipeline {
       baselineBuildPassed: options?.baselineBuildPassed,
       checkpointJournal: options?.checkpointJournal,
     });
+    } catch (error) {
+      if (!(error instanceof MutationFailure) && !(error instanceof CapabilityAuthorizationError)) throw error;
+      return { explanation: `[${error.code}] ${error.message}`, changes: [], commitMessage: "", sessionId: session.id,
+        lifecycleStage: "WriteAuthorityRejected", errorCode: error.code };
+    }
     const {
       repairResult,
       auditResult,
@@ -1002,19 +1103,24 @@ export class AgentPipeline {
         ? repairResult.finalChanges.map((c: any) => `- ${c.path}: ${c.action === "delete" || c.isDeleted ? "[DELETED] " : ""}${c.description}`).join("\n")
         : "No files changed.";
 
-    let combinedExplanation = roadmapAndDiff.explanation;
+    const latestValidationReasons = checkpointJournal[checkpointJournal.length - 1]?.validation.reasons ?? [];
+    let combinedExplanation = composeLifecycleExplanation(gateSuccess, roadmapAndDiff.explanation, latestValidationReasons);
     if (repairResult.deltaResult && (!repairResult.repositoryClean || (repairResult.deltaResult.revealedBaselineDiagnostics && repairResult.deltaResult.revealedBaselineDiagnostics.length > 0))) {
       const deltaExplanation = BaselineDeltaVerifier.formatDeltaExplanation(repairResult.deltaResult);
-      combinedExplanation = combinedExplanation + "\n\n" + deltaExplanation;
+      if (gateSuccess) combinedExplanation = combinedExplanation + "\n\n" + deltaExplanation;
     }
 
-    const summary = `[TaskType: ${intentResult.taskType} | Risk: ${intentResult.risk} | Complexity: ${intentResult.estimatedComplexity}] ${combinedExplanation}\n\n${auditResult.summary}${checklistMarkdown}\n\nFiles Modified / Deleted:\n${fileChangeLines}`;
+    const summary = gateSuccess
+      ? `[TaskType: ${intentResult.taskType} | Risk: ${intentResult.risk} | Complexity: ${intentResult.estimatedComplexity}] ${combinedExplanation}\n\n${auditResult.summary}${checklistMarkdown}\n\nFiles Modified / Deleted:\n${fileChangeLines}`
+      : `[TaskType: ${intentResult.taskType} | Risk: ${intentResult.risk} | Complexity: ${intentResult.estimatedComplexity}] ${combinedExplanation}`;
     await saveConversationMessage("assistant", summary);
 
     if (options?.persistConversation !== false && !session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
 
     return {
-      explanation: combinedExplanation + "\n\n" + auditResult.summary + checklistMarkdown,
+      explanation: gateSuccess
+        ? combinedExplanation + "\n\n" + auditResult.summary + checklistMarkdown
+        : combinedExplanation,
       changes: gateSuccess ? repairResult.finalChanges : [],
       commitMessage: roadmapAndDiff.commitMessage,
       sessionId: session.id,
@@ -1025,8 +1131,10 @@ export class AgentPipeline {
       targetPath: intentResult.targetPath,
       confidence: finalConfidence,
       roadmap: roadmapAndDiff.roadmap,
-      taskExecutionPlan: gateSuccess
-        ? TaskExecutionPlanManager.advancePlanStage(taskExecutionPlan).plan
+      taskExecutionPlan: gateSuccess && validation.verifiedCheckpoint
+        ? TaskExecutionPlanManager.advancePlanStage(
+            TaskExecutionPlanManager.recordVerifiedCheckpointTargets(taskExecutionPlan, validation.verifiedCheckpoint),
+          ).plan
         : TaskExecutionPlanManager.failStage(taskExecutionPlan, activeStage.id),
       compoundTaskStatus: gateSuccess
         ? (taskExecutionPlan.stages.every((s) => s.status === "VERIFIED") ? "VERIFIED" : "RUNNING")
@@ -1065,6 +1173,7 @@ export class AgentPipeline {
       ].filter(Boolean).join("\n\n") || (!isBuildVerified && !isTaskVerified ? repairResult.errorLog : ""),
       verificationChecklist: defaultChecklist,
       lifecycleStage: gateSuccess ? "Determine Completion" : "BuildFailed",
+      errorCode: gateSuccess ? undefined : repairResult.errorType,
       pipelineMeasurementText,
       patchCorrectionAttempted: (roadmapAndDiff as any).patchTelemetry?.patchCorrectionAttempted,
       patchCorrectionSucceeded: (roadmapAndDiff as any).patchTelemetry?.patchCorrectionSucceeded,

@@ -143,6 +143,7 @@ export class DestructiveTargetResolver {
           importerPaths: hydrated.importerPaths,
           resolutionSource: "EXPLICIT_PATH",
           status: "RESOLVED",
+          actionObligations: hydrated.actionObligations,
         };
 
         return {
@@ -184,6 +185,7 @@ export class DestructiveTargetResolver {
         importerPaths: hydrated.importerPaths,
         resolutionSource: "EXPLICIT_PATH",
         status: "RESOLVED",
+        actionObligations: hydrated.actionObligations,
       };
 
       return {
@@ -935,8 +937,8 @@ export class DestructiveTargetResolver {
         if (relType) {
           const impRelEv = evidenceStore.observeRepository({
             kind: relType === "SYMBOL_REFERENCE" ? "REFERENCE" : "IMPORT",
-            filePath: normImp,
-            sourceFile: normTarget,
+            filePath: normTarget,
+            sourceFile: normImp,
             provenance: "REPO_READ",
             repositoryId: repoId,
             metadata: { target: normTarget, relation: relType },

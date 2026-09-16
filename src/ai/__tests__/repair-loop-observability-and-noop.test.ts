@@ -6,669 +6,156 @@ import { FileSystemStateManager } from "../validation/FileSystemStateManager";
 import { ValidationRunner } from "../validation/ValidationRunner";
 import { SecurityAuditor } from "../review/SecurityAuditor";
 import { applyPatchToFile, FilePatchEdit } from "../patch/PatchApplicator";
-import { PatchCorrectionEngine } from "../generation/PatchCorrectionEngine";
-import { FileManifest, ExecutionContract } from "../../types";
 import * as sharedUtils from "../shared/utils";
+import { mutationFixtureScope } from "./helpers/mutation-fixture";
+import { MutationTransaction } from "../runtime/MutationTransaction";
+import { CapabilityGuard } from "../runtime/CapabilityGuard";
+import { reconcileExecutionManifest } from "../runtime/ExecutionManifest";
+import { fingerprintBytes } from "../editing/EditingPrimitives";
+import { LLMGateway } from "../gateway/LLMGateway";
 
 describe("Repair Loop Observability & No-Op Repair Handling (Section 10)", () => {
   let tempDir: string;
-
-  const sampleManifest = (filePath: string): FileManifest => ({
-    files: [{ path: filePath, action: "modify", dependencies: [], description: "Modify file" }],
-    totalFiles: 1,
-    manifestVersion: "1.0.0",
+  let transaction: MutationTransaction | undefined;
+  const relativePath = "src/index.ts";
+  const initialError = "src/index.ts(1,1): error TS2304: Cannot find name missing.";
+  const read = () => fs.readFileSync(path.join(tempDir, relativePath), "utf8");
+  const fake = (content: unknown) => ({ content } as Awaited<ReturnType<LLMGateway["callStructured"]>>);
+  const replacement = (oldText = "BAD", newText = "FIXED", source = oldText) => ({
+    operations: [{ op: "replace_exact", path: relativePath, expectedFileHash: fingerprintBytes(source), oldText, newText }],
   });
-
-  const sampleContract = (filePath: string): ExecutionContract => ({
-    goal: "Fix bug",
-    taskType: "BUG_FIX",
-    risk: "LOW",
-    estimatedComplexity: "SMALL",
-    pipeline: "REPOSITORY",
-    environment: "REACT_TS",
-    repositoryRequired: true,
-    expectedFiles: [filePath],
-    validationType: "TYPESCRIPT_BUILD",
-    targetPaths: [filePath],
-    allowedActions: ["modify"],
-    forbiddenActions: [],
-    maxFiles: 1,
-    searchScope: ["src", "app"],
-    contextScope: [filePath],
-    diffCriticEnabled: true,
-  });
-
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "anka-repair-obs-test-"));
   });
-
   afterEach(() => {
     jest.restoreAllMocks();
-    if (fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+    transaction?.abort();
+    transaction = undefined;
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  // ── TEST A: initial compiler stderr remains rootFailure after repair failure ──
+  function fixture() {
+    fs.mkdirSync(path.join(tempDir, "src"));
+    fs.writeFileSync(path.join(tempDir, relativePath), "R0");
+    const changes = [{ path: relativePath, action: "modify" as const, content: "BAD", description: "initial" }];
+    const scope = mutationFixtureScope(tempDir, changes);
+    const manifest = reconcileExecutionManifest(scope, null);
+    const tx = MutationTransaction.create(scope, manifest);
+    transaction = tx;
+    const manager = new FileSystemStateManager(CapabilityGuard.forTransaction(tx, tx.primary), tx.id, tx);
+    const builds = jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async (_changes, root) => {
+      const content = fs.readFileSync(path.join(root!, relativePath), "utf8");
+      if (content === "R0" || content === "FIXED") return { success: true, errors: "" };
+      return { success: false, errors: content === "WORSE"
+        ? "src/index.ts(1,1): error TS2322: Type number is not assignable to string."
+        : initialError };
+    });
+    const run = () => SelfHealingEngine.runSelfHealingLoop(changes, tempDir, ["fixture-check"], "system", "Modify src/index.ts",
+      manager, "fixture-project", undefined, manifest);
+    return { tx, builds, run };
+  }
+
   test("TEST A: initial compiler stderr remains rootFailure after repair failure", async () => {
-    const pageFile = path.join(tempDir, "app/page.tsx");
-    fs.mkdirSync(path.dirname(pageFile), { recursive: true });
-    fs.writeFileSync(pageFile, "export default function Page() { return <div>Original</div>; }\n");
-
-    const initialBuildError = "Type error: Property 'Calculator' does not exist on type 'JSX.IntrinsicElements'.\n  at app/page.tsx:5:10";
-
-    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-      success: false,
-      errors: initialBuildError,
-    });
-
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockResolvedValue({
-            choices: [
-              {
-                finish_reason: "stop",
-                message: {
-                  content: JSON.stringify({
-                    changes: [
-                      {
-                        path: "app/page.tsx",
-                        action: "modify",
-                        description: "Attempt a valid but ineffective repair",
-                        edits: [
-                          {
-                            oldText: "export default function Page() { return <div>Original</div>; }\n",
-                            newText: "export default function Page() { return <div>Still broken</div>; }\n",
-                          },
-                        ],
-                      },
-                    ],
-                  }),
-                },
-              },
-            ],
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-    jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({
-      attempted: true,
-      succeeded: false,
-      error: "Could not correct no-op edit",
-    });
-
-    const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/page.tsx", action: "modify", content: "export default function Page() { return <div>Modified</div>; }\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "system prompt",
-      "user message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("app/page.tsx"),
-      sampleContract("app/page.tsx"),
-    );
-
-    expect(result.success).toBe(false);
-    expect(result.rootFailure).toBeDefined();
-    expect(result.rootFailure?.stderr).toBe(initialBuildError);
-    expect(result.errorLog).toContain("ROOT BUILD FAILURE:");
-    expect(result.errorLog).toContain(initialBuildError);
+    const { run } = fixture();
+    jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(fake(replacement("BAD", "WORSE")));
+    const result = await run();
+    expect(result).toMatchObject({ success: false, errorType: "REPAIR_UNRESOLVED", rootFailure: { stderr: initialError } });
+    expect(result.errorLog).toContain(initialError);
+    expect(read()).toBe("BAD");
   });
 
-  // ── TEST B: oldText === newText returns NO_OP_PATCH_EDIT ───────────────────
   test("TEST B: oldText === newText returns NO_OP_PATCH_EDIT", () => {
-    const source = "const a = 10;\n";
-    const edit: FilePatchEdit = { oldText: "const a = 10;\n", newText: "const a = 10;\n" };
-    const res = applyPatchToFile(source, [edit]);
-    expect(res.success).toBe(false);
-    if (!res.success) {
-      expect(res.error.code).toBe("NO_OP_PATCH_EDIT");
-    }
+    const edits: FilePatchEdit[] = [{ oldText: "const a = 1;", newText: "const a = 1;" }];
+    const result = applyPatchToFile("const a = 1;", edits);
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.code).toBe("NO_OP_PATCH_EDIT");
   });
 
-  // ── TEST C: a no-op repair is never written to disk ───────────────────────
   test("TEST C: a no-op repair is never written to disk", async () => {
-    const filePath = path.join(tempDir, "src/index.ts");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const originalContent = "const initial = 1;\n";
-    fs.writeFileSync(filePath, originalContent);
-
-    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-      success: false,
-      errors: "Error: some compiler error",
-    });
-
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockResolvedValue({
-            choices: [
-              {
-                finish_reason: "stop",
-                message: {
-                  content: JSON.stringify({
-                    changes: [
-                      {
-                        path: "src/index.ts",
-                        action: "modify",
-                        description: "no-op",
-                        edits: [{ oldText: "const initial = 1;\n", newText: "const initial = 1;\n" }],
-                      },
-                    ],
-                  }),
-                },
-              },
-            ],
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({
-      attempted: true,
-      succeeded: false,
-    });
-
-    await expect(SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/index.ts", action: "modify", content: "const initial = 1;\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("src/index.ts"),
-      sampleContract("src/index.ts"),
-    )).rejects.toMatchObject({ code: "LLM_SCHEMA_INVALID" });
-
-    // Verify disk content was not mutated
-    const diskContent = fs.readFileSync(filePath, "utf8");
-    expect(diskContent).toBe(originalContent);
+    const { run, tx } = fixture();
+    const model = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(fake(replacement("BAD", "BAD")));
+    await expect(run()).resolves.toMatchObject({ success: false, errorType: "REPAIR_UNRESOLVED" });
+    expect(model).toHaveBeenCalledTimes(3);
+    expect(read()).toBe("BAD");
+    expect(tx.transitions).toHaveLength(1);
   });
 
-  // ── TEST D: same repair proposal cannot be retried repeatedly ────────────
-  test("TEST D: same repair proposal cannot be retried repeatedly (REPEATED_REPAIR_PROPOSAL)", async () => {
-    const filePath = path.join(tempDir, "src/index.ts");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "const x = 1;\n");
-
-    let buildCount = 0;
-    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
-      buildCount++;
-      return { success: false, errors: "TS2322: Type 'number' is not assignable to type 'string'" };
-    });
-
-    // Model keeps returning the same repair proposal that fails verification
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockResolvedValue({
-            choices: [
-              {
-                finish_reason: "stop",
-                message: {
-                  content: JSON.stringify({
-                    changes: [
-                      {
-                        path: "src/index.ts",
-                        action: "modify",
-                        description: "edit x",
-                        edits: [{ oldText: "const x = 1;\n", newText: "const x = 2;\n" }],
-                      },
-                    ],
-                  }),
-                },
-              },
-            ],
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/index.ts", action: "modify", content: "const x = 1;\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("src/index.ts"),
-      sampleContract("src/index.ts"),
-    );
-
-    expect(result.success).toBe(false);
-    expect(result.errorType).toBe("REPEATED_REPAIR_PROPOSAL");
-    expect(result.attempts).toBeLessThanOrEqual(2);
+  test("TEST D: repeating a proposal cannot repeatedly apply it to descendant bytes", async () => {
+    const { run, tx } = fixture();
+    const model = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(fake(replacement("BAD", "BAD2")));
+    await expect(run()).resolves.toMatchObject({ success: false, errorType: "REPAIR_UNRESOLVED", patchesAppliedCount: 1 });
+    expect(model).toHaveBeenCalledTimes(4);
+    expect(read()).toBe("BAD2");
+    expect(tx.transitions).toHaveLength(2);
   });
 
-  // ── TEST E: invalid repair gets max one bounded correction ───────────────
-  test("TEST E: invalid repair gets max one bounded correction", async () => {
-    const filePath = path.join(tempDir, "src/index.ts");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "const target = 'real';\n");
-
-    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-      success: false,
-      errors: "TS error in src/index.ts",
-    });
-
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockResolvedValue({
-            choices: [
-              {
-                finish_reason: "stop",
-                message: {
-                  content: JSON.stringify({
-                    changes: [
-                      {
-                        path: "src/index.ts",
-                        action: "modify",
-                        description: "wrong target",
-                        edits: [{ oldText: "const nonexistent = 'fake';", newText: "const fixed = 1;" }],
-                      },
-                    ],
-                  }),
-                },
-              },
-            ],
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    let correctionCalls = 0;
-    jest.spyOn(PatchCorrectionEngine, "correctPatch").mockImplementation(async () => {
-      correctionCalls++;
-      return { attempted: true, succeeded: false };
-    });
-
-    await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/index.ts", action: "modify", content: "const target = 'real';\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("src/index.ts"),
-      sampleContract("src/index.ts"),
-    );
-
-    expect(correctionCalls).toBe(1);
+  test("TEST E: invalid repair receives at most two structured corrections", async () => {
+    const { run } = fixture();
+    const model = jest.spyOn(LLMGateway.getInstance(), "callStructured")
+      .mockResolvedValueOnce(fake({ action: "modify", oldText: "" }))
+      .mockResolvedValueOnce(fake(replacement("BAD", "BAD")))
+      .mockResolvedValueOnce(fake(replacement()));
+    await expect(run()).resolves.toMatchObject({ success: true, modelRepairAttempts: 3 });
+    expect(model).toHaveBeenCalledTimes(3);
+    expect(model.mock.calls[1][0].messages[1].content).toContain("Structured correction required");
+    expect(read()).toBe("FIXED");
   });
 
-  // ── TEST F: second no-op correction stops immediately ────────────────────
-  test("TEST F: second no-op correction stops immediately without 5 loops", async () => {
-    const filePath = path.join(tempDir, "src/index.ts");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "const x = 1;\n");
-
-    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-      success: false,
-      errors: "Compiler error in src/index.ts",
-    });
-
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockResolvedValue({
-            choices: [
-              {
-                finish_reason: "stop",
-                message: {
-                  content: JSON.stringify({
-                    changes: [
-                      {
-                        path: "src/index.ts",
-                        action: "modify",
-                        description: "Repair a missing target",
-                        edits: [{ oldText: "const missing = 1;\n", newText: "const x = 2;\n" }],
-                      },
-                    ],
-                  }),
-                },
-              },
-            ],
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({
-      attempted: true,
-      succeeded: true,
-      correctedEdits: [{ oldText: "const x = 1;\n", newText: "const x = 1;\n" }],
-    });
-
-    const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/index.ts", action: "modify", content: "const x = 1;\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("src/index.ts"),
-      sampleContract("src/index.ts"),
-    );
-
-    expect(result.success).toBe(false);
-    expect(result.errorType).toBe("NO_OP_PATCH_EDIT");
-    expect(result.attempts).toBe(1);
+  test("TEST F: repeated no-op corrections stop after the two-correction budget", async () => {
+    const { run, builds } = fixture();
+    const model = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(fake(replacement("BAD", "BAD")));
+    await expect(run()).resolves.toMatchObject({ success: false, errorType: "REPAIR_UNRESOLVED", attempts: 3 });
+    expect(model).toHaveBeenCalledTimes(3);
+    expect(builds).toHaveBeenCalledTimes(2);
   });
 
-  // ── TEST G: SelfHealing receives CURRENT post-generation file content ────
   test("TEST G: SelfHealing receives CURRENT post-generation file content directly from disk", async () => {
-    const filePath = path.join(tempDir, "app/page.tsx");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    // Write post-generation content to disk
-    fs.writeFileSync(filePath, "export default function Page() { return <Calculator />; }\n");
-
-    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-      success: false,
-      errors: "Build failed: Calculator component is not imported.",
-    });
-
-    let capturedPromptContent = "";
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockImplementation(async (opts) => {
-            capturedPromptContent = opts.messages[1].content;
-            return {
-              choices: [
-                {
-                  finish_reason: "stop",
-                  message: {
-                    content: JSON.stringify({
-                      changes: [
-                        {
-                          path: "app/page.tsx",
-                          action: "modify",
-                          description: "add import",
-                          edits: [
-                            {
-                              oldText: "export default function Page() { return <Calculator />; }\n",
-                              newText: "import Calculator from '@/components/Calculator';\nexport default function Page() { return <Calculator />; }\n",
-                            },
-                          ],
-                        },
-                      ],
-                    }),
-                  },
-                },
-              ],
-            };
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "app/page.tsx", action: "modify", content: "export default function Page() { return <Calculator />; }\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("app/page.tsx"),
-      sampleContract("app/page.tsx"),
-    );
-
-    expect(capturedPromptContent).toContain("export default function Page() { return <Calculator />; }");
+    const { run, tx } = fixture();
+    const model = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(fake(replacement()));
+    await expect(run()).resolves.toMatchObject({ success: true });
+    const context = JSON.parse(String(model.mock.calls[0][0].messages[1].content));
+    expect(context.currentFiles).toEqual([{ path: relativePath, content: "BAD", expectedFileHash: fingerprintBytes("BAD") }]);
+    expect(context.currentRevision).toBe(tx.transitions[0].childRevision);
+    expect(context.originalTask).toBe("Modify src/index.ts");
+    expect(context.introducedFailures).toHaveLength(1);
   });
 
-  // ── TEST H: current file SHA is verified before repair application ────────
-  test("TEST H: current file SHA is verified before repair application", async () => {
-    const filePath = path.join(tempDir, "src/index.ts");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "const a = 1;\n");
-
-    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-      success: false,
-      errors: "Build error in src/index.ts",
+  test("TEST H: external source changes while the model runs invalidate the transaction", async () => {
+    const { run, tx } = fixture();
+    jest.spyOn(LLMGateway.getInstance(), "callStructured").mockImplementation(async () => {
+      fs.writeFileSync(path.join(tempDir, relativePath), "external");
+      return fake(replacement());
     });
-
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockImplementation(async () => {
-            // Mutate file behind the back of the resolver to trigger stale source
-            fs.writeFileSync(filePath, "const a = 99999;\n");
-            return {
-              choices: [
-                {
-                  finish_reason: "stop",
-                  message: {
-                    content: JSON.stringify({
-                      changes: [
-                        {
-                          path: "src/index.ts",
-                          action: "modify",
-                          description: "edit a",
-                          edits: [{ oldText: "const a = 1;\n", newText: "const a = 2;\n" }],
-                        },
-                      ],
-                    }),
-                  },
-                },
-              ],
-            };
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/index.ts", action: "modify", content: "const a = 1;\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("src/index.ts"),
-      sampleContract("src/index.ts"),
-    );
-
-    expect(result.success).toBe(false);
+    await expect(run()).resolves.toMatchObject({ success: false, errorType: "TRANSACTION_REVISION_DIVERGED" });
+    expect(read()).toBe("external");
+    expect(tx.status).toBe("INVALIDATED");
+    expect(tx.transitions).toHaveLength(1);
   });
 
-  // ── TEST I: valid repair applies and triggers another build ───────────────
-  test("TEST I: valid repair applies and triggers another build successfully", async () => {
-    const filePath = path.join(tempDir, "src/index.ts");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "const a: number = 'hello';\n");
+  test("TEST I: valid repair applies and triggers validation in the disposable workspace", async () => {
+    const { run, builds, tx } = fixture();
+    jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(fake(replacement()));
+    await expect(run()).resolves.toMatchObject({ success: true, repairApplied: true, patchesAppliedCount: 1, buildAttemptsCount: 3 });
+    expect(builds).toHaveBeenCalledTimes(3);
+    expect(builds.mock.calls[2][1]).not.toBe(tempDir);
+    expect(read()).toBe("FIXED");
+    expect(tx.transitions).toHaveLength(2);
+  });
 
-    let buildCalls = 0;
-    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
-      buildCalls++;
-      if (buildCalls === 1) {
-        return { success: false, errors: "Type error: string not assignable to number" };
-      }
-      return { success: true, errors: "" };
-    });
+  test("TEST J: rejected repair does not increment successful patchesAppliedCount", async () => {
+    const { run } = fixture();
+    jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(fake(replacement("missing", "FIXED", "BAD")));
+    await expect(run()).resolves.toMatchObject({ success: false, patchesAppliedCount: 0, repairApplied: false });
+    expect(read()).toBe("BAD");
+  });
 
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockResolvedValue({
-            choices: [
-              {
-                finish_reason: "stop",
-                message: {
-                  content: JSON.stringify({
-                    changes: [
-                      {
-                        path: "src/index.ts",
-                        action: "modify",
-                        description: "fix type",
-                        edits: [{ oldText: "const a: number = 'hello';\n", newText: "const a: string = 'hello';\n" }],
-                      },
-                    ],
-                  }),
-                },
-              },
-            ],
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/index.ts", action: "modify", content: "const a: number = 'hello';\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("src/index.ts"),
-      sampleContract("src/index.ts"),
-    );
-
-    expect(result.success).toBe(true);
-    expect(result.repairApplied).toBe(true);
-    expect(buildCalls).toBe(2);
+  test("TEST K: buildAttempts only counts actual validation invocations", async () => {
+    const { run, builds } = fixture();
+    jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(fake(replacement("missing", "FIXED", "BAD")));
+    const result = await run();
+    expect(result.buildAttemptsCount).toBe(builds.mock.calls.length);
     expect(result.buildAttemptsCount).toBe(2);
-  });
-
-  // ── TEST J: invalid repair does not falsely increment successful patchesApplied ──
-  test("TEST J: invalid repair does not falsely increment successful patchesAppliedCount", async () => {
-    const filePath = path.join(tempDir, "src/index.ts");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "const x = 1;\n");
-
-    jest.spyOn(ValidationRunner, "validateWithShell").mockResolvedValue({
-      success: false,
-      errors: "Error",
-    });
-
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockResolvedValue({
-            choices: [
-              {
-                finish_reason: "stop",
-                message: {
-                  content: JSON.stringify({
-                    changes: [
-                      {
-                        path: "src/index.ts",
-                        action: "modify",
-                        description: "Invalid target repair",
-                        edits: [{ oldText: "const missing = 1;\n", newText: "const x = 2;\n" }],
-                      },
-                    ],
-                  }),
-                },
-              },
-            ],
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({
-      attempted: true,
-      succeeded: false,
-    });
-
-    const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/index.ts", action: "modify", content: "const x = 1;\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("src/index.ts"),
-      sampleContract("src/index.ts"),
-    );
-
-    expect(result.patchesAppliedCount).toBe(0);
-  });
-
-  // ── TEST K: buildAttempts only counts actual build command executions ────
-  test("TEST K: buildAttempts only counts actual build command executions", async () => {
-    const filePath = path.join(tempDir, "src/index.ts");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "const x = 1;\n");
-
-    let actualBuildRuns = 0;
-    jest.spyOn(ValidationRunner, "validateWithShell").mockImplementation(async () => {
-      actualBuildRuns++;
-      return { success: false, errors: "Build error" };
-    });
-
-    const mockOpenAI = {
-      chat: {
-        completions: {
-          create: jest.fn().mockResolvedValue({
-            choices: [
-              {
-                finish_reason: "stop",
-                message: {
-                  content: JSON.stringify({
-                    changes: [
-                      {
-                        path: "src/index.ts",
-                        action: "modify",
-                        description: "Invalid target repair",
-                        edits: [{ oldText: "const missing = 1;\n", newText: "const x = 2;\n" }],
-                      },
-                    ],
-                  }),
-                },
-              },
-            ],
-          }),
-        },
-      },
-    };
-    jest.spyOn(sharedUtils, "getOpenAI").mockReturnValue(mockOpenAI as any);
-
-    jest.spyOn(PatchCorrectionEngine, "correctPatch").mockResolvedValue({ attempted: true, succeeded: false });
-
-    const result = await SelfHealingEngine.runSelfHealingLoop(
-      [{ path: "src/index.ts", action: "modify", content: "const x = 1;\n", description: "initial" }],
-      tempDir,
-      ["npm run build"],
-      "prompt",
-      "message",
-      new FileSystemStateManager(),
-      "test-proj",
-      undefined,
-      sampleManifest("src/index.ts"),
-      sampleContract("src/index.ts"),
-    );
-
-    expect(result.buildAttemptsCount).toBe(actualBuildRuns);
+    expect(result.modelRepairAttempts).toBe(3);
   });
 
   // ── TEST L: raw eval() generation remains security-flagged ────────────────

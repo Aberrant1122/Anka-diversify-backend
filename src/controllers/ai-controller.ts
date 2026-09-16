@@ -1,12 +1,15 @@
 import { Request, Response } from "express";
 import { AiService } from "../ai/application/AiService";
-import { ProjectGitHubService } from "../services/github.service";
+import { GitHubApiError, ProjectGitHubService } from "../services/github.service";
 import { ChatRequest } from "../types";
 import { PrismaClient } from "@prisma/client";
 import { decrypt } from "../utils/encryption";
 import { listActiveReservations } from "../services/file-reservation-service";
 import { MultiRepoCoordinator } from "../ai/coordination/MultiRepoCoordinator";
 import { CapabilityAction, CapabilityGrant } from "../ai/runtime/CapabilityGuard";
+import { GitWorktreeService } from "../services/git-worktree.service";
+import { GitWorkflowError } from "../services/git-workflow.service";
+import { ProjectSidebarService } from "../services/project-sidebar.service";
 
 const prisma = new PrismaClient();
 
@@ -514,18 +517,112 @@ export class AiController {
   }
 
   async pushAgentChanges(req: Request, res: Response) {
-    void req;
-    return res.status(409).json({
-      error: "GIT_WORKFLOW_REQUIRED",
-      message: "Agent changes can only ship from the verified isolated-worktree workflow after deterministic completion.",
-    });
+    try {
+      const userId = req.user?.userId as string | undefined;
+      const { projectId } = req.params;
+      if (!userId) return res.status(401).json({ error: "Authentication required" });
+      if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+
+      const body = req.body as Record<string, unknown> | undefined;
+      const approvalId = typeof body?.approvalId === "string" ? body.approvalId.trim() : "";
+      const commitMessage = typeof body?.commitMessage === "string" ? body.commitMessage.trim() : "";
+      const rawChanges = body?.changes;
+      if (!approvalId || !commitMessage || !Array.isArray(rawChanges) || rawChanges.length === 0) {
+        return res.status(400).json({
+          error: "INVALID_GIT_APPROVAL",
+          message: "approvalId, commitMessage, and at least one approved change are required.",
+        });
+      }
+      const changes: Array<{ path: string; content: string }> = [];
+      for (const value of rawChanges) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return res.status(400).json({ error: "INVALID_GIT_APPROVAL", message: "Each approved change must be an object." });
+        }
+        const change = value as Record<string, unknown>;
+        if (typeof change.path !== "string" || typeof change.content !== "string") {
+          return res.status(400).json({ error: "INVALID_GIT_APPROVAL", message: "Each approved change requires string path and content fields." });
+        }
+        changes.push({ path: change.path, content: change.content });
+      }
+
+      const repositoryId = GitWorktreeService.getApprovalRepositoryId(approvalId, userId, projectId);
+      const project = await prisma.project.findFirst({
+        where: { id: projectId, userId },
+        select: { id: true, name: true, githubUrl: true, githubToken: true },
+      });
+      if (!project) return res.status(404).json({ error: "PROJECT_NOT_FOUND", message: "Project was not found." });
+
+      const repository = repositoryId
+        ? await prisma.projectRepository.findFirst({
+            where: { id: repositoryId, projectId },
+            select: { id: true, name: true, githubUrl: true, githubToken: true },
+          })
+        : null;
+      if (repositoryId && !repository) {
+        return res.status(404).json({ error: "REPOSITORY_NOT_FOUND", message: "Approved repository was not found." });
+      }
+      const githubUrl = repository?.githubUrl ?? project.githubUrl;
+      const encryptedToken = repository?.githubToken ?? project.githubToken;
+      if (!githubUrl) return res.status(400).json({ error: "GITHUB_REPOSITORY_REQUIRED", message: "No GitHub repository is connected." });
+
+      let gitEnvironment: Readonly<Record<string, string>> | undefined;
+      if (encryptedToken) {
+        const token = decrypt(encryptedToken);
+        const authorization = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
+        gitEnvironment = Object.freeze({
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.extraHeader",
+          GIT_CONFIG_VALUE_0: `Authorization: Basic ${authorization}`,
+        });
+      }
+
+      const result = await GitWorktreeService.shipApprovedRun({
+        approvalId,
+        userId,
+        projectId,
+        changes,
+        commitSummary: commitMessage,
+        expectedRepositoryIdentity: githubUrl,
+        gitEnvironment,
+      });
+      if (!result.commitSha) throw new Error("GIT_COMMIT_FAILED: Verified shipping completed without a commit SHA.");
+      const cleanUrl = githubUrl.replace(/\.git$/i, "").replace(/^git@github\.com:/i, "https://github.com/");
+      const url = `${cleanUrl}/commit/${result.commitSha}`;
+      return res.json({
+        success: true,
+        data: {
+          sha: result.commitSha,
+          url,
+          pushes: [{
+            repositoryId: repository?.id ?? null,
+            name: repository?.name ?? project.name,
+            sha: result.commitSha,
+            url,
+          }],
+        },
+      });
+    } catch (error) {
+      console.error("Push agent changes error:", error instanceof Error ? error.message : error);
+      const message = error instanceof Error ? error.message : "Unknown Git shipping failure";
+      const isApprovalError = message.startsWith("GIT_APPROVAL_") || message.startsWith("GIT_SHIPPING_IN_PROGRESS");
+      const status = isApprovalError ? 409 : error instanceof GitWorkflowError ? 409 : 500;
+      const errorCode = error instanceof GitWorkflowError
+        ? error.code
+        : message.split(":", 1)[0] || "GIT_SHIPPING_FAILED";
+      return res.status(status).json({ error: errorCode, message });
+    }
   }
 
   async getProjectHealth(req: Request, res: Response) {
     try {
       const { projectId } = req.params;
+      const userId = req.user?.userId as string | undefined;
+      if (!userId) return res.status(401).json({ error: "AUTHENTICATION_REQUIRED", message: "Authentication required." });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
+      const project = await ProjectSidebarService.getAccessibleProject(projectId, userId);
+      if (!project) return res.status(404).json({ error: "PROJECT_NOT_FOUND", message: "Project not found or access denied." });
       const health = await aiService.getProjectHealth(projectId);
+      console.info(`[PROJECT_HEALTH] project=${projectId} score=${health.score} status=${health.status}`);
       res.json(health);
     } catch (error) {
       console.error("Project health error:", error);
@@ -539,15 +636,28 @@ export class AiController {
   async listPullRequests(req: Request, res: Response) {
     try {
       const { projectId } = req.params;
+      const userId = req.user?.userId as string | undefined;
+      if (!userId) return res.status(401).json({ error: "AUTHENTICATION_REQUIRED", message: "Authentication required." });
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
-      const project = await prisma.project.findUnique({ where: { id: projectId } });
-      if (!project?.githubUrl) return res.status(400).json({ error: "No GitHub repository connected" });
+      const project = await ProjectSidebarService.getAccessibleProject(projectId, userId);
+      if (!project) return res.status(404).json({ error: "PROJECT_NOT_FOUND", message: "Project not found or access denied." });
+      if (!project.githubUrl) {
+        return res.status(400).json({ error: "GITHUB_REPOSITORY_REQUIRED", message: "No GitHub repository is connected." });
+      }
       const token = project.githubToken ? decrypt(project.githubToken) : undefined;
       const prs = await ProjectGitHubService.listPullRequests(project.githubUrl, token);
-      res.json({ pullRequests: prs });
+      const fetchedAt = new Date().toISOString();
+      console.info(`[PROJECT_PR] project=${projectId} count=${prs.length}`);
+      res.json({ pullRequests: prs, total: prs.length, fetchedAt });
     } catch (error) {
       console.error("List PRs error:", error);
-      res.status(500).json({ error: "Failed to fetch pull requests", message: error instanceof Error ? error.message : "Unknown error" });
+      if (error instanceof GitHubApiError) {
+        return res.status(error.status).json({ error: error.code, message: error.message });
+      }
+      if (error instanceof Error && error.message === "Invalid GitHub URL") {
+        return res.status(400).json({ error: "GITHUB_REPOSITORY_INVALID", message: "The connected GitHub repository URL is invalid." });
+      }
+      res.status(502).json({ error: "GITHUB_UNAVAILABLE", message: "Unable to load pull requests." });
     }
   }
 

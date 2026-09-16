@@ -22,6 +22,38 @@ describe("Cluster E — Active Entry Reachability Validation", () => {
     diffCriticEnabled: true,
   };
 
+  test("existing lib TypeScript bugfix does not require frontend entry integration", async () => {
+    const snapshot = {
+      keyFiles: [
+        {
+          path: "app/page.tsx",
+          content: 'import { getTasksByProject } from "../lib/mock-data";\nexport default function Page() { return <div>{getTasksByProject("p").length}</div>; }',
+        },
+        {
+          path: "lib/mock-data.ts",
+          content: "export const getTasksByProject = (id: string) => [{ projectId: id }];",
+        },
+      ],
+    };
+    const changes: AgentFileChange[] = [{
+      path: "lib/mock-data.ts",
+      action: "modify",
+      content: "export const getTasksByProject = (id: string) => [{ projectId: id }].filter((task) => task.projectId === id);",
+      description: "Fix project task filtering",
+    }];
+
+    const result = await ValidationDetector.runFeatureValidation(
+      changes,
+      snapshot,
+      "Fix tasks missing from the project page",
+      { ...defaultContract, goal: "Fix project task filtering", taskType: "BUG_FIX" },
+    );
+
+    expect(result.checks.find((check) => check.id === "intent_satisfaction")).toMatchObject({ status: "PASS" });
+    expect(result.failedChecks).not.toContain(expect.stringContaining("frontend entry point"));
+    expect(result.overallPassed).toBe(true);
+  });
+
   // 1. Vite direct reachability: App.tsx -> DashboardPage.tsx, modify DashboardPage.tsx -> PASS
   test("1. Vite: App.tsx -> DashboardPage.tsx, modify DashboardPage.tsx succeeds without App.tsx change", async () => {
     const snapshot = {

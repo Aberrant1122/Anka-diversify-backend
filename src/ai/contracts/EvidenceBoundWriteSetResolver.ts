@@ -1,7 +1,11 @@
+import fs from "fs";
+import { resolveLocalImportEdges } from "../repository/DeterministicImportResolver";
+import { TaskRootedAuthorizationVerifier, TaskRootedAuthorizationProof } from "./TaskRootedAuthorizationProof";
+import { authoritySnapshot, withAuthoritySnapshot } from "../repository/AuthorityWorktree";
 import path from "path";
 import { PolicyContract } from "./PolicyContract";
 import { TaskIntentSpec } from "../shared/TaskIntentSpec";
-import { RepositoryEvidenceStore, RepositoryEvidence } from "../repository/RepositoryEvidenceStore";
+import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { MonorepoDescriptor } from "../workspace/MonorepoDetector";
 import type { CapabilityGrant, CapabilityAction } from "../runtime/CapabilityGuard";
@@ -16,9 +20,15 @@ export interface EvidenceBoundAuthorization {
   getBaseRevision(): string | undefined;
   getStageId(): string | undefined;
   getRunId(): string | undefined;
+  getWorktreeRevision(): string | undefined;
 }
 
 interface EvidenceAuthorizationDetails {
+  readonly proofs?: readonly TaskRootedAuthorizationProof[];
+  readonly evidenceStore?: RepositoryEvidenceStore;
+  readonly intentSpec?: TaskIntentSpec;
+  readonly worktreeRevision?: string;
+  readonly canonicalWorkspaceRoot?: string;
   readonly workspaceRoot?: string;
   readonly baseRevision?: string;
   readonly stageId?: string;
@@ -40,6 +50,10 @@ class ResolverIssuedEvidenceAuthorization implements EvidenceBoundAuthorization 
   }
 
   public static create(input: {
+    proofs?: readonly TaskRootedAuthorizationProof[];
+    evidenceStore?: RepositoryEvidenceStore;
+    intentSpec?: TaskIntentSpec;
+    worktreeRevision?: string;
     authorizationId: string;
     repositoryId: string;
     workspaceRoot?: string;
@@ -51,6 +65,11 @@ class ResolverIssuedEvidenceAuthorization implements EvidenceBoundAuthorization 
   }): EvidenceBoundAuthorization {
     const artifact = new ResolverIssuedEvidenceAuthorization(input.authorizationId, input.repositoryId);
     authorizationDetails.set(artifact, Object.freeze({
+      proofs: input.proofs ? Object.freeze([...input.proofs]) : undefined,
+      evidenceStore: input.evidenceStore,
+      intentSpec: input.intentSpec,
+      worktreeRevision: input.worktreeRevision,
+      canonicalWorkspaceRoot: input.workspaceRoot && input.worktreeRevision ? fs.realpathSync(input.workspaceRoot) : undefined,
       workspaceRoot: input.workspaceRoot ? path.resolve(input.workspaceRoot) : undefined,
       baseRevision: input.baseRevision,
       stageId: input.stageId,
@@ -67,11 +86,22 @@ class ResolverIssuedEvidenceAuthorization implements EvidenceBoundAuthorization 
   public getWorkspaceRoot(): string | undefined { return authorizationDetails.get(this)?.workspaceRoot; }
   public getBaseRevision(): string | undefined { return authorizationDetails.get(this)?.baseRevision; }
   public getStageId(): string | undefined { return authorizationDetails.get(this)?.stageId; }
+  public getWorktreeRevision(): string | undefined { return authorizationDetails.get(this)?.worktreeRevision; }
   public getRunId(): string | undefined { return authorizationDetails.get(this)?.runId; }
 }
 
 export function isAuthenticEvidenceBoundAuthorization(value: unknown): value is EvidenceBoundAuthorization {
   return typeof value === "object" && value !== null && authenticEvidenceAuthorizations.has(value);
+}
+
+export function isCurrentEvidenceAuthorization(value: EvidenceBoundAuthorization): boolean {
+  const details = authorizationDetails.get(value);
+  try {
+    if (!details?.workspaceRoot || !details.worktreeRevision || !details.evidenceStore || !details.intentSpec || !details.proofs) return false;
+    if (fs.realpathSync(details.workspaceRoot) !== details.canonicalWorkspaceRoot) return false;
+    return withAuthoritySnapshot(details.workspaceRoot, () => authoritySnapshot(details.workspaceRoot!).revision === details.worktreeRevision &&
+      details.proofs!.every((proof) => TaskRootedAuthorizationVerifier.verify(details.evidenceStore!, details.intentSpec!, proof)));
+  } catch { return false; }
 }
 
 export interface IntegrationObligation {
@@ -135,244 +165,15 @@ function isDependencyMatch(dep: string, targetPath: string): boolean {
   return false;
 }
 
-function findCandidateIntegrators(
-  createChange: PlannedChange,
-  allChanges: PlannedChange[],
-  evidenceStore: RepositoryEvidenceStore
-): PlannedChange[] {
-  const normCreatePath = normalizeRepoPath(createChange.path);
-  const integrators: PlannedChange[] = [];
-
-  for (const other of allChanges) {
-    if (normalizeRepoPath(other.path) === normCreatePath) continue;
-    const normOtherPath = normalizeRepoPath(other.path);
-
-    // 1. Explicitly designated in integration.satisfiedBy
-    if (
-      Array.isArray(createChange.integration?.satisfiedBy) &&
-      createChange.integration.satisfiedBy.some(
-        (s) => normalizeRepoPath(s) === normOtherPath || isDependencyMatch(s, normOtherPath)
-      )
-    ) {
-      integrators.push(other);
-      continue;
-    }
-
-    // 2. Incoming reverse edge: other change declares dependency on createChange
-    if (
-      Array.isArray(other.dependencies) &&
-      other.dependencies.some((d) => isDependencyMatch(d, normCreatePath))
-    ) {
-      integrators.push(other);
-      continue;
-    }
-
-    // 3. Deterministic repository evidence cited: IMPORT or REFERENCE connecting other and createChange
-    const otherValidation = evidenceStore.validateEvidenceIds(other.evidenceIds || []);
-    if (otherValidation.valid) {
-      const hasRelation = otherValidation.evidence.some(
-        (e) =>
-          (e.kind === "IMPORT" || e.kind === "REFERENCE" || e.kind === "ROUTE" || e.kind === "SYMBOL") &&
-          ((normalizeRepoPath(e.filePath) === normCreatePath && e.sourceFile && normalizeRepoPath(e.sourceFile) === normOtherPath) ||
-            (normalizeRepoPath(e.filePath) === normOtherPath && e.sourceFile && normalizeRepoPath(e.sourceFile) === normCreatePath) ||
-            (e.metadata?.dependencies && Array.isArray(e.metadata.dependencies) && e.metadata.dependencies.some((d: string) => isDependencyMatch(d, normCreatePath))))
-      );
-      if (hasRelation) {
-        integrators.push(other);
-        continue;
-      }
-    }
-  }
-
-  return integrators;
-}
-
-function hasDirectImportEvidence(
-  change: PlannedChange,
-  evidenceStore: RepositoryEvidenceStore
-): boolean {
-  const normPath = normalizeRepoPath(change.path);
-  const validation = evidenceStore.validateEvidenceIds(change.evidenceIds || []);
-  if (!validation.valid) return false;
-  return validation.evidence.some(
-    (e) =>
-      e.kind === "IMPORT" &&
-      (normalizeRepoPath(e.filePath) === normPath ||
-        (e.sourceFile && Array.isArray(e.metadata?.dependencies) && e.metadata.dependencies.includes(normPath)))
-  );
-}
-
-function findMatchingPlannedChange(
-  dep: string,
-  allChanges: PlannedChange[]
-): PlannedChange | undefined {
+function findMatchingPlannedChange(dep: string, allChanges: PlannedChange[]): PlannedChange | undefined {
   return allChanges.find((other) => isDependencyMatch(dep, other.path));
-}
-
-function findCreatedChangesIntegratedBy(
-  modifyChange: PlannedChange,
-  allChanges: PlannedChange[]
-): PlannedChange[] {
-  const normModPath = normalizeRepoPath(modifyChange.path);
-  return allChanges.filter((other) => {
-    if (other.action !== "create") return false;
-    const normOther = normalizeRepoPath(other.path);
-    // 1. modifyChange explicitly lists other in dependencies
-    if (Array.isArray(modifyChange.dependencies) && modifyChange.dependencies.some((d) => isDependencyMatch(d, normOther))) {
-      return true;
-    }
-    // 2. other declares satisfiedBy modifyChange
-    if (
-      Array.isArray(other.integration?.satisfiedBy) &&
-      other.integration.satisfiedBy.some((s) => normalizeRepoPath(s) === normModPath || isDependencyMatch(s, normModPath))
-    ) {
-      return true;
-    }
-    return false;
-  });
-}
-
-function findDeletedTargetsReferencedBy(
-  modifyChange: PlannedChange,
-  allChanges: PlannedChange[],
-  evidenceStore: RepositoryEvidenceStore
-): PlannedChange[] {
-  const normModPath = normalizeRepoPath(modifyChange.path);
-  const deleteChanges = allChanges.filter((c) => c.action === "delete");
-  const referencedDeletes: PlannedChange[] = [];
-
-  for (const del of deleteChanges) {
-    const normDel = normalizeRepoPath(del.path);
-    if (normDel === normModPath) continue;
-
-    // 1. modifyChange explicitly lists del.path in dependencies
-    if (Array.isArray(modifyChange.dependencies) && modifyChange.dependencies.some((d) => isDependencyMatch(d, normDel))) {
-      referencedDeletes.push(del);
-      continue;
-    }
-
-    // 2. Evidence cites IMPORT, REFERENCE, or SYMBOL connecting modifyChange to del.path
-    const modVal = evidenceStore.validateEvidenceIds(modifyChange.evidenceIds || []);
-    if (modVal.valid) {
-      const connects = modVal.evidence.some(
-        (e) =>
-          (e.kind === "IMPORT" || e.kind === "REFERENCE" || e.kind === "SYMBOL" || e.kind === "ROUTE") &&
-          ((normalizeRepoPath(e.filePath) === normModPath && e.sourceFile && normalizeRepoPath(e.sourceFile) === normDel) ||
-            (normalizeRepoPath(e.filePath) === normDel && e.sourceFile && normalizeRepoPath(e.sourceFile) === normModPath) ||
-            (normalizeRepoPath(e.filePath) === normModPath && e.metadata?.target && normalizeRepoPath(e.metadata.target) === normDel) ||
-            (normalizeRepoPath(e.filePath) === normDel && e.metadata?.importer && normalizeRepoPath(e.metadata.importer) === normModPath))
-      );
-      if (connects) {
-        referencedDeletes.push(del);
-        continue;
-      }
-    }
-  }
-
-  return referencedDeletes;
-}
-
-function findRequiredImporterCleanups(
-  deleteChange: PlannedChange,
-  allChanges: PlannedChange[],
-  evidenceStore: RepositoryEvidenceStore
-): PlannedChange[] {
-  const normDel = normalizeRepoPath(deleteChange.path);
-  const modifyChanges = allChanges.filter((c) => c.action === "modify");
-  const importers: PlannedChange[] = [];
-
-  for (const mod of modifyChanges) {
-    const normMod = normalizeRepoPath(mod.path);
-    if (normMod === normDel) continue;
-
-    if (Array.isArray(mod.dependencies) && mod.dependencies.some((d) => isDependencyMatch(d, normDel))) {
-      importers.push(mod);
-      continue;
-    }
-
-    const modVal = evidenceStore.validateEvidenceIds(mod.evidenceIds || []);
-    if (modVal.valid) {
-      const connects = modVal.evidence.some(
-        (e) =>
-          (e.kind === "IMPORT" || e.kind === "REFERENCE" || e.kind === "SYMBOL" || e.kind === "ROUTE") &&
-          ((normalizeRepoPath(e.filePath) === normMod && e.sourceFile && normalizeRepoPath(e.sourceFile) === normDel) ||
-            (normalizeRepoPath(e.filePath) === normDel && e.sourceFile && normalizeRepoPath(e.sourceFile) === normMod) ||
-            (normalizeRepoPath(e.filePath) === normMod && e.metadata?.target && normalizeRepoPath(e.metadata.target) === normDel) ||
-            (normalizeRepoPath(e.filePath) === normDel && e.metadata?.importer && normalizeRepoPath(e.metadata.importer) === normMod))
-      );
-      if (connects) {
-        importers.push(mod);
-        continue;
-      }
-    }
-
-    const delVal = evidenceStore.validateEvidenceIds(deleteChange.evidenceIds || []);
-    if (delVal.valid) {
-      const connects = delVal.evidence.some(
-        (e) =>
-          (e.kind === "IMPORT" || e.kind === "REFERENCE") &&
-          ((normalizeRepoPath(e.filePath) === normMod && e.sourceFile && normalizeRepoPath(e.sourceFile) === normDel) ||
-            (normalizeRepoPath(e.filePath) === normDel && e.sourceFile && normalizeRepoPath(e.sourceFile) === normMod) ||
-            (normalizeRepoPath(e.filePath) === normDel && e.metadata?.importer && normalizeRepoPath(e.metadata.importer) === normMod))
-      );
-      if (connects) {
-        importers.push(mod);
-        continue;
-      }
-    }
-  }
-
-  return importers;
-}
-
-function hasDirectRelationEvidence(
-  change: PlannedChange,
-  evidenceStore: RepositoryEvidenceStore,
-  intentSpec: TaskIntentSpec
-): boolean {
-  const normPath = normalizeRepoPath(change.path);
-  if (intentSpec.explicitUserPaths.some((p) => normalizeRepoPath(p) === normPath)) {
-    return true;
-  }
-  const validation = evidenceStore.validateEvidenceIds(change.evidenceIds || []);
-  if (!validation.valid) return false;
-  return validation.evidence.some((e) => {
-    // FILE kind alone is existence only, NEVER relation
-    if (e.kind === "FILE") return false;
-    // ENTRY_POINT alone is role only, not blanket authority to modify unless task has explicit user path
-    if (e.kind === "ENTRY_POINT") {
-      return false;
-    }
-    if (e.kind === "REFERENCE" || e.kind === "IMPORT") {
-      return (
-        normalizeRepoPath(e.filePath) === normPath ||
-        (e.sourceFile && normalizeRepoPath(e.sourceFile) === normPath)
-      );
-    }
-    if (e.kind === "DIAGNOSTIC") {
-      if (e.metadata?.stale === true) {
-        return false;
-      }
-      return normalizeRepoPath(e.filePath) === normPath;
-    }
-    if (e.kind === "ROUTE" || e.kind === "SYMBOL" || e.kind === "TEST") {
-      return normalizeRepoPath(e.filePath) === normPath;
-    }
-    if (e.kind === "STYLE_DEPENDENCY") {
-      return (
-        normalizeRepoPath(e.filePath) === normPath ||
-        (e.sourceFile && normalizeRepoPath(e.sourceFile) === normPath)
-      );
-    }
-    return false;
-  });
 }
 
 /**
  * EvidenceBoundWriteSetResolver
  *
- * Legacy evidence-bound planning resolver. It does not mint or widen an
- * AuthorizedCapabilityScope; CapabilityGuard independently authorizes writes.
+ * Backend task-rooted write-set resolver. Its opaque artifact is revalidated
+ * by CapabilityGuard before capability issuance and first use.
  *
  * Planning invariants (Phase 2 & Pass 2):
  * 1. Grounds manifest-requested paths in deterministic repository evidence.
@@ -380,14 +181,20 @@ function hasDirectRelationEvidence(
  * 3. Invented evidence IDs -> REJECT.
  * 4. Semantic score alone does NOT establish eligibility.
  * 5. Active entry (App.tsx / page.tsx) is NOT automatically eligible.
- * 6. CREATE requires integration evidence (must be imported/referenced by an approved reachable change).
- * 7. Two-phase evaluation: intrinsic eligibility followed by fixed-point dependency/integration closure.
+ * 6. CREATE requires an exact path independently extracted from original user input.
+ * 7. Task-rooted eligibility is followed by dependency and destructive cleanup closure.
  * 8. Order-independent: evaluation produces identical results regardless of proposedChanges array ordering.
- * 9. Rejections cascade through reverse integration edges and forward dependency edges until stable.
+ * 9. Required dependencies and importer cleanups must remain independently approved.
  * 10. If no changes are grounded, returns empty approvedPaths for compatibility.
  */
 export class EvidenceBoundWriteSetResolver {
   public static resolve(params: WriteSetResolverParams): WriteAuthorizationResult {
+    const workspace = params.evidenceStore.getDefaultWorkspace();
+    if (workspace && params.evidenceStore.getCanonicalWorkspaceRoot()) return withAuthoritySnapshot(workspace, () => this.resolveBatch(params));
+    return this.resolveBatch(params);
+  }
+
+  private static resolveBatch(params: WriteSetResolverParams): WriteAuthorizationResult {
     const {
       policy,
       intentSpec,
@@ -414,7 +221,7 @@ export class EvidenceBoundWriteSetResolver {
       const emptyAuth = ResolverIssuedEvidenceAuthorization.create({
         authorizationId: `auth-blocked-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         repositoryId: targetRepositoryId,
-        workspaceRoot: params.workspaceRoot,
+        workspaceRoot: params.workspaceRoot ?? evidenceStore.getDefaultWorkspace(),
         baseRevision: params.baseRevision,
         stageId: params.stageId,
         runId: params.runId,
@@ -429,11 +236,11 @@ export class EvidenceBoundWriteSetResolver {
       };
     }
 
-    const isStandalone = policy.pipeline === "STANDALONE" || policy.repositoryRequired === false;
 
     // Phase A: Evaluate intrinsic eligibility for every change independently
     const intrinsicallyEligible = new Map<string, PlannedChange>();
     const rejectionReasons = new Map<string, string>();
+    const candidateProofs = new Map<string, TaskRootedAuthorizationProof>();
 
     for (const change of proposedChanges) {
       const normPath = normalizeRepoPath(change.path);
@@ -447,12 +254,13 @@ export class EvidenceBoundWriteSetResolver {
 
       // 2. Action allowed by policy
       const isCreateAllowed = policy.allowedActions.some((a) => a.includes("create") || a.startsWith("write_"));
-      const isDeleteAllowed = policy.allowedActions.some((a) => a.includes("delete") || a.startsWith("clean_"));
+      const isDeleteAllowed = policy.allowedActions.some((a) => a.includes("delete"));
       const isModifyAllowed = policy.allowedActions.some(
         (a) => a.includes("modify") || a.includes("update") || a.includes("import") || a.includes("edit") || a.includes("fix") || a.startsWith("write_")
       );
       const isAllowed = change.action === "create" ? isCreateAllowed : change.action === "delete" ? isDeleteAllowed : isModifyAllowed;
-      if (!isAllowed) {
+      const forbidden = policy.forbiddenActions.some((a) => [change.action, `${change.action}_file`, `${change.action}_files`, ...(change.action === "delete" ? ["delete_folder", "delete_folders"] : [])].includes(a.toLowerCase()));
+      if (!isAllowed || forbidden) {
         console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=ACTION_NOT_ALLOWED_BY_POLICY`);
         rejectionReasons.set(normPath, `Action "${change.action}" is forbidden by PolicyContract`);
         continue;
@@ -478,8 +286,11 @@ export class EvidenceBoundWriteSetResolver {
         continue;
       }
 
-      if (evidenceValidation.evidence.some((evidence) => !evidenceStore.isAuthorityEligible(evidence))) {
-        console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=UNAUTHENTICATED_REPOSITORY_EVIDENCE`);
+      const unauthenticatedEvidenceIds = evidenceValidation.evidence
+        .filter((evidence) => !evidenceStore.isAuthorityEligible(evidence))
+        .map((evidence) => evidence.id);
+      if (unauthenticatedEvidenceIds.length > 0) {
+        console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=UNAUTHENTICATED_REPOSITORY_EVIDENCE ids=[${unauthenticatedEvidenceIds.join(", ")}]`);
         rejectionReasons.set(normPath, "UNAUTHENTICATED_REPOSITORY_EVIDENCE: Caller-shaped or advisory evidence cannot authorize mutation");
         continue;
       }
@@ -497,7 +308,7 @@ export class EvidenceBoundWriteSetResolver {
       // 6. Check monorepo workspace isolation
       if (monorepo?.isMonorepo && policy.workspaceRoot) {
         const normWs = normalizeRepoPath(policy.workspaceRoot);
-        if (!normPath.startsWith(normWs) && !normPath.startsWith(`${normWs}/`)) {
+        if (normPath !== normWs && !normPath.startsWith(`${normWs}/`)) {
           const hasCrossWsEvidence = evidenceValidation.evidence.some((e) => e.kind === "WORKSPACE" || e.kind === "PACKAGE");
           if (!hasCrossWsEvidence) {
             console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=MONOREPO_WORKSPACE_VIOLATION`);
@@ -505,6 +316,26 @@ export class EvidenceBoundWriteSetResolver {
             continue;
           }
         }
+      }
+
+      const storeRoot = evidenceStore.getDefaultWorkspace();
+      if (!storeRoot || !evidenceStore.getCanonicalWorkspaceRoot() || (params.workspaceRoot && fs.realpathSync(storeRoot) !== fs.realpathSync(params.workspaceRoot))) {
+        rejectionReasons.set(normPath, "AUTHORITY_WORKSPACE_MISMATCH");
+        continue;
+      }
+      // Mandatory task-rooted gate. Dependencies, manifests and existence can only
+      // narrow an already proven candidate; they cannot create authority.
+      const proof = TaskRootedAuthorizationVerifier.derive(evidenceStore, intentSpec, normPath, change.action);
+      if (!proof) {
+        rejectionReasons.set(normPath, "NO_TASK_OR_STRUCTURAL_RELATION: No current task-rooted forward proof");
+        continue;
+      }
+
+      candidateProofs.set(normPath, proof);
+
+      if (evidenceValidation.evidence.some((e) => e.repositoryRevision !== proof.repositoryRevision)) {
+        rejectionReasons.set(normPath, "STALE_AUTHORITY_EVIDENCE: Evidence belongs to a different worktree revision");
+        continue;
       }
 
       // 7. Validate DELETE
@@ -581,25 +412,6 @@ export class EvidenceBoundWriteSetResolver {
           continue;
         }
 
-        const hasDirectRelation = hasDirectRelationEvidence(change, evidenceStore, intentSpec);
-        const createdChangesIntegrated = findCreatedChangesIntegratedBy(change, proposedChanges);
-        const referencedDeletes = findDeletedTargetsReferencedBy(change, proposedChanges, evidenceStore);
-        const hasIntegrationCandidate =
-          intentSpec.taskType !== "BUG_FIX" &&
-          createdChangesIntegrated.length > 0 &&
-          Array.isArray(change.dependencies) &&
-          change.dependencies.length > 0;
-        const hasDeleteCleanupRelation = referencedDeletes.length > 0;
-
-        if (!hasDirectRelation && !hasIntegrationCandidate && !hasDeleteCleanupRelation) {
-          console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NO_TASK_OR_STRUCTURAL_RELATION`);
-          rejectionReasons.set(
-            normPath,
-            "NO_TASK_OR_STRUCTURAL_RELATION: Cited evidence establishes existence only; no structural relation, reference, symbol, route, delete cleanup, or explicit user path evidence proves relevance to task"
-          );
-          continue;
-        }
-
         intrinsicallyEligible.set(normPath, change);
         continue;
       }
@@ -612,21 +424,9 @@ export class EvidenceBoundWriteSetResolver {
           continue;
         }
 
-        const requiresIntegration = !isStandalone && change.integration?.required !== false;
-        if (requiresIntegration) {
-          const candidateIntegrators = findCandidateIntegrators(change, proposedChanges, evidenceStore);
-          const hasImportEv = hasDirectImportEvidence(change, evidenceStore);
-
-          if (candidateIntegrators.length === 0 && !hasImportEv) {
-            console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=ORPHAN_CREATE_NO_INTEGRATION_EVIDENCE`);
-            rejectionReasons.set(
-              normPath,
-              "ORPHAN_CREATE_NO_INTEGRATION_EVIDENCE: Orphan CREATE rejected: no integration evidence proving reachability from an approved modifying file or standalone pipeline"
-            );
-            continue;
-          }
-        }
-
+        // Prospective creates reached this point only through an independently
+        // explicit user path. Model-supplied integration/dependency metadata is
+        // never a substitute for that root.
         intrinsicallyEligible.set(normPath, change);
         continue;
       }
@@ -638,25 +438,17 @@ export class EvidenceBoundWriteSetResolver {
       fixedPointChanged = false;
 
       for (const [normPath, change] of Array.from(intrinsicallyEligible.entries())) {
-        // Condition 1: If CREATE requires integration, at least one candidate integrator must remain eligible
-        const requiresIntegration = !isStandalone && change.integration?.required !== false;
-        if (change.action === "create" && requiresIntegration) {
-          const candidateIntegrators = findCandidateIntegrators(change, proposedChanges, evidenceStore);
-          const approvedIntegrators = candidateIntegrators.filter((p) => intrinsicallyEligible.has(normalizeRepoPath(p.path)));
-          const hasImportEv = hasDirectImportEvidence(change, evidenceStore);
-
-          if (approvedIntegrators.length === 0 && !hasImportEv) {
-            const rejectedNames = candidateIntegrators
-              .map((p) => `${p.path} (${rejectionReasons.get(normalizeRepoPath(p.path)) || "unapproved"})`)
-              .join(", ");
-            const reason =
-              candidateIntegrators.length > 0
-                ? `REJECT_INTEGRATION_DEPENDENCY: Integrating parent change was rejected or unapproved: ${rejectedNames}`
-                : "REJECT_INTEGRATION: Orphan CREATE rejected: no approved integrating change";
-
-            console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
+        // Integration declarations only restrict independently rooted CREATEs.
+        // A rejected integrating parent cannot leave its dependent create behind.
+        if (change.action === "create" && change.integration?.required !== false) {
+          const integrators = proposedChanges.filter((other) => normalizeRepoPath(other.path) !== normPath && (
+            change.integration?.satisfiedBy?.some((p) => normalizeRepoPath(p) === normalizeRepoPath(other.path)) ||
+            other.dependencies?.some((dep) => isDependencyMatch(dep, normPath))
+          ));
+          if ((change.integration?.required === true || integrators.length > 0) &&
+              !integrators.some((other) => other.action !== "delete" && intrinsicallyEligible.has(normalizeRepoPath(other.path)))) {
             intrinsicallyEligible.delete(normPath);
-            rejectionReasons.set(normPath, reason);
+            rejectionReasons.set(normPath, "REJECT_INTEGRATION_DEPENDENCY: Required integrating change is not independently authorized");
             fixedPointChanged = true;
             continue;
           }
@@ -687,62 +479,19 @@ export class EvidenceBoundWriteSetResolver {
           }
         }
 
-        // Condition 3: If MODIFY's ONLY relation was integrating a CREATE change, that CREATE must remain eligible
-        if (change.action === "modify") {
-          const hasDirectRelation = hasDirectRelationEvidence(change, evidenceStore, intentSpec);
-          if (!hasDirectRelation) {
-            const integratedCreates = findCreatedChangesIntegratedBy(change, proposedChanges);
-            const referencedDeletes = findDeletedTargetsReferencedBy(change, proposedChanges, evidenceStore);
-
-            // Case A: Integrator of CREATE
-            if (integratedCreates.length > 0) {
-              const approvedCreates = integratedCreates.filter((c) => intrinsicallyEligible.has(normalizeRepoPath(c.path)));
-              if (approvedCreates.length === 0) {
-                const reason = "NO_TASK_OR_STRUCTURAL_RELATION: Integrating created change was rejected or none approved";
-                console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
-                intrinsicallyEligible.delete(normPath);
-                rejectionReasons.set(normPath, reason);
-                fixedPointChanged = true;
-                continue;
-              }
-            }
-
-            // Case B: Cleanup importer of DELETE
-            if (referencedDeletes.length > 0) {
-              const approvedDeletes = referencedDeletes.filter((d) => intrinsicallyEligible.has(normalizeRepoPath(d.path)));
-              if (approvedDeletes.length === 0) {
-                const reason = "NO_TASK_OR_STRUCTURAL_RELATION: Target delete file was rejected or none approved";
-                console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
-                intrinsicallyEligible.delete(normPath);
-                rejectionReasons.set(normPath, reason);
-                fixedPointChanged = true;
-                continue;
-              }
-            }
-          }
-        }
-
         // Condition 4: Destructive dependency closure — DELETE target requires all incoming importer cleanups to remain approved
         if (change.action === "delete") {
-          const requiredImporters = findRequiredImporterCleanups(change, proposedChanges, evidenceStore);
-          let rejectedImporter: PlannedChange | null = null;
-          for (const imp of requiredImporters) {
-            const normImp = normalizeRepoPath(imp.path);
-            if (!intrinsicallyEligible.has(normImp)) {
-              rejectedImporter = imp;
-              break;
-            }
-          }
-
-          if (rejectedImporter) {
-            const impReason = rejectionReasons.get(normalizeRepoPath(rejectedImporter.path)) || "unapproved";
-            const reason = `REJECT_DEPENDENCY: Required importer cleanup '${rejectedImporter.path}' was rejected (${impReason})`;
-            console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
+          const workspace = evidenceStore.getDefaultWorkspace();
+          const incoming = workspace ? [...authoritySnapshot(workspace).files.keys()].filter((file) =>
+            /\.[cm]?[jt]sx?$/.test(file) && resolveLocalImportEdges(workspace, file).some((edge) => edge.targetFile === normPath)) : [];
+          const missingCleanup = incoming.find((file) => !intrinsicallyEligible.has(file));
+          if (missingCleanup) {
             intrinsicallyEligible.delete(normPath);
-            rejectionReasons.set(normPath, reason);
+            rejectionReasons.set(normPath, `REJECT_DEPENDENCY: Required importer cleanup '${missingCleanup}' is not independently authorized`);
             fixedPointChanged = true;
             continue;
           }
+
         }
       }
     }
@@ -773,7 +522,8 @@ export class EvidenceBoundWriteSetResolver {
           : ("FILE_MODIFY" as CapabilityAction),
     }));
 
-    const allEvidenceIds: string[] = [];
+    const proofs = authorizedChanges.map((change) => candidateProofs.get(normalizeRepoPath(change.path))!);
+    const allEvidenceIds: string[] = [...new Set(proofs.flatMap((proof) => [proof.rootEvidenceId, ...proof.edgeEvidenceIds]))];
     for (const change of authorizedChanges) {
       for (const id of change.evidenceIds || []) {
         if (id && !allEvidenceIds.includes(id)) {
@@ -783,9 +533,11 @@ export class EvidenceBoundWriteSetResolver {
     }
 
     const evidenceAuthorization = ResolverIssuedEvidenceAuthorization.create({
+      proofs, evidenceStore, intentSpec,
+      worktreeRevision: params.evidenceStore.getDefaultWorkspace() && params.evidenceStore.getCanonicalWorkspaceRoot() ? authoritySnapshot(params.evidenceStore.getDefaultWorkspace()!).revision : undefined,
       authorizationId: `auth-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       repositoryId: targetRepositoryId,
-      workspaceRoot: params.workspaceRoot,
+      workspaceRoot: params.workspaceRoot ?? evidenceStore.getDefaultWorkspace(),
       baseRevision: params.baseRevision,
       stageId: params.stageId,
       runId: params.runId,

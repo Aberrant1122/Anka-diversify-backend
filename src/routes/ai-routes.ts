@@ -28,9 +28,9 @@ router.patch('/projects/:projectId/drift-records/:recordId', aiController.resolv
 router.get('/projects/:projectId/health', aiController.getProjectHealth.bind(aiController));
 
 // Pull Request Review
-router.get('/projects/:projectId/prs', aiController.listPullRequests.bind(aiController));
-router.post('/projects/:projectId/prs/:prNumber/review', aiController.reviewPullRequest.bind(aiController));
-router.post('/projects/:projectId/prs/:prNumber/describe', aiController.generatePRDescription.bind(aiController));
+router.get('/projects/:projectId/pull-requests', aiController.listPullRequests.bind(aiController));
+router.post('/projects/:projectId/pull-requests/:prNumber/review', aiController.reviewPullRequest.bind(aiController));
+router.post('/projects/:projectId/pull-requests/:prNumber/describe', aiController.generatePRDescription.bind(aiController));
 
 // Sprint Planner
 router.get('/projects/:projectId/sprints/:sprintId/suggest', aiController.suggestSprintTasks.bind(aiController));

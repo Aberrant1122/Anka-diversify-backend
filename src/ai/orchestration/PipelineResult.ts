@@ -1,5 +1,16 @@
 import { ExecutionContract, FeatureValidationResult } from "../shared/types";
 
+export function composeLifecycleExplanation(
+  gateSuccess: boolean,
+  modelExplanation: string,
+  validationReasons: readonly string[] = [],
+): string {
+  return gateSuccess
+    ? modelExplanation
+    : "ANKA identified a candidate change, but deterministic validation failed. The candidate was rolled back and the task was not verified." +
+      (validationReasons.length > 0 ? ` Validation reasons: ${validationReasons.join("; ")}.` : "");
+}
+
 export class PipelineResultBuilder {
   static buildChecklist(
     executionContract: ExecutionContract,

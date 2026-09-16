@@ -48,8 +48,13 @@ function errorCode(error: unknown): string {
 
 function isAuthorizationError(error: unknown): boolean {
   const code = errorCode(error);
-  return code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE";
+  return (code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE") || REINVESTIGATION_OUTCOMES.has(code);
 }
+
+const REINVESTIGATION_OUTCOMES = new Set([
+  "REPAIR_SCOPE_EXPANSION_REQUIRED", "REINVESTIGATION_REQUIRED", "TRANSACTION_REVISION_DIVERGED",
+  "WORKSPACE_BINDING_INVALID", "TRANSACTION_INVALIDATED", "CAPABILITY_MANIFEST_MISMATCH", "TRANSACTION_CONFLICT",
+]);
 
 /**
  * Finite CP7 coordinator. Observation and planning are separate callbacks so the
@@ -92,6 +97,7 @@ export class AgentLoopCoordinator {
           revision: workingPlan.snapshot().revision,
           status: workingPlan.snapshot().status,
         }));
+        const previousResponse = lastResponse;
         const executed = await input.executeIteration(iteration);
         lastResponse = executed.response;
 
@@ -110,7 +116,21 @@ export class AgentLoopCoordinator {
         if (!entry) {
           const code = executed.response.errorCode;
           if (code) {
-            const category = code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE"
+            if (code === "PLANNING_IDENTICAL_FAILED_ACTION" && previousResponse) {
+              return {
+                response: previousResponse,
+                loop: {
+                  outcome: "VALIDATION_FAILURE",
+                  iterations: iteration,
+                  workingPlan,
+                  verifiedCheckpointIds,
+                  failureCode: code,
+                },
+              };
+            }
+            const category = REINVESTIGATION_OUTCOMES.has(code) || code === "REPAIR_UNRESOLVED"
+              ? "VALIDATION_FAILURE"
+              : code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE"
               ? "AUTHORIZATION_DENIAL"
               : code.startsWith("PLANNING_")
                 ? "VALIDATION_FAILURE"
@@ -130,6 +150,11 @@ export class AgentLoopCoordinator {
               status: workingPlan.snapshot().status,
             });
             input.runtime.updateWorkspace(workspace);
+            if (REINVESTIGATION_OUTCOMES.has(code) && !failedActionFingerprints.has(code)) {
+              failedActionFingerprints.add(code);
+              workingPlan = workingPlan.revise({ reason: `${code} requires fresh repository observation, investigation and authorization.` });
+              continue;
+            }
             if (category !== "VALIDATION_FAILURE") {
               input.runtime.fail({
                 failureType: category === "AUTHORIZATION_DENIAL" ? "POLICY_BLOCKED" : "TECHNICAL_FAILURE",

@@ -46,6 +46,7 @@ describe("Baseline-Delta Task Verification (Steps A-I)", () => {
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-baseline-delta",
+      targetBranch: "main",
       baseCommitSha: "sha-delta-1",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -138,6 +139,7 @@ Cannot resolve 'mathjs'
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-new-error",
+      targetBranch: "main",
       baseCommitSha: "sha-delta-2",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -212,6 +214,7 @@ You're importing a component that needs useState. It only works in a Client Comp
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-unrelated",
+      targetBranch: "main",
       baseCommitSha: "sha-delta-3",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -265,6 +268,7 @@ You're importing a component that needs useState. It only works in a Client Comp
       repositoryRoot: tempDir,
       worktreePath: tempDir,
       branchName: "anka/run-clean",
+      targetBranch: "main",
       baseCommitSha: "sha-delta-4",
     });
     jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -724,6 +728,7 @@ Cannot find name 'nonExistentVar'.
         repositoryRoot: tempDir,
         worktreePath: tempDir,
         branchName: "anka/run-gate-narrow",
+        targetBranch: "main",
         baseCommitSha: "sha-gate-1",
       });
       jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -787,6 +792,7 @@ You're importing a module that depends on \`useState\` into a React Server Compo
         repositoryRoot: tempDir,
         worktreePath: tempDir,
         branchName: "anka/run-gate-broad",
+        targetBranch: "main",
         baseCommitSha: "sha-gate-2",
       });
       jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -861,6 +867,7 @@ You're importing a module that depends on \`useState\` into a React Server Compo
         repositoryRoot: tempDir,
         worktreePath: tempDir,
         branchName: "anka/run-gate-natural",
+        targetBranch: "main",
         baseCommitSha: "sha-gate-3",
       });
       jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);
@@ -932,6 +939,7 @@ You're importing a module that depends on \`useState\` into a React Server Compo
         repositoryRoot: tempDir,
         worktreePath: tempDir,
         branchName: "anka/run-gate-unrelated",
+        targetBranch: "main",
         baseCommitSha: "sha-gate-4",
       });
       jest.spyOn(GitWorktreeService, "rollbackWorktree").mockResolvedValue(undefined as any);

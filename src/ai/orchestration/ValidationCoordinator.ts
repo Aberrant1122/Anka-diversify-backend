@@ -2,7 +2,6 @@ import { AgentFileChange, AgentProgressEvent, ExecutionContract, FeatureValidati
 import fs from "fs";
 import path from "path";
 import { BaselineDiagnostic } from "../../types";
-import { BuildErrorRepair } from "../repair/BuildErrorRepair";
 import { SelfHealingEngine } from "../repair/SelfHealingEngine";
 import { SecurityAuditResult, SecurityAuditor } from "../review/SecurityAuditor";
 import { TaskExecutionPlan } from "../shared/TaskExecutionPlan";
@@ -14,6 +13,9 @@ import { ValidationPlanner } from "../validation/ValidationPlanner";
 import { StageExecutionTransaction, StageVerificationGate } from "./StageExecutionTransaction";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
 import { AuthorizedCapabilityScope, CapabilityGuard } from "../runtime/CapabilityGuard";
+import { MutationTransaction } from "../runtime/MutationTransaction";
+import { MutationFailure } from "../runtime/MutationCompiler";
+import { reconcileExecutionManifest } from "../runtime/ExecutionManifest";
 import {
   ActionGroup,
   ActionGroupExecutionResult,
@@ -93,15 +95,6 @@ export interface ValidationCoordinationResult {
   verifiedCheckpoint?: ActionGroupJournalEntry;
 }
 
-function createExecutionCapabilityGuard(input: ValidationCoordinationInput): CapabilityGuard {
-  if (!input.effectiveLocalPath || !input.authorizedCapabilityScope) return CapabilityGuard.denyAll();
-  return CapabilityGuard.create({
-    workspaceRoot: input.effectiveLocalPath,
-    scopeId: input.activeStageId,
-    authorizedScope: input.authorizedCapabilityScope,
-  });
-}
-
 /** Coordinates existing deterministic validation authorities and their transaction boundary. */
 export class ValidationCoordinator {
   /** Bounded production entry point for authenticated controller-local writes. */
@@ -112,14 +105,14 @@ export class ValidationCoordinator {
     changes: AgentFileChange[];
     journal?: VerifiedCheckpointJournal;
   }): Promise<ActionGroupExecutionResult<readonly AgentFileChange[]>> {
+    const mutationTransaction = MutationTransaction.create(input.authorizedCapabilityScope,
+      reconcileExecutionManifest(input.authorizedCapabilityScope, null));
+    try {
     const transaction = await StageExecutionTransaction.startTransaction(
       input.stageId,
       input.localPath,
-      CapabilityGuard.create({
-        workspaceRoot: input.localPath,
-        scopeId: input.stageId,
-        authorizedScope: input.authorizedCapabilityScope,
-      }),
+      CapabilityGuard.forTransaction(mutationTransaction, mutationTransaction.primary),
+      mutationTransaction,
     );
     const group = ActionGroup.create({
       stageId: input.stageId,
@@ -127,7 +120,7 @@ export class ValidationCoordinator {
       actions: input.changes,
     });
     const journal = input.journal ?? new VerifiedCheckpointJournal();
-    return ActionGroupExecutor.execute({
+    return await ActionGroupExecutor.execute({
       group,
       transaction,
       journal,
@@ -148,6 +141,9 @@ export class ValidationCoordinator {
         );
       },
     });
+    } finally {
+      if (mutationTransaction.status !== "COMPLETED") mutationTransaction.abort();
+    }
   }
 
   public static async validate(input: ValidationCoordinationInput): Promise<ValidationCoordinationResult> {
@@ -171,10 +167,19 @@ export class ValidationCoordinator {
         changedFiles: input.acceptedChanges.map((change) => change.path),
       },
     );
+    if (!input.effectiveLocalPath || !input.authorizedCapabilityScope || !input.approvedManifest) {
+      throw new MutationFailure("CAPABILITY_MANIFEST_MISMATCH", "Validation requires current capability, workspace and manifest.");
+    }
+    if (input.authorizedCapabilityScope.repositoryIdBinding !== input.projectId) {
+      throw new MutationFailure("WORKSPACE_BINDING_INVALID", "Validation project does not match the authorized repository identity.");
+    }
+    const mutationTransaction = MutationTransaction.create(input.authorizedCapabilityScope, input.approvedManifest);
+    try {
     const stageTransaction = await StageExecutionTransaction.startTransaction(
       input.activeStageId,
       input.effectiveLocalPath,
-      createExecutionCapabilityGuard(input),
+      CapabilityGuard.forTransaction(mutationTransaction, mutationTransaction.primary),
+      mutationTransaction,
     );
     const fsManager = stageTransaction.fsManager;
     const checkpointJournal = input.checkpointJournal ?? new VerifiedCheckpointJournal();
@@ -208,20 +213,6 @@ export class ValidationCoordinator {
         input.baselineBuildPassed,
       );
 
-      if (!repairResult.success && !repairResult.infrastructureError && input.effectiveLocalPath && effectiveValidationCommands.length > 0) {
-        const buildRepairResult = await BuildErrorRepair.runBuildErrorRepairPass(
-          repairResult.finalChanges,
-          input.effectiveLocalPath,
-          effectiveValidationCommands,
-          input.requestMessage,
-          repairResult.errorLog || "",
-          fsManager,
-          input.executionContract,
-        );
-        repairResult.finalChanges = buildRepairResult.finalChanges;
-        repairResult.errorLog = buildRepairResult.success ? "" : buildRepairResult.errorLog;
-        if (buildRepairResult.success) repairResult.success = true;
-      }
       const stage8DurationMs = performance.now() - stage8StartedAt;
 
       const stage9StartedAt = performance.now();
@@ -255,12 +246,29 @@ export class ValidationCoordinator {
       );
       const stage9DurationMs = performance.now() - stage9StartedAt;
 
-      const overallGatePassed = StageVerificationGate.evaluate({
+      const gateEvaluation = StageVerificationGate.evaluate({
         repairSuccess: Boolean(repairResult.success),
         securityPass: Boolean(auditResult.securityPass),
         featureValidationPassed: Boolean(featureValidation.overallPassed),
         hasBuildErrors: Boolean(!repairResult.success && repairResult.errorLog),
-      }).passed;
+      });
+      const overallGatePassed = gateEvaluation.passed;
+      if (!overallGatePassed) {
+        const rootFailure = repairResult.rootFailure
+          ? {
+              command: repairResult.rootFailure.command,
+              errorType: repairResult.rootFailure.errorType,
+              filePath: repairResult.rootFailure.filePath,
+              line: repairResult.rootFailure.line,
+              column: repairResult.rootFailure.column,
+            }
+          : null;
+        console.warn(
+          `[VALIDATION_GATE] stage=${input.activeStageId} passed=false reasons=${JSON.stringify(gateEvaluation.reasons)} ` +
+          `repairError=${JSON.stringify(repairResult.errorType ?? null)} rootFailure=${JSON.stringify(rootFailure)} ` +
+          `failedChecks=${JSON.stringify(featureValidation.failedChecks ?? [])}`,
+        );
+      }
       const isRepositoryClean = repairResult.repositoryClean !== undefined
         ? Boolean(repairResult.repositoryClean)
         : Boolean(repairResult.success && !repairResult.errorLog);
@@ -275,18 +283,12 @@ export class ValidationCoordinator {
         stage9DurationMs,
         isRepositoryClean,
         isTaskVerified,
+        gateReasons: gateEvaluation.reasons,
       };
       },
       validate: (value) => DeterministicValidationReceipt.issue(
         value.overallGatePassed,
-        value.overallGatePassed
-          ? []
-          : StageVerificationGate.evaluate({
-              repairSuccess: Boolean(value.repairResult.success),
-              securityPass: Boolean(value.auditResult.securityPass),
-              featureValidationPassed: Boolean(value.featureValidation.overallPassed),
-              hasBuildErrors: Boolean(!value.repairResult.success && value.repairResult.errorLog),
-            }).reasons,
+        value.overallGatePassed ? [] : value.gateReasons,
       ),
     });
 
@@ -305,5 +307,8 @@ export class ValidationCoordinator {
       checkpointJournal: checkpointJournal.snapshot(),
       ...(gateSuccess ? { verifiedCheckpoint: execution.journalEntry } : {}),
     };
+    } finally {
+      if (mutationTransaction.status === "ACTIVE" || mutationTransaction.status === "INVALIDATED") mutationTransaction.abort();
+    }
   }
 }

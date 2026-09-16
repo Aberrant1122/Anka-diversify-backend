@@ -77,6 +77,10 @@ COMPOUND TASK DECOMPOSITION:
   - Emit an ordered array of 'stages' in the output, each with its own id ("stage-1", "stage-2", etc.), taskType, specific goal, and dependsOn.
   - If the user did not specify whether to prioritize fixing errors or creating features, set "requiresClarification": true, provide a clarifying question asking which to prioritize, and list the corresponding options.
 - For single-focus tasks, emit 1 stage matching the overall taskType.
+- Investigation, implementation, testing, validation, and Git workflow are lifecycle steps of one deliverable, not separate task stages.
+- Do not split one BUG_FIX into multiple BUG_FIX stages. A single atomic bug-fix stage may inspect and modify multiple related files.
+- Every stage id must be unique. dependsOn may contain only ids declared by other stages and a stage must never depend on itself.
+- All nullable fields shown below are required JSON keys. Use null when there is no exact value; do not omit the key.
 
 Respond ONLY with valid JSON matching this schema:
 {
@@ -87,18 +91,18 @@ Respond ONLY with valid JSON matching this schema:
   "confidence": number,
   "requiresClarification": boolean,
   "reasoning": "brief explanation",
-  "successCondition": "SOURCE_DIAGNOSTICS" | "BUILD" | "TEST_FAILURE" | "BEHAVIORAL_VALIDATION" | "DETERMINISTIC_STATE",
-  "targetPath"?: "extracted file or folder target if applicable",
-  "question"?: "specific question to clarify",
-  "options"?: ["Option A", "Option B"],
-  "stages"?: [
+  "successCondition": "SOURCE_DIAGNOSTICS" | "BUILD" | "TEST_FAILURE" | "BEHAVIORAL_VALIDATION" | "DETERMINISTIC_STATE" | null,
+  "targetPath": "exact repository-relative file or folder path" | null,
+  "question": "specific question to clarify" | null,
+  "options": ["Option A", "Option B"] | null,
+  "stages": [
     {
       "id": "stage-1",
       "taskType": "DELETE_FOLDER" | "DELETE_FILE" | "NEW_FEATURE" | "BUG_FIX" | "REFACTOR" | "FILE_CREATION" | "CONFIG_CHANGE" | "DOCS" | "OPTIMIZATION",
       "goal": "Description of this specific stage's goal",
-      "successCondition"?: "SOURCE_DIAGNOSTICS" | "BUILD" | "TEST_FAILURE" | "BEHAVIORAL_VALIDATION" | "DETERMINISTIC_STATE",
-      "targetPath"?: "target path for this stage if applicable",
+      "successCondition": "SOURCE_DIAGNOSTICS" | "BUILD" | "TEST_FAILURE" | "BEHAVIORAL_VALIDATION" | "DETERMINISTIC_STATE" | null,
+      "targetPath": "exact repository-relative target path" | null,
       "dependsOn": []
     }
-  ]
+  ] | null
 }`;

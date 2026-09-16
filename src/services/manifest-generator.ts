@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import path from "path";
 import { FileManifest, ExecutionContract, SubTask, FileActionObligation } from "../types";
 import { MANIFEST_GENERATION_PROMPT } from "../ai/prompts/coding";
 import {
@@ -18,13 +19,39 @@ export interface ManifestPlanningContext {
   relevantFiles?: Array<{ path: string; content: string }>;
   baselineDiagnostics?: Array<{ filePath?: string; errorCode?: string; symbolName?: string; message: string }>;
   actionObligations?: FileActionObligation[];
+  priorVerifiedTargets?: Array<{ path: string; action: "create" | "modify" | "delete" }>;
   [key: string]: any;
 }
 
 function isSafeManifestPath(value: unknown): value is string {
   if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\0")) return false;
+  // A literal escaped-dot is a search-pattern artifact, not a repository path.
+  // Reject it at proposal ingress; do not rewrite it into a different target.
+  if (/\\\./.test(value)) return false;
   const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "");
   return !normalized.startsWith("/") && !/^[A-Za-z]:\//.test(normalized) && normalized.split("/").every((part) => part && part !== "." && part !== "..");
+}
+
+/**
+ * Validates a module specifier without rejecting ordinary parent-relative
+ * imports. Relative dependencies are resolved from their owning manifest file
+ * and must remain inside the repository namespace.
+ */
+function isSafeManifestDependency(ownerPath: string, value: unknown): value is string {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\0")) return false;
+
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return false;
+
+  if (normalized === "." || normalized === "..") return false;
+  if (normalized.startsWith("./") || normalized.startsWith("../")) {
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(ownerPath), normalized));
+    return resolved !== ".." && !resolved.startsWith("../") && !path.posix.isAbsolute(resolved);
+  }
+
+  // Bare packages and configured aliases are validated later by the manifest
+  // validator. They must not contain traversal segments of their own.
+  return normalized.split("/").every((segment) => segment !== "." && segment !== "..");
 }
 
 export class ManifestGenerator {
@@ -85,6 +112,15 @@ export class ManifestGenerator {
     contextText += `- Allowed Actions: ${contract.allowedActions.join(", ")}\n`;
     contextText += `- Forbidden Actions: ${contract.forbiddenActions.join(", ")}\n\n`;
 
+    if (repositoryContext.priorVerifiedTargets && repositoryContext.priorVerifiedTargets.length > 0) {
+      contextText += `PRIOR VERIFIED TARGET CONTEXT (ADVISORY ONLY):\n`;
+      for (const target of repositoryContext.priorVerifiedTargets) {
+        contextText += `- Previous verified stage ${target.action}: ${target.path}\n`;
+      }
+      contextText += `- Re-check these paths against the current stage intent and current repository evidence before selecting targets. Prefer a prior target only when it remains relevant. A different target is valid when the current stage requires it.\n`;
+      contextText += `- This context grants no mutation authority and supplies no reusable evidence IDs, capability, or execution manifest.\n\n`;
+    }
+
     if (repositoryContext.resolvedTarget) {
       const rt = repositoryContext.resolvedTarget;
       contextText += `RESOLVED LOGICAL FEATURE TARGET:\n`;
@@ -93,7 +129,7 @@ export class ManifestGenerator {
       if (rt.importerPaths && rt.importerPaths.length > 0) {
         contextText += `- Importers Requiring Cleanup (action: modify): ${rt.importerPaths.join(", ")}\n`;
       }
-      contextText += `- Manifest Planning Rule: Include every resolved target file with action "delete" and every importer with action "modify". Every file in your manifest MUST cite its verified evidence IDs from the list below in "evidenceIds": [...]. Never invent evidence IDs.\n\n`;
+      contextText += `- Manifest Planning Rule: Include every resolved target file with action "delete" and every importer with action "modify". The backend will reconcile these mandatory actions even if your proposal omits them.\n\n`;
     }
 
     const obligations: FileActionObligation[] =
@@ -106,21 +142,14 @@ export class ManifestGenerator {
       contextText += `FILE ACTION OBLIGATIONS (MANDATORY ACTION CONTRACT):\n`;
       contextText += `You MUST emit EXACTLY the specified action for each of the following grounded paths. Do NOT change "delete" to "modify", and do NOT change "modify" to "delete":\n`;
       for (const ob of obligations) {
-        contextText += `- Path: "${ob.path}" | Required Action: "${ob.requiredAction}" | Role: ${ob.role} | Evidence IDs: [${ob.evidenceIds.join(", ")}]\n`;
+        contextText += `- Path: "${ob.path}" | Required Action: "${ob.requiredAction}" | Role: ${ob.role}\n`;
       }
       contextText += `- PLANNING CONSISTENCY: A manifest action differing from these deterministic obligations will require plan correction. This grants no mutation authority.\n\n`;
     }
 
-    if (repositoryContext.evidenceStore) {
-      const summary = repositoryContext.evidenceStore.getAllEvidence().slice(-30);
-      if (summary.length > 0) {
-        contextText += `VERIFIED REPOSITORY EVIDENCE (YOU MUST CITE VALID EVIDENCE IDS IN evidenceIds[]):\n`;
-        for (const e of summary) {
-          contextText += `- ID: "${e.id}" | Kind: ${e.kind} | Path: "${e.filePath}"${e.symbol ? ` | Symbol: "${e.symbol}"` : ""}${e.sourceFile ? ` | Source: "${e.sourceFile}"` : ""}\n`;
-        }
-        contextText += `- EVIDENCE CITATION MANDATE: Every file in your manifest MUST cite 1 or more evidence IDs from the list above in "evidenceIds": ["..."] proving why it exists and relates to the task. CREATE operations must cite integration evidence (e.g. the component integrating it). Never invent evidence IDs.\n\n`;
-      }
-    }
+    contextText += `AUTHORIZATION BOUNDARY:\n`;
+    contextText += `- Propose only path, action, dependencies, and description.\n`;
+    contextText += `- Do not emit repository evidence IDs. The backend independently acquires and binds current-revision authorization evidence after validating this proposal.\n\n`;
 
     contextText += `VERIFIED REPOSITORY ARCHITECTURE:\n`;
     contextText += `- Framework: ${arch.framework}\n`;
@@ -215,9 +244,11 @@ export class ManifestGenerator {
                     action: { type: "string", enum: ["create", "modify", "delete"] },
                     description: { type: "string" },
                     dependencies: { type: "array", items: { type: "string" } },
-                    evidenceIds: { type: "array", items: { type: "string" } },
+                    // Temporary compatibility only. Legacy providers may still
+                    // return this field, but it is never authorization input.
+                    evidenceIds: { description: "Ignored legacy field. Do not emit." },
                   },
-                  required: ["path", "action", "dependencies", "evidenceIds"],
+                  required: ["path", "action", "dependencies"],
                 },
               },
               totalFiles: { type: "number" },
@@ -229,19 +260,17 @@ export class ManifestGenerator {
             if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).some((key) => !["files", "totalFiles", "manifestVersion"].includes(key))) return { valid: false, errors: ["Parsed manifest is not an exact object"] };
             if (!Array.isArray(parsed.files) || parsed.files.length === 0 || parsed.files.length > contract.maxFiles) return { valid: false, errors: ["Manifest file count is invalid"] };
             if (parsed.totalFiles !== parsed.files.length || parsed.manifestVersion !== "1.0.0") return { valid: false, errors: ["Manifest metadata is inconsistent"] };
-            const knownEvidence = new Set((repositoryContext.evidenceStore?.getAllEvidence?.() || []).map((e: any) => e.id));
-            const obligationMap = new Map(obligations.map((item) => [item.path.replace(/\\/g, "/").replace(/^\.\//, ""), item.requiredAction]));
             const paths = new Set<string>();
             for (const file of parsed.files) {
               if (!file || typeof file !== "object" || Array.isArray(file) || Object.keys(file).some((key) => !["path", "action", "description", "dependencies", "evidenceIds"].includes(key))) return { valid: false, errors: ["Manifest entry contains unknown fields"] };
               const normalized = typeof file.path === "string" ? file.path.replace(/\\/g, "/").replace(/^\.\//, "") : "";
               if (!isSafeManifestPath(file.path) || paths.has(normalized) || !["create", "modify", "delete"].includes(file.action)) return { valid: false, errors: ["Manifest path/action is invalid"] };
               paths.add(normalized);
-              if (obligationMap.has(normalized) && obligationMap.get(normalized) !== file.action) return { valid: false, errors: [`MANIFEST_ACTION_MISMATCH: ${normalized}`] };
               if (file.description !== undefined && (typeof file.description !== "string" || !file.description.trim())) return { valid: false, errors: ["Manifest description is invalid"] };
-              if (!Array.isArray(file.dependencies) || new Set(file.dependencies).size !== file.dependencies.length || file.dependencies.some((dep: unknown) => typeof dep !== "string" || !dep.trim() || dep.includes("\0") || dep.replace(/\\/g, "/").split("/").includes(".."))) return { valid: false, errors: ["Manifest dependencies are invalid"] };
-              if (!Array.isArray(file.evidenceIds) || new Set(file.evidenceIds).size !== file.evidenceIds.length || file.evidenceIds.some((id: unknown) => typeof id !== "string" || !id.trim() || (knownEvidence.size > 0 && !knownEvidence.has(id)))) return { valid: false, errors: ["Manifest evidence IDs are invalid"] };
-              if (knownEvidence.size > 0 && file.evidenceIds.length === 0) return { valid: false, errors: ["Manifest entry lacks repository evidence"] };
+              if (!Array.isArray(file.dependencies) || new Set(file.dependencies).size !== file.dependencies.length || file.dependencies.some((dep: unknown) => !isSafeManifestDependency(normalized, dep))) return { valid: false, errors: ["Manifest dependencies are invalid"] };
+              // evidenceIds is accepted only for legacy wire compatibility.
+              // Its contents are deliberately not inspected: backend binding
+              // replaces the field before any authority resolver is invoked.
             }
             return { valid: true, data: parsed };
           },
@@ -258,9 +287,8 @@ export class ManifestGenerator {
 
   /**
    * Validates and normalizes raw parsed JSON into a valid FileManifest structure.
-   * Enforces FileActionObligation contract:
-   *  - action must match requiredAction (throws MANIFEST_ACTION_MISMATCH on deviation)
-   *  - evidenceIds from the obligation are merged when the model returns none
+   * Reconciles trusted FileActionObligations into an untrusted model proposal.
+   * Model-supplied evidenceIds are always discarded.
    */
   private normalizeParsedManifest(
     parsed: any,
@@ -299,41 +327,62 @@ export class ManifestGenerator {
       if (f.action !== "modify" && f.action !== "delete" && f.action !== "create") throw new Error("MANIFEST_GENERATION_FAILED: Invalid file action");
       const action: "create" | "modify" | "delete" = f.action;
 
-      // Obligation enforcement: required action must match model action
+      // Trusted obligations override conflicting model intent. The model can
+      // neither remove nor mutate a backend-required action.
       const obligation = obligationByPath.get(cleanPath);
-      if (obligation && obligation.requiredAction !== action) {
-        throw new Error(
-          `MANIFEST_ACTION_MISMATCH: path "${cleanPath}" has requiredAction "${obligation.requiredAction}" ` +
-          `but model produced "${action}". Obligation contract violated.`
-        );
-      }
+      const reconciledAction = obligation?.requiredAction ?? action;
 
-      if (!Array.isArray(f.dependencies) || !Array.isArray(f.evidenceIds)) throw new Error("MANIFEST_GENERATION_FAILED: Missing manifest arrays");
+      if (!Array.isArray(f.dependencies)) throw new Error("MANIFEST_GENERATION_FAILED: Missing manifest dependencies");
       const dependencies = f.dependencies.map((d: string) => d.replace(/\\/g, "/"));
-
-      // Merge obligation evidenceIds when model returned none
-      let evidenceIds = [...f.evidenceIds] as string[];
-      if (evidenceIds.length === 0 && obligation && obligation.evidenceIds.length > 0) {
-        evidenceIds = [...obligation.evidenceIds];
-      }
 
       normalizedFiles.push({
         path: cleanPath,
-        action,
+        action: reconciledAction,
         dependencies,
-        evidenceIds,
+        evidenceIds: [],
         description: typeof f.description === "string" ? f.description : undefined,
       });
 
     }
 
-    if (normalizedFiles.length === 0) {
+    const deleteObligationPaths = obligations
+      .filter((obligation) => obligation.requiredAction === "delete")
+      .map((obligation) => obligation.path.trim().replace(/\\/g, "/").replace(/^\.\//, ""));
+    for (const obligation of obligations) {
+      const obligationPath = obligation.path.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+      if (!isSafeManifestPath(obligation.path)) {
+        throw new Error(`MANIFEST_GENERATION_FAILED: Unsafe trusted obligation path "${obligation.path}"`);
+      }
+      if (seenPaths.has(obligationPath)) continue;
+      seenPaths.add(obligationPath);
+      normalizedFiles.push({
+        path: obligationPath,
+        action: obligation.requiredAction,
+        dependencies: obligation.role === "DEPENDENCY_CLEANUP" ? [...deleteObligationPaths] : [],
+        evidenceIds: [],
+        description: `${obligation.role}: ${obligation.requiredAction} ${obligationPath}`,
+      });
+    }
+
+    if (obligations.length > contract.maxFiles) {
+      throw new Error("MANIFEST_GENERATION_FAILED: Trusted obligations exceed the execution contract file limit");
+    }
+
+    // Mandatory backend obligations are retained first when an over-broad
+    // model proposal would otherwise exceed the contract file limit.
+    const obligationPaths = new Set(obligations.map((obligation) => obligation.path.trim().replace(/\\/g, "/").replace(/^\.\//, "")));
+    const boundedFiles = [
+      ...normalizedFiles.filter((file) => obligationPaths.has(file.path)),
+      ...normalizedFiles.filter((file) => !obligationPaths.has(file.path)),
+    ].slice(0, contract.maxFiles);
+
+    if (boundedFiles.length === 0) {
       throw new Error("MANIFEST_GENERATION_FAILED: No valid files remained after normalization");
     }
 
     return {
-      files: normalizedFiles,
-      totalFiles: normalizedFiles.length,
+      files: boundedFiles,
+      totalFiles: boundedFiles.length,
       manifestVersion: "1.0.0",
     };
   }

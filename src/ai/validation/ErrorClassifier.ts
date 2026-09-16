@@ -44,6 +44,12 @@ const ENVIRONMENT_PATTERNS = [
   /missing required environment variable/i,
   /incompatible environment/i,
   /unsupported environment/i,
+  /Failed to fetch[^\r\n]*from Google Fonts/i,
+  /next\/font(?::|\s).*error[\s\S]*?(?:fetch|Google Fonts|network|ECONNRESET|ENETUNREACH|EAI_AGAIN|getaddrinfo)/i,
+  /\bnetwork request failed\b/i,
+  /\bgetaddrinfo\b/i,
+  /\b(?:fetch|request|network|connect|socket|registry|download|dependency|Google Fonts|fonts\.googleapis\.com)\b[^\r\n]{0,200}\b(?:ECONNRESET|ENETUNREACH|EAI_AGAIN)\b/i,
+  /\b(?:ECONNRESET|ENETUNREACH|EAI_AGAIN)\b[^\r\n]{0,200}\b(?:fetch|request|network|connect|socket|registry|download|dependency|Google Fonts|fonts\.googleapis\.com)\b/i,
 ];
 
 const TS_COMPILER_PATTERNS = [
@@ -129,7 +135,7 @@ export class ErrorClassifier {
       };
     }
 
-    // 2. Environment errors — child process / NODE_ENV policy
+    // 2. Environment errors — concrete external/network failures outrank generic compiler text
     if (ENVIRONMENT_PATTERNS.some((p) => p.test(errorLog))) {
       return {
         type: "ENVIRONMENT",
