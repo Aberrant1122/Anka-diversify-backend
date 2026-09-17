@@ -1,6 +1,6 @@
 import { CodeGenerator } from "../generation/CodeGenerator";
 import { resolveGenerationProposals } from "../generation/GenerationProposalResolver";
-import { ExecutionContract, FileManifest } from "../../types";
+import { ExecutionContract } from "../../types";
 
 const contract: ExecutionContract = {
   goal: "Fix a project task filter",
@@ -19,12 +19,6 @@ const contract: ExecutionContract = {
   searchScope: ["lib/"],
   contextScope: ["lib/"],
   diffCriticEnabled: true,
-};
-
-const emptyManifest: FileManifest = {
-  manifestVersion: "1.0.0",
-  totalFiles: 0,
-  files: [],
 };
 
 const source = [
@@ -52,7 +46,7 @@ function installGenerationResponse(changes: unknown[]) {
 }
 
 describe("repo-01-next-bugs CodeGenerator regression", () => {
-  test("empty approved manifest still honors structured edits and preserves unrelated bytes", async () => {
+  test("generation without an approved manifest honors structured edits and preserves unrelated bytes", async () => {
     const restore = installGenerationResponse([{
       path: "lib/mock-data.ts",
       action: "modify",
@@ -70,7 +64,7 @@ describe("repo-01-next-bugs CodeGenerator regression", () => {
         { fileContext: { "lib/mock-data.ts": source } },
         "system prompt",
         contract,
-        emptyManifest,
+        undefined,
         {},
         { "lib/mock-data.ts": source },
       );
@@ -110,7 +104,7 @@ describe("repo-01-next-bugs CodeGenerator regression", () => {
         { fileContext: { "lib/mock-data.ts": source } },
         "system prompt",
         contract,
-        emptyManifest,
+        undefined,
         {},
         { "lib/mock-data.ts": source },
       );
