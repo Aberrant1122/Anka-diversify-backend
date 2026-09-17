@@ -92,7 +92,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
       },
     });
 
-    const result = await CodeGenerator.generateRoadmapAndDiffs(
+    await expect(CodeGenerator.generateRoadmapAndDiffs(
       "Update foo",
       { intent: "BUG_FIX", taskType: "BUG_FIX" },
       { fileContext: { "src/foo.ts": "const a = 1;" } },
@@ -100,16 +100,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
       contract,
       approvedManifest,
       { "src/foo.ts": { path: "src/foo.ts", content: "const a = 1;", sha256: "sha-foo" } }
-    );
-
-    // Post-CP9: manifest demoted; execution scope enforcement strictly fails closed
-    const scopeCheck = enforceExecutionScope({
-      proposedChanges: result.changes,
-      contract,
-      isRepair: false,
-    });
-    expect(scopeCheck.valid).toBe(false);
-    expect(scopeCheck.errors.some((e) => e.reason === "TARGET_PATH_VIOLATION" && e.path === "src/bar.ts")).toBe(true);
+    )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*src\/bar\.ts/);
 
     // targetPaths remain untouched
     expect(contract.targetPaths).toEqual(["src/foo.ts"]);
@@ -316,7 +307,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
     }
 
     expect(error).not.toBeNull();
-    expect(error.message).toMatch(/PATCH_RESOLUTION_FAILED|TARGET_PATH_VIOLATION/);
+    expect(error.message).toMatch(/GENERATED_MANIFEST_MISMATCH/);
     expect(error.message).toContain("src/components/calculator/Calculator.tsx");
   });
 
@@ -408,7 +399,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
     }
 
     expect(error).not.toBeNull();
-    expect(error.message).toMatch(/PATCH_RESOLUTION_FAILED|TARGET_PATH_VIOLATION/);
+    expect(error.message).toMatch(/GENERATED_MANIFEST_MISMATCH/);
     expect(error.message).toContain("src/index.ts");
   });
 

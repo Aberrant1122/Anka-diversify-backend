@@ -834,61 +834,9 @@ export function evaluateDirectReverseReference(
         return "IMPORT_RELATION";
       }
     }
-
-    // 2. Direct Static Symbol or JSX Component Reference
-    const candidateDir = path.dirname(normCandidate);
-    const importedSymbolsFromOtherModules = new Set<string>();
-    const detailedImportRegex = /import\s+(?:([a-zA-Z0-9_$]+)\s*,?\s*)?(?:\{([^}]+)\})?\s*from\s*["']([^"']+)["']/g;
-    for (const m of candidateContent.matchAll(detailedImportRegex)) {
-      const defaultImport = m[1]?.trim();
-      const namedImports = m[2];
-      const spec = m[3];
-      if (spec) {
-        let resolvedSpec: string;
-        const cleanSpec = spec.replace(/['"]/g, "").trim();
-        if (cleanSpec.startsWith("@/")) {
-          resolvedSpec = normalizeRepoPath(cleanSpec.substring(2));
-        } else if (cleanSpec.startsWith("./") || cleanSpec.startsWith("../")) {
-          resolvedSpec = normalizeRepoPath(path.join(candidateDir, cleanSpec));
-        } else {
-          resolvedSpec = normalizeRepoPath(cleanSpec);
-        }
-
-        const isMatch = matchesModuleSpecifier(normCandidate, spec, normDelete, monorepo);
-        const cleanNormDelete = normDelete.startsWith("src/") ? normDelete.slice(4) : normDelete;
-        const cleanResolvedSpec = resolvedSpec.startsWith("src/") ? resolvedSpec.slice(4) : resolvedSpec;
-        const isTargetInsideSpec =
-          cleanNormDelete.startsWith(cleanResolvedSpec + "/") ||
-          cleanNormDelete === cleanResolvedSpec;
-        if (!isMatch && !isTargetInsideSpec) {
-          if (defaultImport) importedSymbolsFromOtherModules.add(defaultImport);
-          if (namedImports) {
-            for (const rawNamed of namedImports.split(",")) {
-              const symName = rawNamed.split(/\s+as\s+/)[0].trim();
-              if (symName) importedSymbolsFromOtherModules.add(symName);
-            }
-          }
-        }
-      }
-    }
-
-    const deleteSymbols = [deleteStem];
-    const approvedContent = getFileContent(normDelete, fileContext, snapshotFiles, localPath);
-    if (approvedContent) {
-      deleteSymbols.push(...extractExportedSymbols(approvedContent));
-    }
-
-    for (const sym of deleteSymbols) {
-      if (importedSymbolsFromOtherModules.has(sym)) {
-        continue;
-      }
-      if (sym.length >= 3 && new RegExp(`\\b${sym}\\b`).test(candidateContent)) {
-        return "SYMBOL_REFERENCE";
-      }
-    }
   }
 
-  // 3. Deterministic Knowledge Graph Relationships
+  // 2. Deterministic Knowledge Graph Relationships
   if (knowledgeGraph) {
     if (Array.isArray(knowledgeGraph.imports)) {
       for (const imp of knowledgeGraph.imports) {

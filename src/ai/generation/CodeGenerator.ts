@@ -49,6 +49,40 @@ interface ModelGeneratedChange {
   repositoryId?: string;
 }
 
+function assertGeneratedChangesMatchApprovedManifest(
+  rawChanges: readonly ModelGeneratedChange[],
+  approvedManifest?: FileManifest | null,
+): void {
+  if (!approvedManifest || !Array.isArray(approvedManifest.files)) return;
+
+  const approvedByPath = new Map(
+    approvedManifest.files.map((file) => [normalizeRepoPath(file.path), file.action]),
+  );
+  const mismatches: string[] = [];
+
+  for (const change of rawChanges) {
+    const normalizedPath = normalizeRepoPath(change.path);
+    const approvedAction = approvedByPath.get(normalizedPath);
+    const generatedAction = change.action;
+
+    if (!approvedAction) {
+      mismatches.push(`${normalizedPath || change.path}: path is absent from approved manifest`);
+      continue;
+    }
+    if (generatedAction !== approvedAction) {
+      mismatches.push(
+        `${normalizedPath}: expected ${approvedAction}, received ${generatedAction || "missing action"}`,
+      );
+    }
+  }
+
+  if (mismatches.length > 0) {
+    throw new Error(
+      `[GENERATED_MANIFEST_MISMATCH] Generated proposals exceeded the approved path/action boundary: ${mismatches.join("; ")}`,
+    );
+  }
+}
+
 interface CodeGenerationPayload {
   explanation: string;
   changes: ModelGeneratedChange[];
@@ -769,9 +803,9 @@ When using an existing local component, conform to its authoritative exported pr
     let explanation = parsed.explanation;
     let commitMessage = parsed.commitMessage;
 
-    // The manifest guides generation, but generated proposals are not accepted or
-    // rejected here because of manifest membership. CapabilityGuard and the
-    // transaction/validation boundary decide whether they may be materialized.
+    // Generated proposals must cross the immutable manifest path/action boundary
+    // before they can influence patch resolution or candidate contract analysis.
+    assertGeneratedChangesMatchApprovedManifest(rawChanges, approvedManifest);
 
     // ── Resolve raw LLM proposals into AgentFileChange[] ──
     const proposalRequiresStructuredResolution = rawChanges.some((raw) =>

@@ -325,7 +325,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
   });
 
   // Test 8: CodeGenerator output is advisory; downstream action authority remains deterministic.
-  test("8. CodeGenerator preserves explicit proposal action without treating manifest as authority", async () => {
+  test("8. CodeGenerator rejects an explicit proposal action that exceeds manifest authority", async () => {
     const utils = require("../shared/utils");
     utils.getOpenAI = () => ({
       chat: {
@@ -374,7 +374,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       manifestVersion: "1.0.0",
     };
 
-    const result = await CodeGenerator.generateRoadmapAndDiffs(
+    await expect(CodeGenerator.generateRoadmapAndDiffs(
       "Delete calculator",
       { intent: "DELETE_FEATURE", taskType: "DELETE_FOLDER" },
       { fileContext: { "src/components/calculator/Calculator.tsx": "const a = 1;" } },
@@ -388,13 +388,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
           sha256: "sha-1",
         },
       }
-    );
-
-    expect(result.changes).toHaveLength(1);
-    expect(result.changes[0]).toMatchObject({
-      path: "src/components/calculator/Calculator.tsx",
-      action: "modify",
-    });
+    )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*expected delete.*received modify/);
     expect(approvedManifest.files[0].action).toBe("delete");
   });
 

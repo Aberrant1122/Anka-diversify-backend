@@ -957,49 +957,37 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
       }).valid).toBe(false);
     });
 
-    it("30. CP9 manifest divergence remains a proposal for CapabilityGuard instead of triggering manifest authority", async () => {
+    it("30. generated paths outside the approved manifest fail before downstream capability enforcement", async () => {
       const gatewaySpy = jest.spyOn(LLMGateway.getInstance(), "callStructured")
         .mockResolvedValueOnce(gatewayResult({
           explanation: "Wrong path",
           changes: [{ path: "src/invented.ts", action: "create", content: "bad", description: "Wrong" }],
           commitMessage: "feat: wrong",
-        }, PipelineStages.CODE_GENERATION) as any)
-        .mockResolvedValueOnce(gatewayResult({
-          explanation: "Corrected",
-          changes: [{ path: "src/approved.ts", action: "create", content: "safe", description: "Approved" }],
-          commitMessage: "feat: approved",
-        }, PipelineStages.CODE_CORRECTION) as any);
+        }, PipelineStages.CODE_GENERATION) as any);
 
-      const result = await CodeGenerator.generateRoadmapAndDiffs(
+      await expect(CodeGenerator.generateRoadmapAndDiffs(
         "Create approved", { intent: "FEATURE" }, { fileContext: {}, skeletonContext: {} }, "system",
         standaloneContract,
         { manifestVersion: "1", totalFiles: 1, files: [{ path: "src/approved.ts", action: "create", description: "Approved", dependencies: [] }] } as any,
-      );
+      )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*src\/invented\.ts/);
 
-      expect(result.changes.map((change) => change.path)).toEqual(["src/invented.ts"]);
       expect(gatewaySpy.mock.calls[0][0].stage).toBe(PipelineStages.CODE_GENERATION);
       expect(gatewaySpy).toHaveBeenCalledTimes(1);
     });
 
-    it("31. CP9 does not normalize or reject a proposal solely from manifest action", async () => {
+    it("31. generated action mismatch with the approved manifest fails closed", async () => {
       jest.spyOn(LLMGateway.getInstance(), "callStructured")
-        .mockResolvedValueOnce(gatewayResult({
-          explanation: "Wrong path",
-          changes: [{ path: "src/invented.ts", action: "create", content: "bad", description: "Wrong" }],
-          commitMessage: "feat: wrong",
-        }, PipelineStages.CODE_GENERATION) as any)
         .mockResolvedValueOnce(gatewayResult({
           explanation: "Wrong action",
           changes: [{ path: "src/approved.ts", action: "delete", isDeleted: true, content: "", description: "Delete" }],
           commitMessage: "feat: wrong action",
-        }, PipelineStages.CODE_CORRECTION) as any);
+        }, PipelineStages.CODE_GENERATION) as any);
 
-      const result = await CodeGenerator.generateRoadmapAndDiffs(
+      await expect(CodeGenerator.generateRoadmapAndDiffs(
         "Create approved", { intent: "FEATURE" }, { fileContext: {}, skeletonContext: {} }, "system",
         standaloneContract,
         { manifestVersion: "1", totalFiles: 1, files: [{ path: "src/approved.ts", action: "create", description: "Approved", dependencies: [] }] } as any,
-      );
-      expect(result.changes).toMatchObject([{ path: "src/invented.ts", action: "create" }]);
+      )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*src\/approved\.ts.*expected create.*received delete/);
     });
 
     it("32. security correction uses the gateway and remains subject to SecurityPolicy", async () => {
