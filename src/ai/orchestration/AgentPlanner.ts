@@ -279,6 +279,24 @@ export class AgentPlanner {
       if (pkgFile && typeof pkgFile.content === "string") {
         packageJsonContent = pkgFile.content;
       }
+      const dependencyConfigurationFiles: Array<{ path: string; content: string }> = [];
+      for (const filePath of canonicalExistingFiles) {
+        const normalizedPath = normalizeRepoPath(filePath);
+        if (!/(^|\/)(?:tsconfig|jsconfig)(?:\.[^/]*)?\.json$/i.test(normalizedPath)) continue;
+        const snapshotFile = rawSnapshotFiles.find((file) => normalizeRepoPath(file.path || "") === normalizedPath);
+        if (snapshotFile && typeof snapshotFile.content === "string") {
+          dependencyConfigurationFiles.push({ path: normalizedPath, content: snapshotFile.content });
+          continue;
+        }
+        if (effectiveLocalPath) {
+          const absolutePath = path.join(effectiveLocalPath, normalizedPath);
+          if (fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile()) {
+            try {
+              dependencyConfigurationFiles.push({ path: normalizedPath, content: fs.readFileSync(absolutePath, "utf8") });
+            } catch { }
+          }
+        }
+      }
 
       const architectureSummary = detectRepositoryArchitecture(canonicalExistingFiles, packageJsonContent, monorepo);
 
@@ -491,6 +509,7 @@ export class AgentPlanner {
         resolvedTarget: resolvedTaskTarget,
         actionObligations: executionContract.actionObligations || resolvedTaskTarget?.actionObligations,
         priorVerifiedTargets,
+        configurationFiles: dependencyConfigurationFiles,
       };
 
       onProgress?.({
@@ -854,6 +873,13 @@ export class AgentPlanner {
         const coherentFiles = evidenceGroundedPlannedChanges
           .filter((change) => approvedSet.has(normalizeRepoPath(change.path)))
           .map((change) => ({
+            ...(() => {
+              const source = rawManifest?.files.find((file) => normalizeRepoPath(file.path) === normalizeRepoPath(change.path));
+              return {
+                repositoryDependencies: source?.repositoryDependencies,
+                externalPackages: source?.externalPackages,
+              };
+            })(),
             path: change.path,
             action: change.action,
             description: change.reason,
@@ -875,6 +901,7 @@ export class AgentPlanner {
           installedPackages: architectureSummary.installedPackages,
           packageVersions: architectureSummary.packageVersions,
           monorepo,
+          configurationFiles: dependencyConfigurationFiles,
         });
         let valRes = validator.validate(coherentPlanningManifest);
 

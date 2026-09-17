@@ -21,11 +21,22 @@ export function reconcileExecutionManifest(scope: AuthorizedCapabilityScope, pre
     const action = grant.action === "FILE_CREATE" ? "create" as const : grant.action === "FILE_DELETE" ? "delete" as const : "modify" as const;
     const prior = previous?.files.find(f => f.path === grant.path && f.action === action);
     return { path: grant.path, action, description: prior?.description || "Deterministically authorized execution target",
-      dependencies: [...(prior?.dependencies ?? [])], evidenceIds: [...authorization.getEvidenceIds()] };
+      dependencies: [...(prior?.dependencies ?? [])],
+      repositoryDependencies: prior?.repositoryDependencies?.map(dependency => ({ ...dependency })),
+      externalPackages: prior?.externalPackages?.map(dependency => ({ ...dependency })),
+      evidenceIds: [...authorization.getEvidenceIds()] };
   });
   const version = fingerprintBytes(JSON.stringify({ previousVersion: previous?.manifestVersion, authorizationId: authorization.authorizationId, files }));
   const manifest: FileManifest = { files, totalFiles: files.length, manifestVersion: version };
-  for (const file of files) { Object.freeze(file.dependencies); Object.freeze(file.evidenceIds); Object.freeze(file); }
+  for (const file of files) {
+    Object.freeze(file.dependencies);
+    file.repositoryDependencies?.forEach(Object.freeze);
+    file.externalPackages?.forEach(Object.freeze);
+    if (file.repositoryDependencies) Object.freeze(file.repositoryDependencies);
+    if (file.externalPackages) Object.freeze(file.externalPackages);
+    Object.freeze(file.evidenceIds);
+    Object.freeze(file);
+  }
   Object.freeze(files); Object.freeze(manifest);
   updates.set(manifest, Object.freeze({ previousVersion: previous?.manifestVersion ?? null, currentVersion: version,
     authorizationId: authorization.authorizationId, source: "PRE_EXECUTION_AUTHORITY_CLOSURE" }));

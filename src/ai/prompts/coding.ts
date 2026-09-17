@@ -251,6 +251,7 @@ MINIMALITY & SCOPE GUIDELINES
 5. Check REPOSITORY DESIGN SYSTEM context. Prefer reusing existing components (Card, Button, Sidebar, Header, Badge, etc.) when compatible with the requested feature rather than inventing duplicate primitives.
 6. AUTHORIZATION BOUNDARY: You propose planning intent only. Do not emit evidenceIds or any other authorization token; the backend independently binds current-revision deterministic evidence.
 7. REPOSITORY CREATE SCOPE: Propose action "create" only when the original user request explicitly names the exact new repository path. When no exact new path was requested, implement the feature by modifying the smallest coherent set of verified existing files. Integration metadata alone does not authorize a new path.
+8. DEPENDENCY INTENT: Put repository files, relative imports, configured aliases, and workspace-local packages in repositoryDependencies. Put npm/Node packages in externalPackages. Keep legacy dependencies as an empty compatibility array when typed fields are used. These fields express intent only; the backend independently resolves every value against repository and package reality.
 
 Respond ONLY with valid JSON:
 {
@@ -258,7 +259,9 @@ Respond ONLY with valid JSON:
     {
       "path": "relative/path/from/project/root.ts",
       "action": "create" | "modify" | "delete",
-      "dependencies": ["array", "of", "import", "paths"],
+      "dependencies": [],
+      "repositoryDependencies": [{ "path": "relative/or/configured-alias/path", "relation": "imports" }],
+      "externalPackages": [{ "packageName": "package-name", "subpath": "optional/subpath" }],
       "description": "Human-readable purpose of this file"
     }
   ],
