@@ -75,11 +75,104 @@ export class DeterministicRelationEvidenceAcquirer {
       }
     }
 
+    const resolvedTarget = TaskRootedAuthorizationVerifier.resolveTrustedDestructiveTarget(input.evidenceStore, input.intentSpec) ?? input.intentSpec.resolvedTarget;
+    const isDestructiveTask = Boolean(input.intentSpec.destructive || resolvedTarget);
+
+    if (isDestructiveTask) {
+      const destructiveTargetPaths = new Set<string>();
+      if (input.intentSpec.resolvedTarget?.candidatePaths) {
+        for (const p of input.intentSpec.resolvedTarget.candidatePaths) {
+          const norm = normalizeRepoPath(p);
+          if (knownFiles.has(norm)) destructiveTargetPaths.add(norm);
+        }
+      }
+      if (resolvedTarget?.candidatePaths) {
+        for (const p of resolvedTarget.candidatePaths) {
+          const norm = normalizeRepoPath(p);
+          if (knownFiles.has(norm)) destructiveTargetPaths.add(norm);
+        }
+      }
+      if (input.intentSpec.destructive) {
+        for (const op of input.intentSpec.operations) {
+          if (op.kind === "DELETE" && op.subject) {
+            const norm = normalizeRepoPath(op.subject);
+            if (knownFiles.has(norm)) destructiveTargetPaths.add(norm);
+          }
+        }
+        for (const p of input.intentSpec.explicitUserPaths) {
+          const norm = normalizeRepoPath(p);
+          if (knownFiles.has(norm)) destructiveTargetPaths.add(norm);
+        }
+      }
+
+      // Ground strictly in verified task roots
+      for (const target of destructiveTargetPaths) {
+        if (!anchors.has(target)) destructiveTargetPaths.delete(target);
+      }
+
+      if (destructiveTargetPaths.size > 0) {
+        const cleanupEligible = TaskRootedAuthorizationVerifier.getDeterministicCleanupEligiblePaths(
+          input.evidenceStore,
+          input.intentSpec,
+        );
+        const provenCleanupDepth = new Map<string, number>();
+        for (const target of destructiveTargetPaths) {
+          provenCleanupDepth.set(target, 0);
+        }
+
+        let changed = true;
+        let pass = 0;
+        while (changed && pass < MAX_STRUCTURAL_DEPTH) {
+          changed = false;
+          pass++;
+          for (const candidate of candidates) {
+            if (!cleanupEligible.has(candidate)) continue;
+            if (provenCleanupDepth.has(candidate)) continue;
+            if (!knownFiles.has(candidate)) continue;
+
+            const edges = resolveLocalImportEdges(input.workspaceRoot, candidate);
+            let minNextDepth = Number.POSITIVE_INFINITY;
+            for (const edge of edges) {
+              const targetFile = normalizeRepoPath(edge.targetFile);
+              if (provenCleanupDepth.has(targetFile)) {
+                const targetDepth = provenCleanupDepth.get(targetFile)!;
+                const nextDepth = targetDepth + 1;
+                if (nextDepth <= MAX_STRUCTURAL_DEPTH) {
+                  const relationReceipt = RepositoryObservationTools.observeReference(
+                    input.repositoryId,
+                    input.workspaceRoot,
+                    edge.sourceFile,
+                    edge.targetFile,
+                  );
+                  if (relationReceipt) {
+                    input.evidenceStore.recordObservation(relationReceipt);
+                  }
+                  if (nextDepth < minNextDepth) {
+                    minNextDepth = nextDepth;
+                  }
+                }
+              }
+            }
+            if (minNextDepth <= MAX_STRUCTURAL_DEPTH) {
+              provenCleanupDepth.set(candidate, minNextDepth);
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+
     const revision = authoritySnapshot(input.workspaceRoot).revision;
     const acquiredByCandidate = new Map<string, readonly string[]>();
     for (const candidate of candidates) {
-      const evidenceIds = input.evidenceStore.getEvidenceForFile(candidate)
-        .filter((evidence) => input.evidenceStore.isAuthorityEligible(evidence) && evidence.repositoryRevision === revision)
+      const evidenceIds = input.evidenceStore
+        .getAllEvidence()
+        .filter(
+          (evidence) =>
+            input.evidenceStore.isAuthorityEligible(evidence) &&
+            evidence.repositoryRevision === revision &&
+            (evidence.filePath === candidate || (evidence.kind === "IMPORT" && evidence.sourceFile === candidate)),
+        )
         .map((evidence) => evidence.id);
       if (evidenceIds.length > 0) acquiredByCandidate.set(candidate, Object.freeze(evidenceIds));
     }
