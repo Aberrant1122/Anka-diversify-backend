@@ -100,7 +100,7 @@ describe("calculator tree collision production regression", () => {
     expect(importers).toEqual(expect.arrayContaining([barrel, widgetPage]));
   });
 
-  test("an out-of-manifest delete fails before it can create a generated contract delta", async () => {
+  test("an out-of-manifest delete records advisory planning audit while downstream authorization denies delete", async () => {
     const gateway = jest.spyOn(LLMGateway.getInstance(), "callStructured")
       .mockResolvedValueOnce(gatewayResult({ roadmap: [{
         phase: 1,
@@ -136,11 +136,11 @@ describe("calculator tree collision production regression", () => {
         [rootCalculator]: { path: rootCalculator, content: fixture[rootCalculator], sha256: "calculator-sha" },
       },
       fixture,
-    )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*src\/components\/calculator\/index\.ts/);
+    )).rejects.toThrow(/\[GENERATED_CONTRACT_INVALID\].*src\/app\.ts/);
     expect(gateway).toHaveBeenCalledTimes(2);
   });
 
-  test("a generated action that differs from the approved manifest action fails closed", async () => {
+  test("a generated action that differs from the approved manifest action records advisory planning audit", async () => {
     jest.spyOn(LLMGateway.getInstance(), "callStructured")
       .mockResolvedValueOnce(gatewayResult({ roadmap: [{
         phase: 1,
@@ -158,7 +158,7 @@ describe("calculator tree collision production regression", () => {
         ],
       }, PipelineStages.CODE_GENERATION) as never);
 
-    await expect(CodeGenerator.generateRoadmapAndDiffs(
+    const result = await CodeGenerator.generateRoadmapAndDiffs(
       deleteContract.goal,
       { intent: "DELETE_FILE", taskType: "DELETE_FILE" },
       { fileContext: fixture, skeletonContext: {} },
@@ -167,6 +167,16 @@ describe("calculator tree collision production regression", () => {
       manifest,
       undefined,
       fixture,
-    )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*app\/page\.tsx.*expected modify.*received delete/);
+    );
+    expect(result.manifestObservations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: pagePath,
+          reason: "PLANNED_ACTION_DIFFERED",
+          plannedAction: "modify",
+          actualAction: "delete",
+        }),
+      ])
+    );
   });
 });
