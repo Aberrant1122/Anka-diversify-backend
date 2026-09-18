@@ -35,7 +35,7 @@ export class TaskRootedAuthorizationVerifier {
     WeakMap<RepositoryEvidenceStore, { revision: string; target?: ResolvedTaskTarget }>
   >();
 
-  private static resolveTrustedDestructiveTarget(
+  public static resolveTrustedDestructiveTarget(
     store: RepositoryEvidenceStore,
     intent: TaskIntentSpec,
   ): ResolvedTaskTarget | undefined {
@@ -63,6 +63,43 @@ export class TaskRootedAuthorizationVerifier {
     return target;
   }
 
+  public static getDeterministicCleanupEligiblePaths(
+    store: RepositoryEvidenceStore,
+    intent: TaskIntentSpec,
+  ): Set<string> {
+    const eligible = new Set<string>();
+    const trustedTarget = this.resolveTrustedDestructiveTarget(store, intent);
+
+    const extract = (target?: ResolvedTaskTarget) => {
+      if (!target) return;
+      if (Array.isArray(target.importerPaths)) {
+        for (const p of target.importerPaths) {
+          if (typeof p === "string" && p.trim()) {
+            eligible.add(normalizeRepoPath(p));
+          }
+        }
+      }
+      if (Array.isArray(target.actionObligations)) {
+        for (const obligation of target.actionObligations) {
+          if (
+            obligation &&
+            obligation.role === "DEPENDENCY_CLEANUP" &&
+            obligation.requiredAction === "modify" &&
+            typeof obligation.path === "string" &&
+            obligation.path.trim()
+          ) {
+            eligible.add(normalizeRepoPath(obligation.path));
+          }
+        }
+      }
+    };
+
+    extract(intent.resolvedTarget);
+    extract(trustedTarget);
+
+    return eligible;
+  }
+
   public static roots(store: RepositoryEvidenceStore, intent: TaskIntentSpec): RepositoryEvidence[] {
     const root = store.getDefaultWorkspace();
     if (!root || !store.getCanonicalWorkspaceRoot()) return [];
@@ -77,10 +114,19 @@ export class TaskRootedAuthorizationVerifier {
         : RepositoryObservationTools.observeProspectiveFile(store.getRepositoryId(), root, file);
       if (receipt) store.recordObservation(receipt);
     }
-    const resolvedTarget = this.resolveTrustedDestructiveTarget(store, intent);
+    const resolvedTarget = this.resolveTrustedDestructiveTarget(store, intent) ?? intent.resolvedTarget;
     const resolvedTargetPaths = new Set(
-      (resolvedTarget?.candidatePaths || []).map(normalizeRepoPath),
+      [
+        ...(this.resolveTrustedDestructiveTarget(store, intent)?.candidatePaths || []),
+        ...(intent.resolvedTarget?.candidatePaths || []),
+      ].map(normalizeRepoPath),
     );
+    for (const file of resolvedTargetPaths) {
+      const receipt = snapshot.files.has(file)
+        ? RepositoryObservationTools.observeFile(store.getRepositoryId(), root, file)
+        : null;
+      if (receipt) store.recordObservation(receipt);
+    }
     const routes = TaskAnchorResolver.resolve({ intentSpec: intent, repositoryFiles: [...snapshot.files.keys()], repositoryId: store.getRepositoryId(), workspaceRoot: root, evidenceStore: store });
     const taskAnchorFiles = new Set([...routes.anchors.map((a) => a.filePath), ...routes.uiAnchors, ...routes.apiAnchors, ...routes.testAnchors]);
     return store.getAllEvidence().filter((e) => store.isAuthorityEligible(e) && e.repositoryRevision === snapshot.revision && (
@@ -106,27 +152,65 @@ export class TaskRootedAuthorizationVerifier {
     // An explicitly requested CREATE has a prospective FILE receipt bound to its parent.
     const edges = store.getAllEvidence().filter((e) => store.isAuthorityEligible(e) && e.repositoryRevision === snapshot.revision && e.kind === "IMPORT" && e.sourceFile)
       .sort((a, b) => `${a.sourceFile}:${a.filePath}`.localeCompare(`${b.sourceFile}:${b.filePath}`));
-    const resolvedTarget = this.resolveTrustedDestructiveTarget(store, intent);
-    const isDependencyCleanup = resolvedTarget && action === "modify" && resolvedTarget.actionObligations?.some(
-      (obligation) =>
-        obligation.role === "DEPENDENCY_CLEANUP" &&
-        obligation.requiredAction === "modify" &&
-        normalizeRepoPath(obligation.path) === candidate,
-    );
-    if (resolvedTarget && isDependencyCleanup) {
-      const targetPaths = new Set(resolvedTarget.candidatePaths.map(normalizeRepoPath));
-      const incomingEdge = edges.find(
-        (edge) => edge.sourceFile === candidate && targetPaths.has(edge.filePath),
+    const resolvedTarget = this.resolveTrustedDestructiveTarget(store, intent) ?? intent.resolvedTarget;
+    const isDestructiveTask = Boolean(intent.destructive || resolvedTarget);
+
+    if (action === "modify" && isDestructiveTask) {
+      const resolvedTargetPaths = new Set(
+        [
+          ...(this.resolveTrustedDestructiveTarget(store, intent)?.candidatePaths || []),
+          ...(intent.resolvedTarget?.candidatePaths || []),
+        ].map(normalizeRepoPath),
       );
-      const targetRoot = incomingEdge && roots.find((root) => root.filePath === incomingEdge.filePath);
-      if (incomingEdge && targetRoot) {
-        return Object.freeze({
-          action,
-          candidatePath: candidate,
-          rootEvidenceId: targetRoot.id,
-          edgeEvidenceIds: Object.freeze([incomingEdge.id]),
-          repositoryRevision: snapshot.revision,
-        });
+      const request = trustedUserRequest(intent);
+      const explicit = new Set(request === undefined ? [] : TargetPathExtractor.extractWithProvenance(request, { repoFiles: [...snapshot.files.keys()] })
+        .filter((p) => p.provenance === "EXPLICIT_USER_PATH").map((p) => p.path));
+
+      const destructiveRoots = roots.filter((root) =>
+        root.kind === "FILE" && (
+          resolvedTargetPaths.has(root.filePath) ||
+          (intent.destructive && (explicit.has(root.filePath) || intent.operations.some((op) => op.kind === "DELETE" && normalizeRepoPath(op.subject) === root.filePath)))
+        )
+      ).sort((a, b) => a.filePath.localeCompare(b.filePath));
+
+      const candidateObligation = (intent.resolvedTarget?.actionObligations ?? resolvedTarget?.actionObligations)?.find(
+        (obligation) => normalizeRepoPath(obligation.path) === candidate,
+      );
+      const isObligationForbidden = candidateObligation && (
+        candidateObligation.requiredAction !== "modify" || candidateObligation.role === "PRIMARY_TARGET"
+      );
+
+      const cleanupEligible = this.getDeterministicCleanupEligiblePaths(store, intent);
+
+      if (cleanupEligible.has(candidate) && !isObligationForbidden && destructiveRoots.length > 0) {
+        for (const root of destructiveRoots) {
+          const queue = [{ file: root.filePath, ids: [] as string[] }];
+          const visited = new Set<string>();
+          while (queue.length > 0 && visited.size < 256) {
+            const current = queue.shift()!;
+            if (visited.has(current.file)) continue;
+            visited.add(current.file);
+
+            if (current.file === candidate && current.ids.length > 0) {
+              return Object.freeze({
+                action,
+                candidatePath: candidate,
+                rootEvidenceId: root.id,
+                edgeEvidenceIds: Object.freeze(current.ids),
+                repositoryRevision: snapshot.revision,
+              });
+            }
+
+            if (current.ids.length >= 3) continue;
+
+            for (const edge of edges) {
+              if (edge.filePath !== current.file || !edge.sourceFile) continue;
+              if (edge.sourceFile === root.filePath || !repositoryPath(workspace, edge.sourceFile)) continue;
+              if (!cleanupEligible.has(edge.sourceFile)) continue;
+              queue.push({ file: edge.sourceFile, ids: [...current.ids, edge.id] });
+            }
+          }
+        }
       }
     }
     for (const root of roots) {
