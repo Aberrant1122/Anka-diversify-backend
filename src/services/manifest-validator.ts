@@ -8,10 +8,14 @@ import {
 import path from "path";
 import {
   isAllowedBuiltinOrInstalled,
-  extractPackageRoot,
   detectRepositoryArchitecture,
 } from "../ai/planning/RepositoryArchitectureDetector";
 import { MonorepoDetector, MonorepoDescriptor } from "../ai/workspace/MonorepoDetector";
+import {
+  ManifestDependencyCandidate,
+  ManifestDependencyConfigurationFile,
+  ManifestDependencyResolver,
+} from "../ai/planning/ManifestDependencyResolver";
 
 export interface RepositoryContext {
   existingFiles: string[];
@@ -19,6 +23,7 @@ export interface RepositoryContext {
   packageVersions?: Record<string, string>;
   packageJsonContent?: string | object;
   monorepo?: MonorepoDescriptor | null;
+  configurationFiles?: ManifestDependencyConfigurationFile[];
 }
 
 /**
@@ -29,6 +34,8 @@ export class ManifestValidator {
   private contract: ExecutionContract;
   private existingFiles: Set<string>;
   private installedPackages: Set<string>;
+  private monorepo: MonorepoDescriptor | null = null;
+  private configurationFiles: ManifestDependencyConfigurationFile[] = [];
 
   constructor(contract: ExecutionContract, repoContext?: RepositoryContext | string[]) {
     this.contract = contract;
@@ -48,6 +55,8 @@ export class ManifestValidator {
 
       // If monorepo is present, register all workspace packages and their dependencies
       const monorepo = repoContext.monorepo || MonorepoDetector.detectMonorepo(null, repoContext.existingFiles.map((f) => ({ path: f })));
+      this.monorepo = monorepo || null;
+      this.configurationFiles = repoContext.configurationFiles || [];
       if (monorepo?.isMonorepo) {
         for (const ws of monorepo.workspaces) {
           this.installedPackages.add(ws.name);
@@ -184,6 +193,28 @@ export class ManifestValidator {
             suggestion: "Include dependencies array (empty if none).",
           });
         }
+        if (file.repositoryDependencies !== undefined && (!Array.isArray(file.repositoryDependencies) || file.repositoryDependencies.some((dependency) =>
+          !dependency || typeof dependency !== "object" || typeof dependency.path !== "string" || !dependency.path.trim() ||
+          (dependency.relation !== undefined && typeof dependency.relation !== "string")
+        ))) {
+          errors.push({
+            type: "schema",
+            affectedFiles: [file.path || `file[${index}]`],
+            message: `File '${file.path}' has invalid 'repositoryDependencies'`,
+            suggestion: "Use repositoryDependencies entries shaped as { path, relation? }.",
+          });
+        }
+        if (file.externalPackages !== undefined && (!Array.isArray(file.externalPackages) || file.externalPackages.some((dependency) =>
+          !dependency || typeof dependency !== "object" || typeof dependency.packageName !== "string" || !dependency.packageName.trim() ||
+          (dependency.subpath !== undefined && typeof dependency.subpath !== "string")
+        ))) {
+          errors.push({
+            type: "schema",
+            affectedFiles: [file.path || `file[${index}]`],
+            message: `File '${file.path}' has invalid 'externalPackages'`,
+            suggestion: "Use externalPackages entries shaped as { packageName, subpath? }.",
+          });
+        }
       });
     }
 
@@ -213,59 +244,40 @@ export class ManifestValidator {
    */
   public validateImports(manifest: FileManifest): ValidationError[] {
     const errors: ValidationError[] = [];
-    const manifestFilesMap = new Map<string, FileDeclaration>();
-
-    // Build map of normalized manifest file paths
-    manifest.files.forEach((f) => {
-      if (f.path) {
-        manifestFilesMap.set(this.normalizePath(f.path), f);
-      }
-    });
+    const resolver = this.createDependencyResolver(manifest);
 
     for (const file of manifest.files) {
       if (!file.path || !Array.isArray(file.dependencies)) continue;
       if (file.action === "delete") continue;
-
-      const fileDir = path.dirname(file.path);
-
-      for (const dep of file.dependencies) {
-        if (this.isExternalPackage(dep)) {
-          // If repository has installed packages known, verify external dependency is installed or Node builtin
-          if (this.installedPackages.size > 0) {
-            const allowed = isAllowedBuiltinOrInstalled(dep, this.installedPackages);
-            if (!allowed) {
-              const root = extractPackageRoot(dep);
-              errors.push({
-                type: "external-dependency-missing",
-                affectedFiles: [file.path],
-                message: `[external-dependency-missing] External dependency '${dep}' (package '${root}') is not installed in package.json.`,
-                suggestion: `Only use packages listed in package.json ([${Array.from(this.installedPackages).join(", ")}]), or implement the feature using native JS/standard library.`,
-              });
-            }
+      for (const dependency of this.getDependencyCandidates(file)) {
+        const resolution = resolver.resolve(file.path, dependency);
+        if (resolution.classification === "REPOSITORY") continue;
+        if (resolution.classification === "EXTERNAL") {
+          if (this.installedPackages.size > 0 && !isAllowedBuiltinOrInstalled(resolution.packageName, this.installedPackages)) {
+            errors.push({
+              type: "external-dependency-missing",
+              affectedFiles: [file.path],
+              message: `[external-dependency-missing] External dependency '${resolution.value}' (package '${resolution.packageName}') is not installed in package.json.`,
+              suggestion: `Only use packages listed in package.json ([${Array.from(this.installedPackages).join(", ")}]), or implement the feature using native JS/standard library.`,
+            });
           }
           continue;
         }
-
-        // Resolve local file path
-        let resolvedPath = "";
-        if (dep.startsWith("@/")) {
-          resolvedPath = dep.substring(2);
-        } else if (dep.startsWith("./") || dep.startsWith("../")) {
-          resolvedPath = path.normalize(path.join(fileDir, dep)).replace(/\\/g, "/");
-        } else {
-          // Absolute path or root-relative path
-          resolvedPath = dep.replace(/^[\/\\]/, "");
-        }
-
-        const isResolved = this.checkPathExists(resolvedPath, manifestFilesMap);
-        if (!isResolved) {
+        if (resolution.classification === "UNRESOLVED_LOCAL") {
           errors.push({
             type: "import_resolution",
             affectedFiles: [file.path],
-            message: `Unresolved import dependency '${dep}' in file '${file.path}'`,
-            suggestion: `Ensure '${dep}' is added to the manifest as a file to create/modify, or exists in the repository.`,
+            message: `Unresolved import dependency '${resolution.value}' in file '${file.path}': ${resolution.reason}`,
+            suggestion: `Ensure '${resolution.value}' resolves through the repository, manifest targets, workspace packages, or configured aliases.`,
           });
+          continue;
         }
+        errors.push({
+          type: "import_resolution",
+          affectedFiles: [file.path],
+          message: `Ambiguous dependency '${resolution.value}' in file '${file.path}': ${resolution.reason}`,
+          suggestion: "Declare a resolvable repository dependency or an unambiguous package specifier.",
+        });
       }
     }
 
@@ -284,19 +296,11 @@ export class ManifestValidator {
 
     // Collect all declared dependency targets across all manifest files
     const manifestDependencies = new Set<string>();
+    const resolver = this.createDependencyResolver(manifest);
     manifest.files.forEach((f) => {
-      const fileDir = path.dirname(f.path);
-      (f.dependencies || []).forEach((dep) => {
-        if (!this.isExternalPackage(dep)) {
-          if (dep.startsWith("@/")) {
-            manifestDependencies.add(this.normalizePath(dep.substring(2)));
-          } else if (dep.startsWith("./") || dep.startsWith("../")) {
-            const resolved = path.normalize(path.join(fileDir, dep)).replace(/\\/g, "/");
-            manifestDependencies.add(this.normalizePath(resolved));
-          } else {
-            manifestDependencies.add(this.normalizePath(dep));
-          }
-        }
+      this.getDependencyCandidates(f).forEach((dependency) => {
+        const resolution = resolver.resolve(f.path, dependency);
+        if (resolution.classification === "REPOSITORY") manifestDependencies.add(this.normalizePath(resolution.resolvedPath));
       });
     });
 
@@ -456,11 +460,31 @@ export class ManifestValidator {
     return p.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
   }
 
-  private isExternalPackage(importPath: string): boolean {
-    if (importPath.startsWith(".") || importPath.startsWith("/") || importPath.startsWith("@/")) {
-      return false;
+  private createDependencyResolver(manifest: FileManifest): ManifestDependencyResolver {
+    return new ManifestDependencyResolver({
+      existingFiles: this.existingFiles,
+      manifestFiles: manifest.files.map((file) => file.path),
+      installedPackages: this.installedPackages,
+      configurationFiles: this.configurationFiles,
+      monorepo: this.monorepo,
+    });
+  }
+
+  private getDependencyCandidates(file: FileDeclaration): ManifestDependencyCandidate[] {
+    const candidates: ManifestDependencyCandidate[] = [];
+    for (const value of file.dependencies || []) candidates.push({ value, intent: "LEGACY" });
+    for (const dependency of file.repositoryDependencies || []) candidates.push({ value: dependency.path, intent: "REPOSITORY" });
+    for (const dependency of file.externalPackages || []) {
+      const subpath = dependency.subpath?.replace(/^\/+/, "");
+      candidates.push({ value: subpath ? `${dependency.packageName}/${subpath}` : dependency.packageName, intent: "EXTERNAL" });
     }
-    return true;
+    const seen = new Set<string>();
+    return candidates.filter((candidate) => {
+      const key = candidate.value.replace(/\\/g, "/");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   private hasAppRouter(): boolean {
@@ -530,27 +554,6 @@ export class ManifestValidator {
     ];
 
     return entryBasenames.includes(basename) || configNames.includes(basename);
-  }
-
-  private checkPathExists(resolvedPath: string, manifestMap: Map<string, FileDeclaration>): boolean {
-    const norm = this.normalizePath(resolvedPath);
-
-    // 1. Direct match in manifest
-    if (manifestMap.has(norm)) return true;
-
-    // 2. Direct match in existing repository files
-    if (this.existingFiles.has(norm)) return true;
-
-    // 3. Match with common extension fallbacks (.ts, .tsx, .js, .jsx, .css, /index.ts, etc.)
-    const extensions = [".ts", ".tsx", ".js", ".jsx", ".css", "/index.ts", "/index.tsx", "/index.js"];
-
-    for (const ext of extensions) {
-      if (manifestMap.has(norm + ext) || this.existingFiles.has(norm + ext)) {
-        return true;
-      }
-    }
-
-    return false;
   }
 
   private pathsMatch(pathA: string, pathB: string): boolean {

@@ -54,6 +54,22 @@ function isSafeManifestDependency(ownerPath: string, value: unknown): value is s
   return normalized.split("/").every((segment) => segment !== "." && segment !== "..");
 }
 
+function isRepositoryDependencyIntent(ownerPath: string, value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const dependency = value as Record<string, unknown>;
+  return Object.keys(dependency).every((key) => ["path", "relation"].includes(key)) &&
+    isSafeManifestDependency(ownerPath, dependency.path) &&
+    (dependency.relation === undefined || (typeof dependency.relation === "string" && !!dependency.relation.trim()));
+}
+
+function isExternalPackageIntent(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const dependency = value as Record<string, unknown>;
+  return Object.keys(dependency).every((key) => ["packageName", "subpath"].includes(key)) &&
+    typeof dependency.packageName === "string" && !!dependency.packageName.trim() &&
+    (dependency.subpath === undefined || (typeof dependency.subpath === "string" && !!dependency.subpath.trim()));
+}
+
 export class ManifestGenerator {
   private openai: OpenAI;
 
@@ -244,6 +260,24 @@ export class ManifestGenerator {
                     action: { type: "string", enum: ["create", "modify", "delete"] },
                     description: { type: "string" },
                     dependencies: { type: "array", items: { type: "string" } },
+                    repositoryDependencies: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        properties: { path: { type: "string" }, relation: { type: "string" } },
+                        required: ["path"],
+                      },
+                    },
+                    externalPackages: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        properties: { packageName: { type: "string" }, subpath: { type: "string" } },
+                        required: ["packageName"],
+                      },
+                    },
                     // Temporary compatibility only. Legacy providers may still
                     // return this field, but it is never authorization input.
                     evidenceIds: { description: "Ignored legacy field. Do not emit." },
@@ -262,12 +296,14 @@ export class ManifestGenerator {
             if (parsed.totalFiles !== parsed.files.length || parsed.manifestVersion !== "1.0.0") return { valid: false, errors: ["Manifest metadata is inconsistent"] };
             const paths = new Set<string>();
             for (const file of parsed.files) {
-              if (!file || typeof file !== "object" || Array.isArray(file) || Object.keys(file).some((key) => !["path", "action", "description", "dependencies", "evidenceIds"].includes(key))) return { valid: false, errors: ["Manifest entry contains unknown fields"] };
+              if (!file || typeof file !== "object" || Array.isArray(file) || Object.keys(file).some((key) => !["path", "action", "description", "dependencies", "repositoryDependencies", "externalPackages", "evidenceIds"].includes(key))) return { valid: false, errors: ["Manifest entry contains unknown fields"] };
               const normalized = typeof file.path === "string" ? file.path.replace(/\\/g, "/").replace(/^\.\//, "") : "";
               if (!isSafeManifestPath(file.path) || paths.has(normalized) || !["create", "modify", "delete"].includes(file.action)) return { valid: false, errors: ["Manifest path/action is invalid"] };
               paths.add(normalized);
               if (file.description !== undefined && (typeof file.description !== "string" || !file.description.trim())) return { valid: false, errors: ["Manifest description is invalid"] };
               if (!Array.isArray(file.dependencies) || new Set(file.dependencies).size !== file.dependencies.length || file.dependencies.some((dep: unknown) => !isSafeManifestDependency(normalized, dep))) return { valid: false, errors: ["Manifest dependencies are invalid"] };
+              if (file.repositoryDependencies !== undefined && (!Array.isArray(file.repositoryDependencies) || file.repositoryDependencies.some((dep: unknown) => !isRepositoryDependencyIntent(normalized, dep)))) return { valid: false, errors: ["Manifest repositoryDependencies are invalid"] };
+              if (file.externalPackages !== undefined && (!Array.isArray(file.externalPackages) || file.externalPackages.some((dep: unknown) => !isExternalPackageIntent(dep)))) return { valid: false, errors: ["Manifest externalPackages are invalid"] };
               // evidenceIds is accepted only for legacy wire compatibility.
               // Its contents are deliberately not inspected: backend binding
               // replaces the field before any authority resolver is invoked.
@@ -334,11 +370,25 @@ export class ManifestGenerator {
 
       if (!Array.isArray(f.dependencies)) throw new Error("MANIFEST_GENERATION_FAILED: Missing manifest dependencies");
       const dependencies = f.dependencies.map((d: string) => d.replace(/\\/g, "/"));
+      const repositoryDependencies = Array.isArray(f.repositoryDependencies)
+        ? f.repositoryDependencies.map((dependency: { path: string; relation?: string }) => ({
+            path: dependency.path.replace(/\\/g, "/"),
+            ...(dependency.relation ? { relation: dependency.relation } : {}),
+          }))
+        : undefined;
+      const externalPackages = Array.isArray(f.externalPackages)
+        ? f.externalPackages.map((dependency: { packageName: string; subpath?: string }) => ({
+            packageName: dependency.packageName.trim(),
+            ...(dependency.subpath ? { subpath: dependency.subpath.replace(/^\/+/, "") } : {}),
+          }))
+        : undefined;
 
       normalizedFiles.push({
         path: cleanPath,
         action: reconciledAction,
         dependencies,
+        repositoryDependencies,
+        externalPackages,
         evidenceIds: [],
         description: typeof f.description === "string" ? f.description : undefined,
       });

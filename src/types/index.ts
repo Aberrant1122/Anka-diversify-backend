@@ -721,6 +721,16 @@ export interface FileDeclaration {
   action: "create" | "modify" | "delete";
   /** Array of import paths this file depends on */
   dependencies: string[];
+  /** Planner-declared repository dependency intent. Backend resolution remains authoritative. */
+  repositoryDependencies?: Array<{
+    path: string;
+    relation?: string;
+  }>;
+  /** Planner-declared external package intent. Backend package resolution remains authoritative. */
+  externalPackages?: Array<{
+    packageName: string;
+    subpath?: string;
+  }>;
   /** Human-readable description of file purpose */
   description: string;
   /** Optional size estimate */
