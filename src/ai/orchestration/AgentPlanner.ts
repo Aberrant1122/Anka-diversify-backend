@@ -727,8 +727,19 @@ export class AgentPlanner {
             if (!executionContract.targetProvenance) {
               executionContract.targetProvenance = {};
             }
+            if (!executionContract.actionObligations) {
+              executionContract.actionObligations = [];
+            }
             for (const exp of cleanupResult.approvedExpansions) {
               executionContract.targetProvenance[exp.path] = "DETERMINISTIC_REFERENCE_CLEANUP";
+              if (!executionContract.actionObligations.some((o) => normalizeRepoPath(o.path) === normalizeRepoPath(exp.path))) {
+                executionContract.actionObligations.push({
+                  path: exp.path,
+                  requiredAction: "modify",
+                  role: "DEPENDENCY_CLEANUP",
+                  evidenceIds: exp.evidence ? [String(exp.evidence)] : [],
+                });
+              }
             }
             executionContract.searchScope = Array.from(
               new Set([...executionContract.searchScope, ...executionContract.targetPaths])

@@ -11,6 +11,7 @@ import {
 import { PatchCorrectionEngine, PatchCorrectionTelemetry } from "./PatchCorrectionEngine";
 import { RoadmapGenerator } from "./RoadmapGenerator";
 import { ValidationPlanner } from "../validation/ValidationPlanner";
+import { AuthoritativeSourceHydrator, HydratedSource } from "../manifest/AuthoritativeSourceHydrator";
 import {
   IMPLEMENTATION_PLANNER_PROMPT,
   CODING_AGENT_PROMPT,
@@ -496,6 +497,7 @@ Respond ONLY with valid JSON:
     authoritativeModifySources?: Record<string, { path: string; content: string; sha256: string }>,
     mergedSourceMap?: Record<string, string>,
     priorVerifiedTargets?: readonly PriorVerifiedTarget[],
+    effectiveLocalPath?: string | null,
   ): Promise<{
     roadmap: RoadmapStep[];
     changes: AgentFileChange[];
@@ -602,7 +604,7 @@ Respond ONLY with valid JSON:
 
     const requiredRepositoryEvidence = Object.entries(authoritativeModifySources || {}).map(([p, s]) => ({
       id: `authoritative-modify:${normalizeRepoPath(p)}:${s.sha256}`,
-      content: `AUTHORIZED MODIFY SOURCE\nFILE: ${p}\nSHA256: ${s.sha256}\nFULL AUTHORITATIVE CONTENT:\n${s.content}`,
+      content: `AUTHORITATIVE MODIFY SOURCE\nFILE: ${p}\nSHA256: ${s.sha256}\nFULL AUTHORITATIVE CONTENT:\n${s.content}`,
       required: true,
       priority: 0,
     }));
@@ -901,6 +903,34 @@ When using an existing local component, conform to its authoritative exported pr
       }
 
       const proposals = [...normalizedProposals];
+
+      // Tier 2: Late Authoritative Source Hydration for MODIFY proposals
+      // Detect any MODIFY proposal whose source is absent from effectiveResolutionSourceMap.
+      // If the file exists safely in the active worktree, hydrate its exact current bytes
+      // for patch evaluation ONLY. This read grants zero write authority.
+      if (effectiveLocalPath) {
+        const missingModifyCandidates: string[] = [];
+        for (const p of proposals) {
+          if (p.action === "modify") {
+            const normPath = normalizeRepoPath(p.path);
+            const present = Object.entries(effectiveResolutionSourceMap).some(
+              ([k]) => normalizeRepoPath(k) === normPath
+            );
+            if (!present) {
+              missingModifyCandidates.push(normPath);
+            }
+          }
+        }
+
+        if (missingModifyCandidates.length > 0) {
+          AuthoritativeSourceHydrator.hydrateLateModifyCandidates(
+            missingModifyCandidates,
+            effectiveLocalPath,
+            effectiveResolutionSourceMap,
+            authoritativeModifySources as Record<string, HydratedSource> | undefined,
+          );
+        }
+      }
 
       // PART A: Structurally validate ALL proposals before application
       const malformedProposals = validateGenerationProposals(
