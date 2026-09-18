@@ -458,7 +458,7 @@ describe("Production Acceptance Hotfix 02: Structured Code-Generation Schema Rec
       files: [{ path: "src/a.ts", action: "modify", dependencies: [], description: "Update a" }],
     };
 
-    await expect(CodeGenerator.generateRoadmapAndDiffs(
+    const result = await CodeGenerator.generateRoadmapAndDiffs(
       "Update a",
       { intent: "FEATURE" },
       {
@@ -474,7 +474,15 @@ describe("Production Acceptance Hotfix 02: Structured Code-Generation Schema Rec
         "src/a.ts": { path: "src/a.ts", content: "export const a = 1;\n", sha256: "sha-a" },
         "src/protected.ts": { path: "src/protected.ts", content: "export const secret = 42;\n", sha256: "sha-p" },
       },
-    )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*src\/protected\.ts/);
+    );
+    expect(result.manifestObservations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "src/protected.ts",
+          reason: "UNPLANNED_PATH",
+        }),
+      ])
+    );
 
     // The backend capability remains path-bound even though generation failed earlier.
     const authorizedScope = AuthorizedCapabilityScope.fromBackendConfiguration({

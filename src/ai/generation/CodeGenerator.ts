@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { AgentFileChange, ExecutionContract, RoadmapStep } from "../shared/types";
 import { FileManifest } from "../../types";
+import { auditManifestPlan, ManifestPlanningObservation } from "../manifest/ManifestAudit";
 import {
   GeneratedChangeProposal,
   resolveGenerationProposals,
@@ -47,40 +48,6 @@ interface ModelGeneratedChange {
   isDeleted?: boolean;
   layer?: "Controller" | "Service" | "Repository" | "Schema" | "UI";
   repositoryId?: string;
-}
-
-function assertGeneratedChangesMatchApprovedManifest(
-  rawChanges: readonly ModelGeneratedChange[],
-  approvedManifest?: FileManifest | null,
-): void {
-  if (!approvedManifest || !Array.isArray(approvedManifest.files)) return;
-
-  const approvedByPath = new Map(
-    approvedManifest.files.map((file) => [normalizeRepoPath(file.path), file.action]),
-  );
-  const mismatches: string[] = [];
-
-  for (const change of rawChanges) {
-    const normalizedPath = normalizeRepoPath(change.path);
-    const approvedAction = approvedByPath.get(normalizedPath);
-    const generatedAction = change.action;
-
-    if (!approvedAction) {
-      mismatches.push(`${normalizedPath || change.path}: path is absent from approved manifest`);
-      continue;
-    }
-    if (generatedAction !== approvedAction) {
-      mismatches.push(
-        `${normalizedPath}: expected ${approvedAction}, received ${generatedAction || "missing action"}`,
-      );
-    }
-  }
-
-  if (mismatches.length > 0) {
-    throw new Error(
-      `[GENERATED_MANIFEST_MISMATCH] Generated proposals exceeded the approved path/action boundary: ${mismatches.join("; ")}`,
-    );
-  }
 }
 
 interface CodeGenerationPayload {
@@ -536,6 +503,7 @@ Respond ONLY with valid JSON:
     commitMessage: string;
     validationCommands: string[];
     expectedSourceHashes?: Record<string, string>;
+    manifestObservations?: ManifestPlanningObservation[];
   }> {
     const gateway = LLMGateway.getInstance();
     const isStandaloneWeb = contract?.pipeline === "STANDALONE" || contract?.environment === "HTML_CSS_JS";
@@ -803,9 +771,24 @@ When using an existing local component, conform to its authoritative exported pr
     let explanation = parsed.explanation;
     let commitMessage = parsed.commitMessage;
 
-    // Generated proposals must cross the immutable manifest path/action boundary
-    // before they can influence patch resolution or candidate contract analysis.
-    assertGeneratedChangesMatchApprovedManifest(rawChanges, approvedManifest);
+    // Non-authoritative manifest audit: planning manifest provides guidance and
+    // audit observability, but never acts as a security authority to block
+    // downstream deterministic relation evidence acquisition or capability closure.
+    const manifestObservations = auditManifestPlan(
+      rawChanges,
+      approvedManifest,
+      (change) => {
+        const rawAction = (change.action || (change.isDeleted ? "delete" : "modify")).toLowerCase();
+        return rawAction === "create" || rawAction === "delete" ? rawAction : "modify";
+      },
+    );
+    if (manifestObservations.length > 0) {
+      for (const obs of manifestObservations) {
+        console.info(
+          `[MANIFEST_AUDIT] Advisory planning mismatch for "${obs.path}": ${obs.reason} - ${obs.message}`
+        );
+      }
+    }
 
     // ── Resolve raw LLM proposals into AgentFileChange[] ──
     const proposalRequiresStructuredResolution = rawChanges.some((raw) =>
@@ -1314,6 +1297,7 @@ When using an existing local component, conform to its authoritative exported pr
       commitMessage,
       validationCommands,
       expectedSourceHashes,
+      manifestObservations,
     };
   }
 }

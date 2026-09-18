@@ -92,7 +92,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
       },
     });
 
-    await expect(CodeGenerator.generateRoadmapAndDiffs(
+    const result = await CodeGenerator.generateRoadmapAndDiffs(
       "Update foo",
       { intent: "BUG_FIX", taskType: "BUG_FIX" },
       { fileContext: { "src/foo.ts": "const a = 1;" } },
@@ -100,7 +100,18 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
       contract,
       approvedManifest,
       { "src/foo.ts": { path: "src/foo.ts", content: "const a = 1;", sha256: "sha-foo" } }
-    )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*src\/bar\.ts/);
+    );
+
+    expect(result.changes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "src/bar.ts" }),
+      ])
+    );
+    expect(result.manifestObservations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "src/bar.ts", reason: "UNPLANNED_PATH" }),
+      ])
+    );
 
     // targetPaths remain untouched
     expect(contract.targetPaths).toEqual(["src/foo.ts"]);
@@ -307,7 +318,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
     }
 
     expect(error).not.toBeNull();
-    expect(error.message).toMatch(/GENERATED_MANIFEST_MISMATCH/);
+    expect(error.message).toMatch(/PATCH_SOURCE_FILE_NOT_FOUND/);
     expect(error.message).toContain("src/components/calculator/Calculator.tsx");
   });
 
@@ -399,7 +410,7 @@ describe("Strict Implementation Pass 4: CodeGen Manifest Contract & Repair Diagn
     }
 
     expect(error).not.toBeNull();
-    expect(error.message).toMatch(/GENERATED_MANIFEST_MISMATCH/);
+    expect(error.message).toMatch(/PATCH_SOURCE_FILE_NOT_FOUND/);
     expect(error.message).toContain("src/index.ts");
   });
 

@@ -16,10 +16,10 @@ export interface ManifestPlanningObservation {
  * Consumers must not use observations as mutation, validation, checkpoint, or
  * completion authority.
  */
-export function auditManifestPlan(
-  changes: readonly AgentFileChange[],
+export function auditManifestPlan<T extends { path: string } = AgentFileChange>(
+  changes: readonly T[],
   manifest: FileManifest | null | undefined,
-  resolveAction: (change: AgentFileChange) => "create" | "modify" | "delete",
+  resolveAction: (change: T) => "create" | "modify" | "delete",
 ): ManifestPlanningObservation[] {
   if (!manifest || !Array.isArray(manifest.files)) return [];
   const planned = new Map(

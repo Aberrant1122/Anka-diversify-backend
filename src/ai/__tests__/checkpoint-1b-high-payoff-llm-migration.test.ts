@@ -957,7 +957,7 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
       }).valid).toBe(false);
     });
 
-    it("30. generated paths outside the approved manifest fail before downstream capability enforcement", async () => {
+    it("30. generated paths outside the approved manifest record advisory audit without premature hard block", async () => {
       const gatewaySpy = jest.spyOn(LLMGateway.getInstance(), "callStructured")
         .mockResolvedValueOnce(gatewayResult({
           explanation: "Wrong path",
@@ -965,17 +965,26 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
           commitMessage: "feat: wrong",
         }, PipelineStages.CODE_GENERATION) as any);
 
-      await expect(CodeGenerator.generateRoadmapAndDiffs(
+      const result = await CodeGenerator.generateRoadmapAndDiffs(
         "Create approved", { intent: "FEATURE" }, { fileContext: {}, skeletonContext: {} }, "system",
         standaloneContract,
         { manifestVersion: "1", totalFiles: 1, files: [{ path: "src/approved.ts", action: "create", description: "Approved", dependencies: [] }] } as any,
-      )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*src\/invented\.ts/);
+      );
+
+      expect(result.changes).toEqual([
+        expect.objectContaining({ path: "src/invented.ts" }),
+      ]);
+      expect(result.manifestObservations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: "src/invented.ts", reason: "UNPLANNED_PATH" }),
+        ])
+      );
 
       expect(gatewaySpy.mock.calls[0][0].stage).toBe(PipelineStages.CODE_GENERATION);
       expect(gatewaySpy).toHaveBeenCalledTimes(1);
     });
 
-    it("31. generated action mismatch with the approved manifest fails closed", async () => {
+    it("31. generated action mismatch with the approved manifest records advisory audit", async () => {
       jest.spyOn(LLMGateway.getInstance(), "callStructured")
         .mockResolvedValueOnce(gatewayResult({
           explanation: "Wrong action",
@@ -983,11 +992,25 @@ describe("Checkpoint 1B: High-Payoff LLM Migration Tests", () => {
           commitMessage: "feat: wrong action",
         }, PipelineStages.CODE_GENERATION) as any);
 
-      await expect(CodeGenerator.generateRoadmapAndDiffs(
+      const result = await CodeGenerator.generateRoadmapAndDiffs(
         "Create approved", { intent: "FEATURE" }, { fileContext: {}, skeletonContext: {} }, "system",
         standaloneContract,
         { manifestVersion: "1", totalFiles: 1, files: [{ path: "src/approved.ts", action: "create", description: "Approved", dependencies: [] }] } as any,
-      )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*src\/approved\.ts.*expected create.*received delete/);
+      );
+
+      expect(result.changes).toEqual([
+        expect.objectContaining({ path: "src/approved.ts", action: "delete" }),
+      ]);
+      expect(result.manifestObservations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: "src/approved.ts",
+            reason: "PLANNED_ACTION_DIFFERED",
+            plannedAction: "create",
+            actualAction: "delete",
+          }),
+        ])
+      );
     });
 
     it("32. security correction uses the gateway and remains subject to SecurityPolicy", async () => {

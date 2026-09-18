@@ -374,7 +374,7 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
       manifestVersion: "1.0.0",
     };
 
-    await expect(CodeGenerator.generateRoadmapAndDiffs(
+    const result = await CodeGenerator.generateRoadmapAndDiffs(
       "Delete calculator",
       { intent: "DELETE_FEATURE", taskType: "DELETE_FOLDER" },
       { fileContext: { "src/components/calculator/Calculator.tsx": "const a = 1;" } },
@@ -388,7 +388,17 @@ describe("Strict Implementation — Autonomous Target Resolution + File Action C
           sha256: "sha-1",
         },
       }
-    )).rejects.toThrow(/\[GENERATED_MANIFEST_MISMATCH\].*expected delete.*received modify/);
+    );
+    expect(result.manifestObservations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "src/components/calculator/Calculator.tsx",
+          reason: "PLANNED_ACTION_DIFFERED",
+          plannedAction: "delete",
+          actualAction: "modify",
+        }),
+      ])
+    );
     expect(approvedManifest.files[0].action).toBe("delete");
   });
 
