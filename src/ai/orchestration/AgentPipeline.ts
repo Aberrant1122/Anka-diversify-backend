@@ -754,6 +754,7 @@ export class AgentPipeline {
       effectiveLocalPath,
       canonicalExistingFiles,
       optimizedContext?.fileContext || {},
+      executionContract,
     );
 
     if (!hydrationResult.success) {
@@ -801,6 +802,7 @@ export class AgentPipeline {
         hydrationResult.authoritativeModifySources,
         hydrationResult.mergedSourceMap,
         taskExecutionPlan.priorVerifiedTargets,
+        effectiveLocalPath,
       );
     } catch (genErr: any) {
       throw genErr;
