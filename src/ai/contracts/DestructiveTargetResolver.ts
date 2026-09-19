@@ -115,7 +115,12 @@ export class DestructiveTargetResolver {
       );
 
     // Step 3: Explicit filesystem path authority
-    const explicitCandidate = options?.targetPath;
+    const explicitCandidate =
+      options?.targetPath ||
+      (options?.selectedLogicalTarget &&
+      TargetPathExtractor.isValidPathCandidate(options.selectedLogicalTarget, normalizedRepo)
+        ? options.selectedLogicalTarget
+        : undefined);
     if (explicitCandidate) {
       const normExplicit = normalizeRepoPath(explicitCandidate);
       const exists =
@@ -207,23 +212,7 @@ export class DestructiveTargetResolver {
     const VAGUE_TARGET_WORDS = TargetPathExtractor.VAGUE_TARGET_WORDS;
     const NON_PATH_TECHNOLOGIES = (TargetPathExtractor as any).NON_PATH_TECHNOLOGIES || new Set();
     const BROAD_GENERIC_DIRS = (TargetPathExtractor as any).BROAD_GENERIC_DIRS || new Set();
-    const ACTION_VERBS = new Set([
-      "delete",
-      "remove",
-      "rm",
-      "purge",
-      "drop",
-      "prune",
-      "clean",
-      "destroy",
-      "replace",
-      "fix",
-      "update",
-      "create",
-      "add",
-      "make",
-      "build",
-    ]);
+    const ACTION_VERBS = TargetPathExtractor.COMMAND_VERBS;
 
     const extractedNamedTokens = TargetPathExtractor.extractNamedEntityTokens(trimmed);
     for (const tok of extractedNamedTokens) {
@@ -415,7 +404,10 @@ export class DestructiveTargetResolver {
       const activeResolution = this.resolveActiveImplementation(clusters, normalizedRepo, options);
 
       // If user passed a structured selection from a prior clarification
-      if (options?.selectedLogicalTarget) {
+      if (
+        options?.selectedLogicalTarget &&
+        TargetPathExtractor.isValidTargetClarificationAnswer(options.selectedLogicalTarget, normalizedRepo)
+      ) {
         const userChoice = options.selectedLogicalTarget.trim().toLowerCase();
         const matchedCluster = clusters.find(
           (c) =>

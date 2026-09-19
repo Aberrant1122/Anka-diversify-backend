@@ -389,22 +389,37 @@ export class AgentPlanner {
 
       // Deterministic feature resolution and evidence hydration before manifest planning
       const compound = detectCompoundIntent(request.message);
-      const isDestructiveStage =
-        activeStage.intent.destructive ||
-        taskIntentSpec.destructive ||
-        intentResult.taskType === "DELETE_FOLDER" ||
-        intentResult.taskType === "DELETE_FILE" ||
-        intentResult.intent === "DELETE_FOLDER" ||
-        intentResult.intent === "DELETE_FILE" ||
-        activeStage.intent.taskType === "DELETE_FOLDER" ||
-        activeStage.intent.taskType === "DELETE_FILE" ||
-        compound.hasDeletion ||
-        (Array.isArray(executionContract.allowedActions) &&
-          (executionContract.allowedActions.includes("delete_file") ||
-            executionContract.allowedActions.includes("delete_folder")));
+      const isDestructiveStage = activeStage
+        ? Boolean(
+            activeStage.intent?.destructive ||
+            activeStage.intent?.taskType === "DELETE_FOLDER" ||
+            activeStage.intent?.taskType === "DELETE_FILE" ||
+            (activeStage.intent as any)?.intent === "DELETE_FOLDER" ||
+            (activeStage.intent as any)?.intent === "DELETE_FILE" ||
+            activeStage.intent?.operations?.some((op) => op.kind === "DELETE")
+          )
+        : Boolean(
+            taskIntentSpec?.destructive ||
+            intentResult.taskType === "DELETE_FOLDER" ||
+            intentResult.taskType === "DELETE_FILE" ||
+            intentResult.intent === "DELETE_FOLDER" ||
+            intentResult.intent === "DELETE_FILE" ||
+            compound.hasDeletion ||
+            (Array.isArray(executionContract.allowedActions) &&
+              (executionContract.allowedActions.includes("delete_file") ||
+                executionContract.allowedActions.includes("delete_folder")))
+          );
 
       let resolvedTaskTarget: ResolvedTaskTarget | undefined =
-        activeStage.resolvedTarget || taskIntentSpec.resolvedTarget;
+        activeStage?.resolvedTarget || taskIntentSpec?.resolvedTarget;
+
+      const rawClarificationAnswer =
+        clarificationData?.clarificationQas[clarificationData.clarificationQas.length - 1]?.answer;
+      const validClarificationTarget =
+        rawClarificationAnswer &&
+        TargetPathExtractor.isValidTargetClarificationAnswer(rawClarificationAnswer, canonicalExistingFiles)
+          ? rawClarificationAnswer.trim()
+          : undefined;
 
       if (isDestructiveStage) {
         const resolution = DestructiveTargetResolver.resolve(
@@ -412,8 +427,14 @@ export class AgentPlanner {
           canonicalExistingFiles,
           {
             isDestructive: true,
-            taskType: activeStage.intent.taskType,
-            targetPath: activeStage.intent.explicitUserPaths?.[0] || executionContract.targetPaths[0],
+            taskType: activeStage?.intent?.taskType || intentResult.taskType,
+            targetPath:
+              activeStage?.intent?.explicitUserPaths?.[0] ||
+              executionContract.targetPaths[0] ||
+              (validClarificationTarget &&
+              TargetPathExtractor.isValidPathCandidate(validClarificationTarget, canonicalExistingFiles)
+                ? validClarificationTarget
+                : undefined),
             evidenceStore,
             repositoryId: projectId,
             fileContext: optimizedContext?.fileContext,
@@ -421,7 +442,7 @@ export class AgentPlanner {
             localPath: effectiveLocalPath,
             monorepo,
             knowledgeGraph,
-            selectedLogicalTarget: clarificationData?.clarificationQas[clarificationData.clarificationQas.length - 1]?.answer,
+            selectedLogicalTarget: validClarificationTarget,
           }
         );
 
@@ -700,13 +721,7 @@ export class AgentPlanner {
         }
 
         // Supporting reverse-reference cleanup expansion for grounded DELETE targets (Fix 2)
-        const compound = detectCompoundIntent(request.message);
-        const isDestructiveOrDeletion =
-          intentResult.taskType === "DELETE_FOLDER" ||
-          intentResult.taskType === "DELETE_FILE" ||
-          intentResult.intent === "DELETE_FOLDER" ||
-          intentResult.intent === "DELETE_FILE" ||
-          compound.hasDeletion;
+        const isDestructiveOrDeletion = isDestructiveStage;
 
         if (isDestructiveOrDeletion && Array.isArray(rawManifest.files)) {
           const cleanupResult = TargetScopeExpander.expandReverseReferenceCleanupTargets({
@@ -752,7 +767,7 @@ export class AgentPlanner {
         const isNonDestructive =
           executionContract.taskType !== "DELETE_FOLDER" &&
           executionContract.taskType !== "DELETE_FILE" &&
-          !compound.hasDeletion;
+          !isDestructiveStage;
 
         if (isUI && isNonDestructive && Array.isArray(rawManifest.files)) {
           const uiNeighborResult = TargetScopeExpander.expandDirectUIReferences({
