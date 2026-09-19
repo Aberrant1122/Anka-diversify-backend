@@ -101,7 +101,157 @@ export class TargetPathExtractor {
     "away",
   ]);
 
+  // Canonical set of command / action verbs used in instructions
+  public static readonly COMMAND_VERBS = new Set([
+    "implement",
+    "add",
+    "create",
+    "build",
+    "make",
+    "remove",
+    "delete",
+    "rm",
+    "purge",
+    "drop",
+    "prune",
+    "clean",
+    "destroy",
+    "update",
+    "modify",
+    "refactor",
+    "fix",
+    "replace",
+    "rename",
+    "edit",
+    "enhance",
+    "improve",
+    "redesign",
+    "change",
+    "style",
+  ]);
 
+  // UI interaction and directive verbs that appear in clarification options
+  public static readonly DIRECTIVE_VERBS = new Set([
+    "specify",
+    "choose",
+    "select",
+    "enter",
+    "pick",
+    "cancel",
+    "provide",
+    "input",
+    "type",
+    "click",
+    "abort",
+    "skip",
+    "quit",
+    "exit",
+  ]);
+
+  // Generic filesystem / UI meta-descriptors that do not form domain entities
+  public static readonly META_TARGET_WORDS = new Set([
+    "target",
+    "targets",
+    "file",
+    "files",
+    "folder",
+    "folders",
+    "path",
+    "paths",
+    "directory",
+    "directories",
+    "component",
+    "components",
+    "item",
+    "items",
+    "element",
+    "elements",
+    "option",
+    "options",
+    "one",
+    "all",
+    "none",
+    "deletion",
+    "removal",
+    "action",
+    "exact",
+  ]);
+
+  // Grammar particles (articles, prepositions, conjunctions)
+  public static readonly GRAMMAR_WORDS = new Set([
+    "a",
+    "an",
+    "the",
+    "this",
+    "that",
+    "these",
+    "those",
+    "your",
+    "my",
+    "or",
+    "and",
+    "to",
+    "for",
+    "in",
+    "of",
+    "from",
+    "with",
+  ]);
+
+  /**
+   * Deterministically validates whether a clarification answer represents a valid repository target hint
+   * (e.g. normalized path candidate, existing repository entity/path, or deterministic logical target name)
+   * rather than an interaction directive / UI action label (e.g. "Specify target file path", "Choose a file", "Cancel deletion").
+   */
+  public static isValidTargetClarificationAnswer(
+    answer: string,
+    repoFiles: string[] = []
+  ): boolean {
+    if (!answer || typeof answer !== "string") return false;
+    const clean = answer.trim();
+    if (clean.length < 2 || clean.length > 260) return false;
+
+    // Direct path candidate or matching repository file / folder
+    if (this.isValidPathCandidate(clean, repoFiles)) {
+      return true;
+    }
+    const norm = clean.replace(/\\/g, "/").replace(/^\//, "").replace(/\/$/, "");
+    if (repoFiles.some((f) => {
+      const nf = f.replace(/\\/g, "/").replace(/^\//, "");
+      return nf === norm || nf.startsWith(norm + "/");
+    })) {
+      return true;
+    }
+
+    const words = clean.toLowerCase().split(/[\s\-_\/]+/).filter((w) => w.length > 0);
+    if (words.length === 0) return false;
+
+    const firstWord = words[0];
+    const isFirstDirective = this.DIRECTIVE_VERBS.has(firstWord);
+    const isAllMetaOrDirective = words.every(
+      (w) =>
+        this.DIRECTIVE_VERBS.has(w) ||
+        this.META_TARGET_WORDS.has(w) ||
+        this.GRAMMAR_WORDS.has(w) ||
+        this.VAGUE_TARGET_WORDS.has(w)
+    );
+
+    if (isFirstDirective || isAllMetaOrDirective) {
+      return false;
+    }
+
+    const substantiveWords = words.filter(
+      (w) =>
+        !this.DIRECTIVE_VERBS.has(w) &&
+        !this.META_TARGET_WORDS.has(w) &&
+        !this.GRAMMAR_WORDS.has(w) &&
+        !this.VAGUE_TARGET_WORDS.has(w) &&
+        !this.DESCRIPTIVE_MODIFIERS.has(w) &&
+        !this.COMMAND_VERBS.has(w)
+    );
+
+    return substantiveWords.length > 0;
+  }
 
   /**
    * Deterministically breaks a symbol, filename stem, or entity phrase into normalized lexical tokens.
@@ -499,14 +649,36 @@ export class TargetPathExtractor {
     const pascalMatches = message.matchAll(/\b([A-Z][a-zA-Z0-9]{2,})\b/g);
     for (const m of pascalMatches) {
       const tok = m[1];
-      if (!this.NON_PATH_TECHNOLOGIES.has(tok.toLowerCase()) && !this.BROAD_GENERIC_DIRS.has(tok.toLowerCase())) {
+      const tokLower = tok.toLowerCase();
+      if (!this.NON_PATH_TECHNOLOGIES.has(tokLower) && !this.BROAD_GENERIC_DIRS.has(tokLower)) {
+        if (this.COMMAND_VERBS.has(tokLower)) {
+          // Check if this command verb is sentence-leading or clause-leading (imperative position)
+          const idx = m.index ?? 0;
+          const preceding = message.slice(0, idx);
+          const precedingTrimmed = preceding.trim();
+          const isSentenceStart =
+            precedingTrimmed.length === 0 ||
+            /[.!?;\n]\s*$/.test(preceding) ||
+            /(?:^|[,;])\s*(?:and|then|also|now)\s*$/i.test(precedingTrimmed) ||
+            /^(?:and|then|also|now)\s*$/i.test(precedingTrimmed);
+
+          if (isSentenceStart) {
+            // Imperative verb governing the sentence/clause, not the target entity
+            continue;
+          }
+        }
         tokens.add(tok);
       }
     }
 
+    const actionPattern = Array.from(this.COMMAND_VERBS).join("|");
+
     // 2. Descriptive Modifier + Entity phrasing:
     // e.g. "remove the deprecated activity widget", "delete old calculator", "replace the deprecated activity widget with"
-    const descriptiveRegex = /\b(?:remove|delete|drop|prune|clean|fix|update|modify|edit|enhance|improve|add|create|build|replace|redesign|style|implement|change)\s+(?:the\s+|a\s+|an\s+)?(?:deprecated|legacy|old|obsolete|unused|outdated|former)\s+([a-zA-Z0-9_\-]+(?:\s+[a-zA-Z0-9_\-]+)?)\b/gi;
+    const descriptiveRegex = new RegExp(
+      `\\b(?:${actionPattern})\\s+(?:the\\s+|a\\s+|an\\s+)?(?:deprecated|legacy|old|obsolete|unused|outdated|former)\\s+([a-zA-Z0-9_\\-]+(?:\\s+[a-zA-Z0-9_\\-]+)?)\\b`,
+      "gi"
+    );
     let dMatch: RegExpExecArray | null;
     while ((dMatch = descriptiveRegex.exec(message)) !== null) {
       const tok = dMatch[1].trim();
@@ -518,7 +690,10 @@ export class TargetPathExtractor {
     }
 
     // 3. Action + Entity phrasing: "remove the calculator", "fix the task-filter", "update user_service", "improve the dashboard"
-    const actionEntityRegex = /\b(?:remove|delete|drop|prune|clean|fix|update|modify|edit|enhance|improve|add|create|build|redesign|change)\s+(?:the\s+|a\s+|an\s+)?([a-zA-Z0-9_\-]+)\b/gi;
+    const actionEntityRegex = new RegExp(
+      `\\b(?:${actionPattern})\\s+(?:the\\s+|a\\s+|an\\s+)?([a-zA-Z0-9_\\-]+)\\b`,
+      "gi"
+    );
     let match: RegExpExecArray | null;
     while ((match = actionEntityRegex.exec(message)) !== null) {
       const tok = match[1].trim();
@@ -534,7 +709,10 @@ export class TargetPathExtractor {
     }
 
     // 4. Two-word entity phrasing: "edit task filter", "fix project card"
-    const actionTwoWordRegex = /\b(?:remove|delete|drop|prune|clean|fix|update|modify|edit|enhance|improve|add|create|build|redesign|change)\s+(?:the\s+|a\s+|an\s+)?([a-zA-Z0-9_\-]+\s+[a-zA-Z0-9_\-]+)\b/gi;
+    const actionTwoWordRegex = new RegExp(
+      `\\b(?:${actionPattern})\\s+(?:the\\s+|a\\s+|an\\s+)?([a-zA-Z0-9_\\-]+\\s+[a-zA-Z0-9_\\-]+)\\b`,
+      "gi"
+    );
     while ((match = actionTwoWordRegex.exec(message)) !== null) {
       const tok = match[1].trim();
       const words = tok.toLowerCase().split(/\s+/);
