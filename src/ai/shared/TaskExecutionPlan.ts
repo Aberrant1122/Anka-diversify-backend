@@ -2,7 +2,7 @@ import { TaskIntentSpec } from "./TaskIntentSpec";
 import { TaskClassificationResult, TaskType } from "../classification/TaskTypes";
 import { TaskSuccessCondition } from "../../types";
 
-export type StageExecutionStatus = "PENDING" | "RUNNING" | "VERIFIED" | "FAILED";
+export type StageExecutionStatus = "PENDING" | "RUNNING" | "VERIFIED" | "FAILED" | "CANCELLED";
 export type PlanExecutionStatus = "PENDING" | "RUNNING" | "FAILED" | "COMPLETED";
 
 export interface TaskExecutionStageSpec {

@@ -4,7 +4,7 @@ import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { RepositoryEvidenceStore } from "./RepositoryEvidenceStore";
 import { RepositoryObservationTools } from "./RepositoryObservation";
 import { describeFrameworkRoute, selectFrameworkRoutes, supportsStaticRouteDiscovery } from "./FrameworkRouteMatcher";
-import { isExistingPrimaryUIRefinement } from "../planning/RepositoryArchitectureDetector";
+import { isExistingPrimaryUIRefinement, detectPrimaryActiveEntryPoint } from "../planning/RepositoryArchitectureDetector";
 import { discoverStaticApiRegistrations, isApiArchitectureTask, routeResourceTokens, taskWordTokens, testExercisesRoute } from "./StaticApiArchitecture";
 
 export interface ResolvedRuntimeRouteAnchor {
@@ -24,6 +24,27 @@ export interface TaskAnchorResolution {
 
 function taskText(intentSpec: TaskIntentSpec): string {
   return trustedUserRequest(intentSpec) ?? "";
+}
+
+export function isConstructiveFeatureRequest(intentSpec: TaskIntentSpec): boolean {
+  if (intentSpec.destructive) return false;
+  if (
+    intentSpec.taskType === "BUG_FIX" ||
+    intentSpec.taskType === "REFACTOR" ||
+    intentSpec.taskType === "DELETE_FILE" ||
+    intentSpec.taskType === "DELETE_FOLDER"
+  ) {
+    return false;
+  }
+  const request = trustedUserRequest(intentSpec);
+  if (!request) return false;
+
+  if (isExistingPrimaryUIRefinement(request)) return false;
+
+  const text = `${request} ${intentSpec.goal || ""}`;
+  const hasConstructiveKeywords = /\b(add|create|implement|build|introduce|new)\b.*\b(list|task|component|widget|page|view|panel|modal|item|element|screen)\b/i.test(text);
+
+  return hasConstructiveKeywords;
 }
 
 export class TaskAnchorResolver {
@@ -85,14 +106,28 @@ export class TaskAnchorResolver {
     const ambiguousRoutes: string[] = [];
     const ambiguousApiResources: string[] = [];
 
+    const filesToCheck = input.repositoryFiles && input.repositoryFiles.length > 0
+      ? input.repositoryFiles.filter((f) => files.has(f))
+      : [...files.keys()];
+
     const uiCompositionRoot = this.resolveUniqueUiCompositionRoot(input.intentSpec, files);
-    if (uiCompositionRoot) {
+    if (uiCompositionRoot && filesToCheck.includes(uiCompositionRoot)) {
       const receipt = RepositoryObservationTools.observeUiCompositionAnchor(
         input.repositoryId,
         input.workspaceRoot,
         uiCompositionRoot,
       );
       if (receipt && input.evidenceStore.recordObservation(receipt)) uiAnchors.push(uiCompositionRoot);
+    } else if (isConstructiveFeatureRequest(input.intentSpec)) {
+      const detectedEntryPoint = detectPrimaryActiveEntryPoint(filesToCheck);
+      if (detectedEntryPoint && files.has(detectedEntryPoint)) {
+        const receipt = RepositoryObservationTools.observeUiCompositionAnchor(
+          input.repositoryId,
+          input.workspaceRoot,
+          detectedEntryPoint,
+        );
+        if (receipt && input.evidenceStore.recordObservation(receipt)) uiAnchors.push(detectedEntryPoint);
+      }
     }
 
     for (const runtimeRoute of supportsStaticRouteDiscovery(files) ? this.extractRuntimeRouteHints(input.intentSpec) : []) {

@@ -9,6 +9,8 @@ import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { MonorepoDescriptor } from "../workspace/MonorepoDetector";
 import type { CapabilityGrant, CapabilityAction } from "../runtime/CapabilityGuard";
+import { trustedUserRequest } from "../repository/TrustedTaskContext";
+import { TargetPathExtractor, ExtractedPathInfo } from "./TargetPathExtractor";
 
 export interface EvidenceBoundAuthorization {
   readonly authorizationId: string;
@@ -295,6 +297,27 @@ export class EvidenceBoundWriteSetResolver {
         continue;
       }
 
+      // Prospective-file observations carry write authority = 0 and cannot satisfy mutation evidence requirements alone
+      const nonProspectiveEvidence = evidenceValidation.evidence.filter(
+        (e) => !e.metadata?.prospective && (e.kind as string) !== "PROSPECTIVE_FILE"
+      );
+      const isExplicitCreatePath =
+        change.action === "create" &&
+        (intentSpec.explicitUserPaths?.some((p) => normalizeRepoPath(p) === normPath) ||
+          (trustedUserRequest(intentSpec) &&
+            TargetPathExtractor.extractWithProvenance(trustedUserRequest(intentSpec)!, {
+              repoFiles: Array.from(existingSet),
+            }).some((p: ExtractedPathInfo) => p.provenance === "EXPLICIT_USER_PATH" && normalizeRepoPath(p.path) === normPath)));
+
+      if (nonProspectiveEvidence.length === 0 && !isExplicitCreatePath) {
+        console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=PROSPECTIVE_EVIDENCE_ALONE_INSUFFICIENT`);
+        rejectionReasons.set(
+          normPath,
+          "PROSPECTIVE_EVIDENCE_ALONE_INSUFFICIENT: Prospective absence observation carries zero mutation authority and cannot independently satisfy evidence requirements"
+        );
+        continue;
+      }
+
       // 5. Check repository isolation
       const foreignRepoEvidence = evidenceValidation.evidence.some(
         (e) => e.repositoryId && e.repositoryId !== targetRepositoryId
@@ -367,6 +390,7 @@ export class EvidenceBoundWriteSetResolver {
         const existenceEvidence = evidenceValidation.evidence.filter(
           (e) =>
             normalizeRepoPath(e.filePath) === normPath &&
+            !e.metadata?.prospective &&
             (e.kind === "FILE" || e.provenance === "REPO_READ") &&
             e.provenance !== "SEMANTIC_SEARCH"
         );
@@ -404,6 +428,7 @@ export class EvidenceBoundWriteSetResolver {
         const existenceEvidence = evidenceValidation.evidence.filter(
           (e) =>
             normalizeRepoPath(e.filePath) === normPath &&
+            !e.metadata?.prospective &&
             (e.kind === "FILE" || e.provenance === "REPO_READ" || (e.kind === "DIAGNOSTIC" && !e.metadata?.stale))
         );
         if (existenceEvidence.length === 0) {

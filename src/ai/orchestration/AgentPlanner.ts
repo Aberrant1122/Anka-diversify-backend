@@ -26,6 +26,7 @@ import { PolicyContract } from "../contracts/PolicyContract";
 import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import type { RepositoryContextAssemblyResult } from "./RepositoryObserver";
 import { DestructiveTargetResolver } from "../contracts/DestructiveTargetResolver";
+import { DestructiveSafetyEvaluator } from "../classification/DestructiveSafetyEvaluator";
 import { detectCompoundIntent, buildFinalExecutionContract } from "../contracts/ExecutionContractBuilder";
 import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
 import { AuthorizedCapabilityScope, CapabilityAction, CapabilityGrant, CapabilityGuard } from "../runtime/CapabilityGuard";
@@ -158,6 +159,119 @@ export class AgentPlanner {
     const startedAt = performance.now();
     const clarificationData = TaskExecutionPlanManager.parseClarificationInput(input.request.message);
     const effectiveMessageForIntent = clarificationData?.initialRequest || input.request.message;
+    const requestContext = input.request.context as { taskExecutionPlan?: TaskExecutionPlan } | undefined;
+    const existingPlan = requestContext?.taskExecutionPlan;
+
+    if (existingPlan) {
+      let taskExecutionPlan = existingPlan;
+      if (clarificationData && clarificationData.clarificationQas.length > 0) {
+        const latestQa = clarificationData.clarificationQas[clarificationData.clarificationQas.length - 1];
+        taskExecutionPlan = await TaskExecutionPlanManager.reorderPlanWithClarification(
+          taskExecutionPlan,
+          latestQa.answer,
+          latestQa.question,
+        );
+      }
+
+      let activeStage = taskExecutionPlan.stages[taskExecutionPlan.currentStageIndex];
+      if (!activeStage || activeStage.status === "CANCELLED" || activeStage.status === "VERIFIED") {
+        const nextEligible = TaskExecutionPlanManager.getNextEligibleStage(taskExecutionPlan);
+        if (nextEligible) {
+          const nextIndex = taskExecutionPlan.stages.findIndex((s) => s.id === nextEligible.id);
+          if (nextIndex >= 0) {
+            taskExecutionPlan = { ...taskExecutionPlan, currentStageIndex: nextIndex };
+            activeStage = nextEligible;
+          }
+        }
+      }
+      activeStage = activeStage || taskExecutionPlan.stages[0];
+
+      const isDestructiveStage = Boolean(
+        activeStage.intent.destructive ||
+          activeStage.intent.taskType === "DELETE_FILE" ||
+          activeStage.intent.taskType === "DELETE_FOLDER"
+      );
+
+      let requiresClarification = false;
+      let clarificationQuestion: string | undefined;
+      let clarificationOptions: string[] | undefined;
+      let reasoning = `Active stage ${activeStage.id}: ${activeStage.intent.goal}`;
+      let targetPath = activeStage.intent.explicitUserPaths[0];
+
+      if (isDestructiveStage) {
+        const destructiveSafety = DestructiveSafetyEvaluator.evaluate(
+          activeStage.intent.goal,
+          input.canonicalExistingFiles,
+          {
+            taskType: activeStage.intent.taskType,
+            targetPath: activeStage.intent.explicitUserPaths[0],
+            priorVerifiedTargets: taskExecutionPlan.priorVerifiedTargets,
+          }
+        );
+        if (destructiveSafety.requiresClarification) {
+          requiresClarification = true;
+          clarificationQuestion = destructiveSafety.clarificationQuestion;
+          clarificationOptions = destructiveSafety.clarificationOptions;
+          reasoning = destructiveSafety.clarificationQuestion || "Destructive target is ambiguous or ungrounded.";
+        }
+      }
+
+      const intentResult: TaskClassificationResult = {
+        taskType: activeStage.intent.taskType,
+        risk: activeStage.intent.risk || "MEDIUM",
+        estimatedComplexity: activeStage.intent.estimatedComplexity || "MEDIUM",
+        intent: activeStage.intent.taskType as any,
+        targetPath,
+        confidence: 0.95,
+        requiresClarification,
+        question: requiresClarification ? clarificationQuestion : undefined,
+        options: requiresClarification ? clarificationOptions : undefined,
+        reasoning,
+        successCondition: activeStage.intent.successCondition || "BEHAVIORAL_VALIDATION",
+        stages: taskExecutionPlan.stages.map((s) => ({
+          id: s.id,
+          name: s.name,
+          taskType: s.intent.taskType,
+          goal: s.intent.goal,
+          targetPath: s.intent.explicitUserPaths[0],
+          dependsOn: s.dependsOn,
+        })),
+      };
+
+      const explicitUserPaths = activeStage.intent.explicitUserPaths || [];
+      const isStageEligible = TaskExecutionPlanManager.isStageEligible(taskExecutionPlan, activeStage.id);
+      const stageDependencyViolation = !isStageEligible && activeStage.status !== "RUNNING";
+      const failedOrPendingDependencies = stageDependencyViolation
+        ? (activeStage.dependsOn || []).filter((dependencyId) => {
+            const dependency = taskExecutionPlan.stages.find((stage) => stage.id === dependencyId);
+            return !dependency || dependency.status !== "VERIFIED";
+          })
+        : [];
+      const dependentStagesSkipped = stageDependencyViolation
+        ? TaskExecutionPlanManager.getDependentStages(taskExecutionPlan, activeStage.id)
+        : [];
+
+      if (!stageDependencyViolation && activeStage.status !== "CANCELLED") {
+        activeStage.status = "RUNNING";
+      }
+
+      const durationMs = performance.now() - startedAt;
+
+      return {
+        status: "READY",
+        clarificationData,
+        effectiveMessageForIntent: activeStage.intent.goal,
+        intentResult,
+        explicitUserPaths,
+        stageDependencyViolation,
+        taskExecutionPlan,
+        activeStage,
+        failedOrPendingDependencies,
+        dependentStagesSkipped,
+        durationMs,
+      };
+    }
+
     const intentResult = await IntentClassifier.classifyIntentAndAmbiguity(
       effectiveMessageForIntent,
       input.projectContext,
@@ -187,8 +301,7 @@ export class AgentPlanner {
       effectiveMessageForIntent,
       input.canonicalExistingFiles,
     );
-    const requestContext = input.request.context as { taskExecutionPlan?: TaskExecutionPlan } | undefined;
-    let taskExecutionPlan = requestContext?.taskExecutionPlan || TaskExecutionPlanManager.createTaskExecutionPlan(
+    let taskExecutionPlan = TaskExecutionPlanManager.createTaskExecutionPlan(
       effectiveMessageForIntent,
       intentResult,
       explicitUserPaths,
