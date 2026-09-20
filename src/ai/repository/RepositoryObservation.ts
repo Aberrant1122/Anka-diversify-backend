@@ -11,6 +11,7 @@ import type {
 import { fileDefinesSymbol, resolveLocalImportEdges } from "./DeterministicImportResolver";
 import { describeFrameworkRoute, frameworkRouteMatches } from "./FrameworkRouteMatcher";
 import { discoverStaticApiRegistrations, testExercisesRoute } from "./StaticApiArchitecture";
+import { detectPrimaryActiveEntryPoint } from "../planning/RepositoryArchitectureDetector";
 
 export interface RepositoryObservationReceipt {
   readonly repositoryId: string;
@@ -187,7 +188,9 @@ export class RepositoryObservationTools {
       if (!observed) return null;
       const bootstrapPattern = /^(?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?(?:main|index)\.[cm]?[jt]sx?$/i;
       const mountPattern = /(?:\bcreateRoot\s*\(|\bReactDOM\.render\s*\(|\bcreateApp\s*\([^)]*\)\.mount\s*\(|\bnew\s+Vue\s*\()/;
-      if (!bootstrapPattern.test(observed.normalizedPath) || !mountPattern.test(observed.content)) return null;
+      const isBootstrapRoot = bootstrapPattern.test(observed.normalizedPath) && mountPattern.test(observed.content);
+      const isDetectedActiveEntry = detectPrimaryActiveEntryPoint([observed.normalizedPath]) !== null;
+      if (!isBootstrapRoot && !isDetectedActiveEntry) return null;
       return FileSystemObservationReceipt.create(repositoryId, path.resolve(workspaceRoot), {
         repositoryRevision: observed.revision,
         kind: "ENTRY_POINT",

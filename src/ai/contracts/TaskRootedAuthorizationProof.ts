@@ -5,11 +5,13 @@ import { authoritySnapshot, withAuthoritySnapshot } from "../repository/Authorit
 import { repositoryPath } from "../repository/RepositoryBoundary";
 import { trustedUserRequest } from "../repository/TrustedTaskContext";
 import { TargetPathExtractor } from "./TargetPathExtractor";
-import { TaskAnchorResolver } from "../repository/TaskAnchorResolver";
+import { TaskAnchorResolver, isConstructiveFeatureRequest } from "../repository/TaskAnchorResolver";
 import { isTrustedDiagnosticEvidence } from "../validation/DiagnosticNormalizer";
 import { DestructiveTargetResolver } from "./DestructiveTargetResolver";
 import { ResolvedTaskTarget } from "../shared/TaskExecutionPlan";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
+import { isExistingPrimaryUIRefinement } from "../planning/RepositoryArchitectureDetector";
+import path from "path";
 
 export interface TaskRootedAuthorizationProof {
   readonly action: "create" | "modify" | "delete";
@@ -98,6 +100,194 @@ export class TaskRootedAuthorizationVerifier {
     extract(trustedTarget);
 
     return eligible;
+  }
+
+  public static isEligibleConstructiveCreateScope(
+    candidate: string,
+    anchorFilePath: string,
+    _repositoryFiles: readonly string[] = [],
+    intent?: TaskIntentSpec
+  ): boolean {
+    const normCandidate = normalizeRepoPath(candidate);
+
+    // 1. Must be a safe relative source/component extension
+    if (!/\.(?:tsx|jsx|ts|js|vue|svelte|css|scss|module\.css)$/i.test(normCandidate)) return false;
+
+    // 2. Sensitive keywords: fail-closed against security, auth, admin, billing, payments, fraud, bypass, secrets
+    const SENSITIVE_PATTERN = /(?:^|\/|_|-|\.)(?:security|auth|permissions?|credentials?|secrets?|admin|billing|payments?|fraud|bypass|privilege|tokens?)(?:\/|_|-|\.|$)/i;
+    if (SENSITIVE_PATTERN.test(normCandidate)) {
+      return false;
+    }
+
+    if (
+      /(?:^|\/)(?:\.github|\.vscode|scripts|docker|ci|config|migrations)(?:\/|$)/i.test(
+        normCandidate
+      )
+    ) {
+      return false;
+    }
+
+    // 3. Must reside within bounded UI / component / feature directory derived from repository topology and anchor
+    const isComponentScope =
+      /^(?:(?:apps\/[^\/]+\/)?(?:src\/)?(?:components|ui|features|widgets)\/|(?:app\/components\/|src\/app\/components\/))/i.test(
+        normCandidate
+      );
+
+    const anchorDir = path.dirname(anchorFilePath).replace(/\\/g, "/");
+    const isAnchorSubScope =
+      normCandidate.startsWith(`${anchorDir}/components/`) ||
+      normCandidate.startsWith(`${anchorDir}/features/`) ||
+      normCandidate.startsWith(`${anchorDir}/ui/`);
+
+    if (!isComponentScope && !isAnchorSubScope) {
+      return false;
+    }
+
+    // Bounded depth: max 5 path segments total (e.g. apps/web/src/components/MyWidget.tsx)
+    const segments = normCandidate.split("/");
+    if (segments.length > 5) return false;
+
+    // 4. Deterministic Task-to-Candidate Relationship
+    // If candidate was an explicit user path in intent, authority is grounded by explicit request
+    if (intent) {
+      const explicitPaths = new Set(
+        (intent.explicitUserPaths || []).map(normalizeRepoPath)
+      );
+      if (explicitPaths.has(normCandidate)) {
+        return true;
+      }
+
+      const req = trustedUserRequest(intent) || "";
+      const goal = intent.goal || "";
+      const opSubjects = (intent.operations || []).map((o) => o.subject || "").join(" ");
+      const combinedTaskText = `${req} ${goal} ${opSubjects}`.trim();
+      if (!combinedTaskText) return false;
+
+      const singularize = (w: string): string => {
+        if (w.length <= 3) return w;
+        if (w.endsWith("ies") && w.length > 4) return w.slice(0, -3) + "y";
+        if (w.endsWith("es") && !w.endsWith("ies") && (w.endsWith("shes") || w.endsWith("ches") || w.endsWith("sses") || w.endsWith("xes"))) {
+          return w.slice(0, -2);
+        }
+        if (w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us") && !wordIsSpecialPlural(w)) {
+          return w.slice(0, -1);
+        }
+        return w;
+      };
+
+      const wordIsSpecialPlural = (w: string) => w === "this" || w === "status" || w === "canvas";
+
+      const rawTaskWords = TargetPathExtractor.tokenizeEntity(combinedTaskText);
+      const substantiveTaskWords = rawTaskWords.filter(
+        (w) =>
+          !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+          !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+          !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+          !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+          !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w)
+      );
+
+      const taskTokens = new Set(substantiveTaskWords.map(singularize));
+      if (taskTokens.size === 0) return false;
+
+      const UI_WRAPPER_TOKENS = new Set([
+        "component",
+        "widget",
+        "panel",
+        "view",
+        "screen",
+        "page",
+        "modal",
+        "card",
+        "item",
+        "list",
+        "container",
+        "element",
+        "wrapper",
+        "header",
+        "footer",
+        "button",
+        "bar",
+        "dialog",
+        "drawer",
+        "table",
+        "row",
+        "form",
+        "input",
+        "box",
+        "banner",
+      ]);
+
+      const baseName = path.basename(normCandidate);
+      const stem = baseName.replace(/\.[^.]+$/, "");
+      const stemTokens = TargetPathExtractor.tokenizeEntity(stem).map(singularize);
+
+      const dirSegments = path
+        .dirname(normCandidate)
+        .split("/")
+        .filter(
+          (s) =>
+            s &&
+            ![
+              "src",
+              "apps",
+              "app",
+              "components",
+              "ui",
+              "features",
+              "widgets",
+              ".",
+            ].includes(s)
+        );
+      const dirTokens = dirSegments.flatMap((s) =>
+        TargetPathExtractor.tokenizeEntity(s).map(singularize)
+      );
+
+      const allCandidateTokens = [...dirTokens, ...stemTokens];
+      if (allCandidateTokens.length === 0) return false;
+
+      // Check A: No foreign domain tokens (every candidate token must be in UI_WRAPPER_TOKENS or in taskTokens)
+      for (const ct of allCandidateTokens) {
+        if (!UI_WRAPPER_TOKENS.has(ct) && !taskTokens.has(ct)) {
+          return false;
+        }
+      }
+
+      // Check B: Sufficient task grounding
+      const domainTaskTokens = new Set(
+        [...taskTokens].filter((t) => !UI_WRAPPER_TOKENS.has(t))
+      );
+      const domainCandidateTokens = allCandidateTokens.filter(
+        (t) => !UI_WRAPPER_TOKENS.has(t)
+      );
+
+      if (domainTaskTokens.size > 0) {
+        // Candidate cannot be purely generic wrapper tokens
+        if (domainCandidateTokens.length === 0) return false;
+
+        // If task specifies multiple domain tokens (e.g. "user", "profile"), candidate cannot match only 1 token (e.g. User.tsx)
+        if (domainTaskTokens.size >= 2) {
+          const matchedDomainTaskTokens = [...domainTaskTokens].filter((dt) =>
+            domainCandidateTokens.includes(dt)
+          );
+          if (matchedDomainTaskTokens.length < domainTaskTokens.size) {
+            return false;
+          }
+        } else {
+          // Exactly 1 domain task token: candidate must match it
+          const singleDomainToken = [...domainTaskTokens][0];
+          if (!domainCandidateTokens.includes(singleDomainToken)) {
+            return false;
+          }
+        }
+      } else {
+        // Task had only wrapper tokens (e.g. "add panel"): candidate must match task wrapper tokens
+        const matched = allCandidateTokens.some((t) => taskTokens.has(t));
+        if (!matched) return false;
+      }
+    }
+
+    return true;
   }
 
   public static roots(store: RepositoryEvidenceStore, intent: TaskIntentSpec): RepositoryEvidence[] {
@@ -213,6 +403,35 @@ export class TaskRootedAuthorizationVerifier {
         }
       }
     }
+
+    const request = trustedUserRequest(intent) ?? "";
+    const isUiRefinement = isExistingPrimaryUIRefinement(request);
+
+    if (action === "create" && !isDestructiveTask && !isUiRefinement && isConstructiveFeatureRequest(intent)) {
+      for (const root of roots) {
+        if (
+          root.kind === "ENTRY_POINT" &&
+          this.isEligibleConstructiveCreateScope(candidate, root.filePath, [...snapshot.files.keys()], intent)
+        ) {
+          const prospectiveReceipt = RepositoryObservationTools.observeProspectiveFile(
+            store.getRepositoryId(),
+            workspace,
+            candidate
+          );
+          if (prospectiveReceipt) {
+            store.recordObservation(prospectiveReceipt);
+          }
+          return Object.freeze({
+            action: "create",
+            candidatePath: candidate,
+            rootEvidenceId: root.id,
+            edgeEvidenceIds: Object.freeze([]),
+            repositoryRevision: snapshot.revision,
+          });
+        }
+      }
+    }
+
     for (const root of roots) {
       const queue = [{ file: root.filePath, ids: [] as string[] }];
       const visited = new Set<string>();

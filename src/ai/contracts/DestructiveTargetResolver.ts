@@ -2,7 +2,7 @@ import path from "path";
 import { TargetPathExtractor } from "./TargetPathExtractor";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
-import { ResolvedTaskTarget, FileActionObligation } from "../shared/TaskExecutionPlan";
+import { ResolvedTaskTarget, FileActionObligation, PriorVerifiedTarget } from "../shared/TaskExecutionPlan";
 import {
   getFileContent,
   extractExportedSymbols,
@@ -41,6 +41,7 @@ export interface DestructiveResolveOptions {
   knowledgeGraph?: ExtendedKnowledgeGraph | null;
   selectedLogicalTarget?: string;
   autonomous?: boolean;
+  priorVerifiedTargets?: PriorVerifiedTarget[];
 }
 
 export interface FeatureCluster {
@@ -346,6 +347,31 @@ export class DestructiveTargetResolver {
       );
 
       if (codeMatches.length === 0) {
+        const exactPriorTarget = (options?.priorVerifiedTargets || []).find((pvt) => {
+          if (pvt.action !== "delete") return false;
+          const normPvtPath = normalizeRepoPath(pvt.path);
+          if (normPvtPath === normalizeRepoPath(token)) return true;
+          const pvtStem = path.basename(normPvtPath).replace(/\.[^.]+$/, "");
+          return (
+            TargetPathExtractor.normalizeEntityKey(pvtStem) === key &&
+            pvtStem.toLowerCase() === token.toLowerCase()
+          );
+        });
+
+        if (exactPriorTarget) {
+          const normPvtPath = normalizeRepoPath(exactPriorTarget.path);
+          return {
+            status: "RESOLVED",
+            targetCertainty: "GROUNDED_UNIQUE",
+            candidatePaths: [normPvtPath],
+            targetEvidenceIds: [],
+            reason: `Target "${normPvtPath}" was already verified deleted in a prior completed stage.`,
+            isDestructive: false,
+            isInFileModification: false,
+            requiresClarification: false,
+          };
+        }
+
         if (!firstNonexistentResult) {
           firstNonexistentResult = {
             status: "NOT_FOUND",

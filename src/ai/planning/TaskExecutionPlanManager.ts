@@ -178,7 +178,103 @@ export class TaskExecutionPlanManager {
     clarificationQuestion?: string,
     openaiClient?: any
   ): Promise<TaskExecutionPlan> {
-    if (!plan.stages || plan.stages.length <= 1) {
+    if (!plan.stages || plan.stages.length === 0) {
+      return plan;
+    }
+
+    const trimmedAnswer = (clarificationAnswer || "").trim();
+
+    // Negation check: "do not cancel", "don't cancel deletion", "continue, do not abort" must NOT cancel
+    const isNegated =
+      /\b(?:do\s+not|don'?t|never|not|no\s+need\s+to)\b.*\b(?:cancel|abort|skip|stop)\b/i.test(trimmedAnswer) ||
+      /\bcontinue\b/i.test(trimmedAnswer);
+
+    // Answer check: Must explicitly express cancellation of the destructive stage. Bare "no" must NOT cancel.
+    const isExplicitCancellation =
+      !isNegated &&
+      (/\b(?:cancel|abort|skip)\b.*\b(?:deletion|delete|removal|remove|stage|operation)\b/i.test(trimmedAnswer) ||
+        /^(?:cancel\s+deletion|cancel\s+delete|cancel\s+removal|abort\s+deletion)$/i.test(trimmedAnswer));
+
+    // Identify the specific destructive stage associated with this clarification
+    const activeOrCurrentStage = plan.stages[plan.currentStageIndex];
+    const targetDestructiveStage =
+      (activeOrCurrentStage &&
+        (activeOrCurrentStage.intent.destructive ||
+          activeOrCurrentStage.intent.taskType === "DELETE_FILE" ||
+          activeOrCurrentStage.intent.taskType === "DELETE_FOLDER"))
+        ? activeOrCurrentStage
+        : plan.stages.find(
+            (s) =>
+              (s.status === "PENDING" || s.status === "RUNNING") &&
+              (s.intent.destructive ||
+                s.intent.taskType === "DELETE_FILE" ||
+                s.intent.taskType === "DELETE_FOLDER")
+          );
+
+    const isDestructiveStage = Boolean(
+      targetDestructiveStage &&
+        (targetDestructiveStage.intent.destructive ||
+          targetDestructiveStage.intent.taskType === "DELETE_FILE" ||
+          targetDestructiveStage.intent.taskType === "DELETE_FOLDER")
+    );
+
+    const isDestructiveContext =
+      isDestructiveStage &&
+      ((clarificationQuestion && /\b(?:delete|deletion|remove|removal|target|matching|file)\b/i.test(clarificationQuestion)) ||
+        /\b(?:deletion|delete|removal|remove)\b/i.test(trimmedAnswer));
+
+    if (isExplicitCancellation && isDestructiveContext && targetDestructiveStage) {
+        const updatedStages = plan.stages.map((s) => {
+          if (s.id === targetDestructiveStage.id) {
+            return { ...s, status: "CANCELLED" as StageExecutionStatus };
+          }
+          // If a sibling stage only had an artificial sequential dependency on the cancelled stage,
+          // relieve the dependency so independent constructive work can proceed.
+          if (
+            s.dependsOn?.includes(targetDestructiveStage.id) &&
+            !s.intent.destructive &&
+            s.intent.taskType !== "DELETE_FILE" &&
+            s.intent.taskType !== "DELETE_FOLDER"
+          ) {
+            return {
+              ...s,
+              dependsOn: s.dependsOn.filter((depId) => depId !== targetDestructiveStage.id),
+            };
+          }
+          return s;
+        });
+
+        const intermediatePlan: TaskExecutionPlan = {
+          ...plan,
+          stages: updatedStages,
+        };
+
+        const nextEligible = this.getNextEligibleStage(intermediatePlan);
+        const nextIndex = nextEligible
+          ? updatedStages.findIndex((s) => s.id === nextEligible.id)
+          : updatedStages.findIndex((s) => s.status === "PENDING");
+
+        const hasPending = updatedStages.some((s) => s.status === "PENDING");
+        const hasFailed = updatedStages.some((s) => s.status === "FAILED");
+        const anyVerified = updatedStages.some((s) => s.status === "VERIFIED");
+
+        let status: TaskExecutionPlan["status"] = "RUNNING";
+        if (nextEligible) {
+          status = "RUNNING";
+        } else if (hasPending || hasFailed || !anyVerified) {
+          status = "FAILED";
+        } else {
+          status = "COMPLETED";
+        }
+
+        return {
+          ...intermediatePlan,
+          currentStageIndex: nextIndex >= 0 ? nextIndex : plan.currentStageIndex,
+          status,
+        };
+      }
+
+    if (plan.stages.length <= 1) {
       return plan;
     }
 
@@ -313,29 +409,50 @@ Respond ONLY with valid JSON:
     nextStage: TaskExecutionStage | null;
   } {
     const updatedStages = [...plan.stages];
-    if (updatedStages[plan.currentStageIndex]) {
+    if (
+      updatedStages[plan.currentStageIndex] &&
+      updatedStages[plan.currentStageIndex].status !== "CANCELLED"
+    ) {
       updatedStages[plan.currentStageIndex] = {
         ...updatedStages[plan.currentStageIndex],
         status: "VERIFIED",
       };
     }
 
-    const nextIndex = plan.currentStageIndex + 1;
-    const hasNext = nextIndex < updatedStages.length;
-
-    const nextStage = hasNext ? updatedStages[nextIndex] : null;
-    const newStatus = hasNext ? "RUNNING" : "COMPLETED";
-
-    const updatedPlan: TaskExecutionPlan = {
+    const intermediatePlan: TaskExecutionPlan = {
       ...plan,
       stages: updatedStages,
-      currentStageIndex: nextIndex,
-      status: newStatus,
     };
 
+    const nextEligible = this.getNextEligibleStage(intermediatePlan);
+    if (nextEligible) {
+      const nextIndex = updatedStages.findIndex((s) => s.id === nextEligible.id);
+      return {
+        plan: {
+          ...intermediatePlan,
+          currentStageIndex: nextIndex,
+          status: "RUNNING",
+        },
+        nextStage: nextEligible,
+      };
+    }
+
+    const hasPending = updatedStages.some((s) => s.status === "PENDING");
+    const hasFailed = updatedStages.some((s) => s.status === "FAILED");
+    const anyVerified = updatedStages.some((s) => s.status === "VERIFIED");
+
+    let terminalStatus: TaskExecutionPlan["status"] = "COMPLETED";
+    if (hasPending || hasFailed || !anyVerified) {
+      terminalStatus = "FAILED";
+    }
+
     return {
-      plan: updatedPlan,
-      nextStage,
+      plan: {
+        ...intermediatePlan,
+        currentStageIndex: updatedStages.length,
+        status: terminalStatus,
+      },
+      nextStage: null,
     };
   }
 
@@ -358,7 +475,7 @@ Respond ONLY with valid JSON:
    * Evaluates whether a given stage is eligible to execute according to TaskExecutionPlan dependency structure:
    * 1. Stage status must be "PENDING".
    * 2. Every stage referenced in stage.dependsOn must exist and have status "VERIFIED".
-   * If any dependency is PENDING, RUNNING, or FAILED, returns false.
+   * If any dependency is PENDING, RUNNING, CANCELLED, or FAILED, returns false.
    */
   public static isStageEligible(plan: TaskExecutionPlan, stageId: string): boolean {
     const stage = plan.stages.find((s) => s.id === stageId);
@@ -367,9 +484,9 @@ Respond ONLY with valid JSON:
 
     for (const depId of stage.dependsOn || []) {
       const depStage = plan.stages.find((s) => s.id === depId);
-      if (!depStage || depStage.status !== "VERIFIED") {
-        return false;
-      }
+      if (!depStage) return false;
+      if (depStage.status === "VERIFIED") continue;
+      return false;
     }
     return true;
   }

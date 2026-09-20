@@ -626,9 +626,13 @@ export class AgentPipeline {
         TaskExecutionPlanManager.clearPriorVerifiedTargets(taskExecutionPlan),
       );
       const updatedPlan = advancedPlanResult.plan;
-      const compoundStatus = updatedPlan.stages.every((s) => s.status === "VERIFIED")
-        ? "VERIFIED"
-        : "RUNNING";
+      const compoundStatus =
+        updatedPlan.stages.every((s) => s.status === "VERIFIED" || s.status === "CANCELLED") &&
+        updatedPlan.stages.some((s) => s.status === "VERIFIED")
+          ? "VERIFIED"
+          : updatedPlan.status === "FAILED"
+          ? "FAILED"
+          : "RUNNING";
 
       const explanation =
         `[Deterministic No-Op: ALREADY_SATISFIED] An authentic backend diagnostic proof objectively establishes the requested condition for the current repository revision.`;
@@ -1119,6 +1123,21 @@ export class AgentPipeline {
 
     if (options?.persistConversation !== false && !session.title) await MemoryPersistence.updateSessionTitle(session.id, request.message);
 
+    const updatedExecutionPlan = gateSuccess && validation.verifiedCheckpoint
+      ? TaskExecutionPlanManager.advancePlanStage(
+          TaskExecutionPlanManager.recordVerifiedCheckpointTargets(taskExecutionPlan, validation.verifiedCheckpoint),
+        ).plan
+      : TaskExecutionPlanManager.failStage(taskExecutionPlan, activeStage.id);
+
+    const compoundTaskStatus = gateSuccess
+      ? (updatedExecutionPlan.stages.every((s) => s.status === "VERIFIED" || s.status === "CANCELLED") &&
+         updatedExecutionPlan.stages.some((s) => s.status === "VERIFIED")
+          ? "VERIFIED"
+          : updatedExecutionPlan.status === "FAILED"
+          ? "FAILED"
+          : "RUNNING")
+      : "FAILED";
+
     return {
       explanation: gateSuccess
         ? combinedExplanation + "\n\n" + auditResult.summary + checklistMarkdown
@@ -1133,14 +1152,8 @@ export class AgentPipeline {
       targetPath: intentResult.targetPath,
       confidence: finalConfidence,
       roadmap: roadmapAndDiff.roadmap,
-      taskExecutionPlan: gateSuccess && validation.verifiedCheckpoint
-        ? TaskExecutionPlanManager.advancePlanStage(
-            TaskExecutionPlanManager.recordVerifiedCheckpointTargets(taskExecutionPlan, validation.verifiedCheckpoint),
-          ).plan
-        : TaskExecutionPlanManager.failStage(taskExecutionPlan, activeStage.id),
-      compoundTaskStatus: gateSuccess
-        ? (taskExecutionPlan.stages.every((s) => s.status === "VERIFIED") ? "VERIFIED" : "RUNNING")
-        : "FAILED",
+      taskExecutionPlan: updatedExecutionPlan,
+      compoundTaskStatus,
       failedStage: gateSuccess ? undefined : activeStage.id,
       dependentStagesSkipped: gateSuccess
         ? undefined

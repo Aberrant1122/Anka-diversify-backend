@@ -45,7 +45,28 @@ export class DeterministicRelationEvidenceAcquirer {
     for (const candidate of candidates) {
       // Authenticate candidate existence only; this is deliberately not a grant.
       const fileReceipt = RepositoryObservationTools.observeFile(input.repositoryId, input.workspaceRoot, candidate);
-      if (fileReceipt) input.evidenceStore.recordObservation(fileReceipt);
+      if (fileReceipt) {
+        input.evidenceStore.recordObservation(fileReceipt);
+      } else if (!knownFiles.has(candidate)) {
+        const isEligibleCreate = [...anchors].some((anchor) =>
+          TaskRootedAuthorizationVerifier.isEligibleConstructiveCreateScope(
+            candidate,
+            anchor,
+            input.existingFiles,
+            input.intentSpec
+          )
+        );
+        if (isEligibleCreate) {
+          const prospectiveReceipt = RepositoryObservationTools.observeProspectiveFile(
+            input.repositoryId,
+            input.workspaceRoot,
+            candidate
+          );
+          if (prospectiveReceipt) {
+            input.evidenceStore.recordObservation(prospectiveReceipt);
+          }
+        }
+      }
     }
 
     const bestDepth = new Map<string, number>();
@@ -174,6 +195,19 @@ export class DeterministicRelationEvidenceAcquirer {
             (evidence.filePath === candidate || (evidence.kind === "IMPORT" && evidence.sourceFile === candidate)),
         )
         .map((evidence) => evidence.id);
+
+      if (!knownFiles.has(candidate)) {
+        const proof = TaskRootedAuthorizationVerifier.derive(
+          input.evidenceStore,
+          input.intentSpec,
+          candidate,
+          "create"
+        );
+        if (proof && proof.rootEvidenceId && !evidenceIds.includes(proof.rootEvidenceId)) {
+          evidenceIds.push(proof.rootEvidenceId);
+        }
+      }
+
       if (evidenceIds.length > 0) acquiredByCandidate.set(candidate, Object.freeze(evidenceIds));
     }
     return acquiredByCandidate;
