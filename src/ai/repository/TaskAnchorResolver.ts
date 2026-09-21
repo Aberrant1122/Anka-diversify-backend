@@ -1,5 +1,5 @@
 import { authoritySnapshot, withAuthoritySnapshot } from "./AuthorityWorktree";
-import { trustedUserRequest } from "./TrustedTaskContext";
+import { trustedUserRequest, trustedStageAuthorizationContext } from "./TrustedTaskContext";
 import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { RepositoryEvidenceStore } from "./RepositoryEvidenceStore";
 import { RepositoryObservationTools } from "./RepositoryObservation";
@@ -23,7 +23,7 @@ export interface TaskAnchorResolution {
 }
 
 function taskText(intentSpec: TaskIntentSpec): string {
-  return trustedUserRequest(intentSpec) ?? "";
+  return trustedStageAuthorizationContext(intentSpec) ?? trustedUserRequest(intentSpec) ?? "";
 }
 
 export function isConstructiveFeatureRequest(intentSpec: TaskIntentSpec): boolean {
@@ -36,13 +36,15 @@ export function isConstructiveFeatureRequest(intentSpec: TaskIntentSpec): boolea
   ) {
     return false;
   }
-  const request = trustedUserRequest(intentSpec);
+  const stageContext = trustedStageAuthorizationContext(intentSpec);
+  const userRequest = trustedUserRequest(intentSpec);
+  const request = stageContext ?? userRequest;
   if (!request) return false;
 
   if (isExistingPrimaryUIRefinement(request)) return false;
 
-  const text = `${request} ${intentSpec.goal || ""}`;
-  const hasConstructiveKeywords = /\b(add|create|implement|build|introduce|new)\b.*\b(list|task|component|widget|page|view|panel|modal|item|element|screen)\b/i.test(text);
+  const text = `${userRequest || ""} ${stageContext || ""} ${intentSpec.goal || ""}`;
+  const hasConstructiveKeywords = /\b(add|create|implement|build|introduce|new)\b.*\b(list|task|component|widget|page|view|panel|modal|item|element|screen|profile|cart|dashboard)\b/i.test(text);
 
   return hasConstructiveKeywords;
 }
@@ -52,7 +54,8 @@ export class TaskAnchorResolver {
     intentSpec: TaskIntentSpec,
     files: ReadonlyMap<string, string>,
   ): string | null {
-    if (intentSpec.destructive || !isExistingPrimaryUIRefinement(taskText(intentSpec))) return null;
+    const isUi = isExistingPrimaryUIRefinement(trustedUserRequest(intentSpec) ?? "") || isExistingPrimaryUIRefinement(trustedStageAuthorizationContext(intentSpec) ?? "");
+    if (intentSpec.destructive || !isUi) return null;
 
     const bootstrapPattern = /^(?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?(?:main|index)\.[cm]?[jt]sx?$/i;
     const mountPattern = /(?:\bcreateRoot\s*\(|\bReactDOM\.render\s*\(|\bcreateApp\s*\([^)]*\)\.mount\s*\(|\bnew\s+Vue\s*\()/;

@@ -73,6 +73,8 @@ export class TargetPathExtractor {
     "former",
     "existing",
     "default",
+    "new",
+    "current",
   ]);
 
   // Vague target nouns that do not form concrete repository entities
@@ -196,6 +198,31 @@ export class TargetPathExtractor {
     "of",
     "from",
     "with",
+    "if",
+    "not",
+    "then",
+    "otherwise",
+    "else",
+    "into",
+    "on",
+    "by",
+    "as",
+    "at",
+  ]);
+
+  // Generic prose words describing repository or project context rather than distinct domain entities
+  public static readonly GENERIC_PROSE_WORDS = new Set([
+    "project",
+    "projects",
+    "application",
+    "applications",
+    "repository",
+    "repositories",
+    "repo",
+    "repos",
+    "codebase",
+    "app",
+    "apps",
   ]);
 
   /**
@@ -674,9 +701,9 @@ export class TargetPathExtractor {
     const actionPattern = Array.from(this.COMMAND_VERBS).join("|");
 
     // 2. Descriptive Modifier + Entity phrasing:
-    // e.g. "remove the deprecated activity widget", "delete old calculator", "replace the deprecated activity widget with"
+    // e.g. "remove the deprecated activity widget", "delete old calculator", "create a new todo list"
     const descriptiveRegex = new RegExp(
-      `\\b(?:${actionPattern})\\s+(?:the\\s+|a\\s+|an\\s+)?(?:deprecated|legacy|old|obsolete|unused|outdated|former)\\s+([a-zA-Z0-9_\\-]+(?:\\s+[a-zA-Z0-9_\\-]+)?)\\b`,
+      `\\b(?:${actionPattern})\\s+(?:the\\s+|a\\s+|an\\s+)?(?:deprecated|legacy|old|obsolete|unused|outdated|former|new)\\s+([a-zA-Z0-9_\\-]+(?:\\s+[a-zA-Z0-9_\\-]+)?)\\b`,
       "gi"
     );
     let dMatch: RegExpExecArray | null;

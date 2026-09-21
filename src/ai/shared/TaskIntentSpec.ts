@@ -27,6 +27,7 @@ export interface TaskIntentSpec {
   question?: string;
   options?: string[];
   resolvedTarget?: ResolvedTaskTarget;
+  stageAuthorizationContext?: string;
 }
 
 /**

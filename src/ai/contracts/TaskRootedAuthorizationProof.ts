@@ -3,8 +3,9 @@ import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { RepositoryEvidence, RepositoryEvidenceStore } from "../repository/RepositoryEvidenceStore";
 import { authoritySnapshot, withAuthoritySnapshot } from "../repository/AuthorityWorktree";
 import { repositoryPath } from "../repository/RepositoryBoundary";
-import { trustedUserRequest } from "../repository/TrustedTaskContext";
+import { trustedUserRequest, trustedStageAuthorizationContext, trustedStageAuthorizationClause, bindStageAuthorizationClause } from "../repository/TrustedTaskContext";
 import { TargetPathExtractor } from "./TargetPathExtractor";
+import { UserClauseExtractor } from "./UserClauseAuthority";
 import { TaskAnchorResolver, isConstructiveFeatureRequest } from "../repository/TaskAnchorResolver";
 import { isTrustedDiagnosticEvidence } from "../validation/DiagnosticNormalizer";
 import { DestructiveTargetResolver } from "./DestructiveTargetResolver";
@@ -31,6 +32,24 @@ export interface TaskRootedAuthorizationProof {
  * destructive target may additionally authorize one exact incoming importer for
  * its resolver-issued DEPENDENCY_CLEANUP obligation.
  */
+const singularize = (w: string): string => {
+  if (w.length <= 3) return w;
+  if (w.endsWith("ies") && w.length > 4) return w.slice(0, -3) + "y";
+  if (
+    w.endsWith("es") &&
+    !w.endsWith("ies") &&
+    (w.endsWith("shes") || w.endsWith("ches") || w.endsWith("sses") || w.endsWith("xes"))
+  ) {
+    return w.slice(0, -2);
+  }
+  if (w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us") && !wordIsSpecialPlural(w)) {
+    return w.slice(0, -1);
+  }
+  return w;
+};
+
+const wordIsSpecialPlural = (w: string) => w === "this" || w === "status" || w === "canvas";
+
 export class TaskRootedAuthorizationVerifier {
   private static readonly destructiveTargetCache = new WeakMap<
     TaskIntentSpec,
@@ -42,7 +61,7 @@ export class TaskRootedAuthorizationVerifier {
     intent: TaskIntentSpec,
   ): ResolvedTaskTarget | undefined {
     const workspace = store.getDefaultWorkspace();
-    const request = trustedUserRequest(intent);
+    const request = trustedStageAuthorizationContext(intent) ?? trustedUserRequest(intent);
     if (!workspace || !request || !intent.destructive) return undefined;
 
     const snapshot = authoritySnapshot(workspace);
@@ -102,6 +121,216 @@ export class TaskRootedAuthorizationVerifier {
     return eligible;
   }
 
+  public static readonly UI_WRAPPER_TOKENS = new Set([
+    "component",
+    "widget",
+    "panel",
+    "view",
+    "screen",
+    "page",
+    "modal",
+    "card",
+    "item",
+    "list",
+    "container",
+    "element",
+    "wrapper",
+    "header",
+    "footer",
+    "button",
+    "bar",
+    "dialog",
+    "drawer",
+    "table",
+    "row",
+    "form",
+    "input",
+    "box",
+    "banner",
+    "dashboard",
+  ]);
+
+  public static deriveCanonicalStageEntity(intent?: TaskIntentSpec): {
+    entityTokens: string[];
+    canonicalKey?: string;
+    entityName?: string;
+    allSubstantiveTokens: string[];
+  } {
+    if (!intent) {
+      return { entityTokens: [], allSubstantiveTokens: [] };
+    }
+
+    const authenticUserReq = trustedUserRequest(intent);
+    let boundClause = trustedStageAuthorizationClause(intent);
+
+    if (!boundClause && authenticUserReq) {
+      const userClauses = UserClauseExtractor.extractClauses(authenticUserReq);
+      if (userClauses.length === 1) {
+        boundClause = userClauses[0];
+        bindStageAuthorizationClause(intent, boundClause);
+      } else if (userClauses.length > 1) {
+        const boundResult = UserClauseExtractor.bindStageToClause(
+          {
+            taskType: intent.taskType,
+            goal: intent.goal,
+            name: intent.goal,
+            targetPath: intent.explicitUserPaths?.[0],
+          },
+          userClauses
+        );
+        if (boundResult.clause) {
+          boundClause = boundResult.clause;
+          bindStageAuthorizationClause(intent, boundClause);
+        }
+      }
+    }
+
+    const ceilingTokens: Set<string> = boundClause
+      ? new Set(boundClause.entityTokens)
+      : authenticUserReq && UserClauseExtractor.extractClauses(authenticUserReq).length <= 1
+      ? new Set(
+          TargetPathExtractor.tokenizeEntity(authenticUserReq)
+            .map(singularize)
+            .filter(
+              (w) =>
+                !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+                !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+                !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+                !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+                !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w) &&
+                !TargetPathExtractor.GENERIC_PROSE_WORDS.has(w)
+            )
+        )
+      : new Set();
+
+    const isSupportedByAuthenticUser = (tokens: string[]): boolean => {
+      if (ceilingTokens.size === 0) return false;
+      const domainTokens = tokens.filter((t) => !TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(t));
+      if (domainTokens.length > 0) {
+        return domainTokens.every((t) => ceilingTokens.has(t));
+      }
+      return tokens.every((t) => ceilingTokens.has(t));
+    };
+
+    // 1. Explicit operation subject belonging to active stage
+    if (intent.operations) {
+      for (const op of intent.operations) {
+        if (op.kind === "CREATE" && op.subject && typeof op.subject === "string") {
+          const cleanSubject = op.subject.trim();
+          const isFilePath = /\.[a-zA-Z0-9]+$/.test(cleanSubject) || cleanSubject.includes("/");
+          const entityStem = isFilePath
+            ? path.basename(cleanSubject).replace(/\.[^.]+$/, "")
+            : cleanSubject;
+          const tokens = TargetPathExtractor.tokenizeEntity(entityStem).map(singularize);
+          const substantive = tokens.filter(
+            (w) =>
+              !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+              !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+              !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+              !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+              !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w) &&
+              !TargetPathExtractor.GENERIC_PROSE_WORDS.has(w)
+          );
+          if (substantive.length > 0 && substantive.length <= 4 && isSupportedByAuthenticUser(substantive)) {
+            return {
+              entityTokens: substantive,
+              canonicalKey: TargetPathExtractor.normalizeEntityKey(substantive.join("")),
+              entityName: substantive.join(" "),
+              allSubstantiveTokens: substantive,
+            };
+          }
+        }
+      }
+    }
+
+    // 2. Resolved logical/task subject already stored in active stage
+    if (intent.resolvedTarget?.featureName || intent.resolvedTarget?.logicalTargetId) {
+      const targetName = (intent.resolvedTarget.featureName || intent.resolvedTarget.logicalTargetId).trim();
+      const tokens = TargetPathExtractor.tokenizeEntity(targetName).map(singularize);
+      const substantive = tokens.filter(
+        (w) =>
+          !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+          !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+          !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+          !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+          !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w) &&
+          !TargetPathExtractor.GENERIC_PROSE_WORDS.has(w)
+      );
+      if (substantive.length > 0 && isSupportedByAuthenticUser(substantive)) {
+        return {
+          entityTokens: substantive,
+          canonicalKey: TargetPathExtractor.normalizeEntityKey(substantive.join("")),
+          entityName: substantive.join(" "),
+          allSubstantiveTokens: substantive,
+        };
+      }
+    }
+
+    // Active stage goal text (stage authorization context preferred over raw compound message)
+    const stageGoal =
+      (trustedStageAuthorizationContext(intent) ?? intent.goal ?? "") ||
+      (trustedUserRequest(intent) ?? "");
+
+    const rawGoalWords = TargetPathExtractor.tokenizeEntity(stageGoal);
+    const substantiveGoalWords = rawGoalWords.filter(
+      (w) =>
+        !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+        !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+        !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+        !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+        !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w) &&
+        !TargetPathExtractor.GENERIC_PROSE_WORDS.has(w)
+    );
+    const substantiveGoalTokens = substantiveGoalWords.map(singularize);
+
+    // 3. Deterministic entity extraction from active stage goal
+    const extractedEntityPhrases = TargetPathExtractor.extractNamedEntityTokens(stageGoal);
+    const sortedPhrases = [...extractedEntityPhrases].sort((a, b) => {
+      const lenA = a.split(/\s+/).length;
+      const lenB = b.split(/\s+/).length;
+      return lenB - lenA;
+    });
+
+    for (const phrase of sortedPhrases) {
+      const phraseTokens = TargetPathExtractor.tokenizeEntity(phrase).map(singularize);
+      const substantivePhraseTokens = phraseTokens.filter(
+        (w) =>
+          !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+          !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+          !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+          !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+          !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w) &&
+          !TargetPathExtractor.GENERIC_PROSE_WORDS.has(w)
+      );
+      if (substantivePhraseTokens.length > 0 && isSupportedByAuthenticUser(substantivePhraseTokens)) {
+        return {
+          entityTokens: substantivePhraseTokens,
+          canonicalKey: TargetPathExtractor.normalizeEntityKey(substantivePhraseTokens.join("")),
+          entityName: substantivePhraseTokens.join(" "),
+          allSubstantiveTokens: substantiveGoalTokens.filter((t) => isSupportedByAuthenticUser([t])),
+        };
+      }
+    }
+
+    // 4. Conservative fallback tokens from active stage goal
+    if (substantiveGoalTokens.length > 0) {
+      const allowedGoalTokens = substantiveGoalTokens.filter((t) => isSupportedByAuthenticUser([t]));
+      if (allowedGoalTokens.length > 0) {
+        return {
+          entityTokens: allowedGoalTokens,
+          canonicalKey: TargetPathExtractor.normalizeEntityKey(allowedGoalTokens.join("")),
+          entityName: allowedGoalTokens.join(" "),
+          allSubstantiveTokens: allowedGoalTokens,
+        };
+      }
+    }
+
+    return {
+      entityTokens: [],
+      allSubstantiveTokens: [],
+    };
+  }
+
   public static isEligibleConstructiveCreateScope(
     candidate: string,
     anchorFilePath: string,
@@ -157,66 +386,156 @@ export class TaskRootedAuthorizationVerifier {
         return true;
       }
 
-      const req = trustedUserRequest(intent) || "";
-      const goal = intent.goal || "";
-      const opSubjects = (intent.operations || []).map((o) => o.subject || "").join(" ");
-      const combinedTaskText = `${req} ${goal} ${opSubjects}`.trim();
-      if (!combinedTaskText) return false;
+      // --- PART 1 & 2: ORIGINAL USER REQUEST IS THE AUTHORITY CEILING ---
+      const authenticUserReq = trustedUserRequest(intent);
+      if (!authenticUserReq || typeof authenticUserReq !== "string" || !authenticUserReq.trim()) {
+        // Model stage goal by itself has 0 authority
+        return false;
+      }
 
-      const singularize = (w: string): string => {
-        if (w.length <= 3) return w;
-        if (w.endsWith("ies") && w.length > 4) return w.slice(0, -3) + "y";
-        if (w.endsWith("es") && !w.endsWith("ies") && (w.endsWith("shes") || w.endsWith("ches") || w.endsWith("sses") || w.endsWith("xes"))) {
-          return w.slice(0, -2);
+      let boundClause = trustedStageAuthorizationClause(intent);
+      const userClauses = UserClauseExtractor.extractClauses(authenticUserReq);
+
+      if (!boundClause) {
+        if (userClauses.length === 1) {
+          boundClause = userClauses[0];
+        } else if (userClauses.length > 1) {
+          const boundResult = UserClauseExtractor.bindStageToClause(
+            {
+              taskType: intent.taskType,
+              goal: intent.goal,
+              name: intent.goal,
+              targetPath: intent.explicitUserPaths?.[0],
+            },
+            userClauses
+          );
+          if (boundResult.clause) {
+            boundClause = boundResult.clause;
+          }
         }
-        if (w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us") && !wordIsSpecialPlural(w)) {
-          return w.slice(0, -1);
+      }
+
+      // In a compound user request, an active stage MUST deterministically bind to ONE originating user clause.
+      // If ambiguous or unbound -> FAIL CLOSED! Never fall back to whole-request token bag.
+      if (userClauses.length > 1 && !boundClause) {
+        return false;
+      }
+
+      const boundClauseTokens: Set<string> = boundClause
+        ? new Set(boundClause.entityTokens)
+        : new Set(userClauses[0]?.entityTokens ?? []);
+
+      if (boundClauseTokens.size === 0) {
+        return false;
+      }
+
+      const derived = this.deriveCanonicalStageEntity(intent);
+      const stageEntityTokens = new Set(derived.entityTokens);
+
+      const stageGoalText =
+        (boundClause?.sourceText ?? trustedStageAuthorizationContext(intent)) ||
+        intent.goal ||
+        authenticUserReq;
+
+      const rawStageTokens = TargetPathExtractor.tokenizeEntity(stageGoalText)
+        .map(singularize)
+        .filter(
+          (w) =>
+            !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+            !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+            !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+            !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+            !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w) &&
+            !TargetPathExtractor.GENERIC_PROSE_WORDS.has(w)
+        );
+
+      const opTokens: string[] = [];
+      if (intent.operations) {
+        for (const op of intent.operations) {
+          if (op.kind === "CREATE" && op.subject) {
+            const cleanSubject = op.subject.trim();
+            const isFilePath = /\.[a-zA-Z0-9]+$/.test(cleanSubject) || cleanSubject.includes("/");
+            const entityStem = isFilePath
+              ? path.basename(cleanSubject).replace(/\.[^.]+$/, "")
+              : cleanSubject;
+            opTokens.push(
+              ...TargetPathExtractor.tokenizeEntity(entityStem)
+                .map(singularize)
+                .filter(
+                  (w) =>
+                    !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+                    !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+                    !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+                    !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+                    !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w) &&
+                    !TargetPathExtractor.GENERIC_PROSE_WORDS.has(w)
+                )
+            );
+          }
         }
-        return w;
-      };
+      }
 
-      const wordIsSpecialPlural = (w: string) => w === "this" || w === "status" || w === "canvas";
+      const resolvedTokens: string[] = [];
+      if (intent.resolvedTarget?.featureName || intent.resolvedTarget?.logicalTargetId) {
+        const targetName = (intent.resolvedTarget.featureName || intent.resolvedTarget.logicalTargetId).trim();
+        resolvedTokens.push(
+          ...TargetPathExtractor.tokenizeEntity(targetName)
+            .map(singularize)
+            .filter(
+              (w) =>
+                !TargetPathExtractor.COMMAND_VERBS.has(w) &&
+                !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
+                !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
+                !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
+                !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w) &&
+                !TargetPathExtractor.GENERIC_PROSE_WORDS.has(w)
+            )
+        );
+      }
 
-      const rawTaskWords = TargetPathExtractor.tokenizeEntity(combinedTaskText);
-      const substantiveTaskWords = rawTaskWords.filter(
-        (w) =>
-          !TargetPathExtractor.COMMAND_VERBS.has(w) &&
-          !TargetPathExtractor.DIRECTIVE_VERBS.has(w) &&
-          !TargetPathExtractor.GRAMMAR_WORDS.has(w) &&
-          !TargetPathExtractor.VAGUE_TARGET_WORDS.has(w) &&
-          !TargetPathExtractor.DESCRIPTIVE_MODIFIERS.has(w)
+      // Collect all substantive stage tokens across model-influenced sources
+      const allSubstantiveStageTokens = new Set([
+        ...derived.entityTokens,
+        ...derived.allSubstantiveTokens,
+        ...rawStageTokens,
+        ...opTokens,
+        ...resolvedTokens,
+      ]);
+
+      if (allSubstantiveStageTokens.size === 0) {
+        return false;
+      }
+
+      // Extract non-wrapper stage domain tokens
+      const stageDomainTokens = new Set(
+        [...allSubstantiveStageTokens].filter((t) => !TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(t))
       );
 
-      const taskTokens = new Set(substantiveTaskWords.map(singularize));
-      if (taskTokens.size === 0) return false;
+      // Verify: stageDomain ⊆ boundClauseTokens
+      // EVERY substantive non-wrapper stage-domain token must be supported by the bound originating user clause.
+      if (stageDomainTokens.size > 0) {
+        for (const sdt of stageDomainTokens) {
+          if (!boundClauseTokens.has(sdt)) {
+            // Model expansion beyond originating user clause authority ceiling! Fail closed!
+            return false;
+          }
+        }
+      } else {
+        // Purely wrapper tokens: all must be supported by bound user clause
+        for (const st of allSubstantiveStageTokens) {
+          if (!boundClauseTokens.has(st)) {
+            return false;
+          }
+        }
+      }
 
-      const UI_WRAPPER_TOKENS = new Set([
-        "component",
-        "widget",
-        "panel",
-        "view",
-        "screen",
-        "page",
-        "modal",
-        "card",
-        "item",
-        "list",
-        "container",
-        "element",
-        "wrapper",
-        "header",
-        "footer",
-        "button",
-        "bar",
-        "dialog",
-        "drawer",
-        "table",
-        "row",
-        "form",
-        "input",
-        "box",
-        "banner",
+      const allAuthorizedDomainTokens = new Set([
+        ...[...stageEntityTokens].filter((t) => boundClauseTokens.has(t) || TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(t)),
+        ...[...derived.allSubstantiveTokens].filter((t) => boundClauseTokens.has(t) || TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(t)),
+        ...[...rawStageTokens].filter((t) => boundClauseTokens.has(t) || TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(t)),
       ]);
+
+      if (allAuthorizedDomainTokens.size === 0) return false;
 
       const baseName = path.basename(normCandidate);
       const stem = baseName.replace(/\.[^.]+$/, "");
@@ -246,48 +565,57 @@ export class TaskRootedAuthorizationVerifier {
       const allCandidateTokens = [...dirTokens, ...stemTokens];
       if (allCandidateTokens.length === 0) return false;
 
-      // Check A: No foreign domain tokens (every candidate token must be in UI_WRAPPER_TOKENS or in taskTokens)
+      // Check A: No foreign domain tokens (every candidate token must be in UI_WRAPPER_TOKENS or in allAuthorizedDomainTokens & boundClauseTokens)
       for (const ct of allCandidateTokens) {
-        if (!UI_WRAPPER_TOKENS.has(ct) && !taskTokens.has(ct)) {
+        if (!TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(ct) && (!allAuthorizedDomainTokens.has(ct) || !boundClauseTokens.has(ct))) {
           return false;
         }
       }
 
-      // Check B: Sufficient task grounding
-      const domainTaskTokens = new Set(
-        [...taskTokens].filter((t) => !UI_WRAPPER_TOKENS.has(t))
-      );
+      // Check B: Candidate cannot be purely generic wrapper tokens
       const domainCandidateTokens = allCandidateTokens.filter(
-        (t) => !UI_WRAPPER_TOKENS.has(t)
+        (t) => !TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(t)
+      );
+      if (domainCandidateTokens.length === 0) {
+        return false;
+      }
+
+      // Check C: Sufficient domain task grounding / meaningful overlap with canonical stage entity and bound clause
+      const canonicalDomainTokens = new Set(
+        [...stageEntityTokens].filter((t) => !TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(t) && boundClauseTokens.has(t))
+      );
+      const clauseDomainTokens = new Set(
+        [...boundClauseTokens].filter((t) => !TaskRootedAuthorizationVerifier.UI_WRAPPER_TOKENS.has(t))
       );
 
-      if (domainTaskTokens.size > 0) {
-        // Candidate cannot be purely generic wrapper tokens
-        if (domainCandidateTokens.length === 0) return false;
+      const targetDomainTokens = canonicalDomainTokens.size > 0 ? canonicalDomainTokens : clauseDomainTokens;
 
-        // If task specifies multiple domain tokens (e.g. "user", "profile"), candidate cannot match only 1 token (e.g. User.tsx)
-        if (domainTaskTokens.size >= 2) {
-          const matchedDomainTaskTokens = [...domainTaskTokens].filter((dt) =>
-            domainCandidateTokens.includes(dt)
-          );
-          if (matchedDomainTaskTokens.length < domainTaskTokens.size) {
-            return false;
-          }
-        } else {
-          // Exactly 1 domain task token: candidate must match it
-          const singleDomainToken = [...domainTaskTokens][0];
-          if (!domainCandidateTokens.includes(singleDomainToken)) {
-            return false;
-          }
+      if (targetDomainTokens.size > 0) {
+        const matchedDomainTokens = [...targetDomainTokens].filter((sdt) =>
+          domainCandidateTokens.includes(sdt)
+        );
+
+        if (matchedDomainTokens.length === 0) {
+          return false;
+        }
+
+        // If the canonical entity has 2+ domain tokens (e.g. "user profile"),
+        // candidate cannot match only 1 token (e.g. User.tsx)
+        if (targetDomainTokens.size >= 2 && matchedDomainTokens.length < targetDomainTokens.size) {
+          return false;
         }
       } else {
-        // Task had only wrapper tokens (e.g. "add panel"): candidate must match task wrapper tokens
-        const matched = allCandidateTokens.some((t) => taskTokens.has(t));
-        if (!matched) return false;
+        // Canonical entity consisted solely of wrapper words; check stem match with entity tokens
+        const matchesEntity = [...stageEntityTokens].some((et) =>
+          allCandidateTokens.includes(et)
+        );
+        if (!matchesEntity) return false;
       }
+
+      return true;
     }
 
-    return true;
+    return false;
   }
 
   public static roots(store: RepositoryEvidenceStore, intent: TaskIntentSpec): RepositoryEvidence[] {
@@ -298,6 +626,7 @@ export class TaskRootedAuthorizationVerifier {
     const request = trustedUserRequest(intent);
     const explicit = new Set(request === undefined ? [] : TargetPathExtractor.extractWithProvenance(request, { repoFiles: [...snapshot.files.keys()] })
       .filter((p) => p.provenance === "EXPLICIT_USER_PATH").map((p) => p.path));
+
     for (const file of explicit) {
       const receipt = snapshot.files.has(file)
         ? RepositoryObservationTools.observeFile(store.getRepositoryId(), root, file)
@@ -404,7 +733,7 @@ export class TaskRootedAuthorizationVerifier {
       }
     }
 
-    const request = trustedUserRequest(intent) ?? "";
+    const request = trustedStageAuthorizationContext(intent) ?? trustedUserRequest(intent) ?? "";
     const isUiRefinement = isExistingPrimaryUIRefinement(request);
 
     if (action === "create" && !isDestructiveTask && !isUiRefinement && isConstructiveFeatureRequest(intent)) {
@@ -439,7 +768,19 @@ export class TaskRootedAuthorizationVerifier {
         const current = queue.shift()!;
         if (visited.has(current.file)) continue;
         visited.add(current.file);
-        const isDirectAnchorModify = root.kind === "ENTRY_POINT" && action === "modify" && current.ids.length === 0;
+        const hasProspectiveCreate = store.getAllEvidence().some(
+          (e) => e.kind === "FILE" && !snapshot.files.has(e.filePath) && store.isAuthorityEligible(e)
+        );
+        const isRouteAnchor = !!(
+          root.metadata?.runtimeRoute ||
+          root.metadata?.anchorKind === "API_ROUTE_COMPOSITION" ||
+          root.metadata?.anchorKind === "API_TEST"
+        );
+        const isDirectAnchorModify =
+          root.kind === "ENTRY_POINT" &&
+          action === "modify" &&
+          current.ids.length === 0 &&
+          (isRouteAnchor || isUiRefinement || hasProspectiveCreate);
         if (current.file === candidate && (current.ids.length > 0 || root.kind !== "ENTRY_POINT" || isDirectAnchorModify)) {
           return Object.freeze({ action, candidatePath: candidate, rootEvidenceId: root.id, edgeEvidenceIds: Object.freeze(current.ids), repositoryRevision: snapshot.revision });
         }

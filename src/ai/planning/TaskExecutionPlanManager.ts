@@ -1,4 +1,5 @@
-import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { bindUserRequest, bindStageAuthorizationContext, bindStageAuthorizationClause } from "../repository/TrustedTaskContext";
+import { UserClauseExtractor } from "../contracts/UserClauseAuthority";
 import {
   TaskExecutionPlan,
   TaskExecutionStage,
@@ -76,6 +77,8 @@ export class TaskExecutionPlanManager {
           },
         ];
 
+    const userClauses = UserClauseExtractor.extractClauses(message);
+
     const stages: TaskExecutionStage[] = rawStages.map((s, idx) => {
       const stageClassification: TaskClassificationResult = {
         taskType: s.taskType,
@@ -100,6 +103,13 @@ export class TaskExecutionPlanManager {
       const stageExplicitPaths = (s.targetPath && explicitUserPaths.includes(s.targetPath)) ? [s.targetPath] : idx === 0 ? explicitUserPaths : [];
       const stageIntent = createTaskIntentSpec(s.goal, stageClassification, stageExplicitPaths);
       bindUserRequest(stageIntent, message);
+
+      const binding = UserClauseExtractor.bindStageToClause(s, userClauses);
+      if (binding.clause) {
+        bindStageAuthorizationClause(stageIntent, binding.clause);
+        bindStageAuthorizationContext(stageIntent, binding.clause.sourceText);
+        stageIntent.stageAuthorizationContext = binding.clause.sourceText;
+      }
 
       return {
         id: s.id || `stage-${idx + 1}`,
