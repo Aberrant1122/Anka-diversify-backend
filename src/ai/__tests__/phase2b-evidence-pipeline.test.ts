@@ -197,11 +197,15 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
-    // Resolver MUST reject unrelated Dashboard because FILE existence alone without structural/task relation does not authorize MODIFY
-    // Final targetPaths becomes [] -> pipeline immediately fails closed with [Manifest Validation Failed]
+    // Resolver MUST reject unrelated Dashboard because FILE existence alone without structural/task relation does not authorize MODIFY.
+    // The first candidate failure is internal; an unchanged recovery topology is then deterministically blocked.
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
+    expect(result.explanation).toMatch(/\[(Duplicate Recovery Plan|Manifest Validation Failed)\]/);
     expect(codeGenSpy).not.toHaveBeenCalled();
+    const persistedAssistantMessages = jest.mocked(MemoryPersistence.saveMessage).mock.calls
+      .filter(([role]) => role === "assistant")
+      .map(([, content]) => content);
+    expect(persistedAssistantMessages.some((content) => content.includes("[Planning Scope Rejected]"))).toBe(false);
   });
 
   test("B. Orphan CREATE rejection in full pipeline flow", async () => {
@@ -257,7 +261,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     // Orphan CREATE citing only ENTRY_POINT without importer or standalone proof MUST be rejected
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
+    expect(result.explanation).toMatch(/\[(Duplicate Recovery Plan|Manifest Validation Failed)\]/);
     expect(codeGenSpy).not.toHaveBeenCalled();
   });
 
@@ -488,7 +492,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     // Rejection guarantees zero changes applied and strict failure explanation
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
+    expect(result.explanation).toMatch(/\[(Duplicate Recovery Plan|Manifest Validation Failed)\]/);
   });
 
   test("F. searchPlanHistory is populated with real tool execution records", async () => {

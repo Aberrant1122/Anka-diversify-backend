@@ -141,10 +141,26 @@ export class AgentLoopCoordinator {
               const history = stagePlanningAttempts.get(activeStageId) || [];
               const currentAttemptNumber = history.length + 1;
               const currentFingerprint = executed.response.manifestFingerprint || "";
+              const planningFacts = executed.response.planningFailureFacts || [];
+              const isScopeRecovery = planningFacts.some((fact) => fact.kind === "AUTHORITY_REJECTION");
+              const recoverableCount = planningFacts.filter(
+                (fact) => fact.classification === "RECOVERABLE_CANDIDATE",
+              ).length;
+              const hardCandidateCount = planningFacts.filter(
+                (fact) => fact.classification === "HARD_CANDIDATE",
+              ).length;
+              const terminalCount = planningFacts.filter(
+                (fact) => fact.classification === "TERMINAL_TASK",
+              ).length;
 
               // Duplicate planning topology check
               const isDuplicate = history.some((rec) => rec.fingerprint === currentFingerprint);
               if (isDuplicate) {
+                if (isScopeRecovery) {
+                  console.warn(
+                    `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nfingerprint=${currentFingerprint.slice(0, 32)}\nresult=DUPLICATE`
+                  );
+                }
                 console.warn(
                   `[PLAN_RECOVERY] stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} Duplicate plan detected (fingerprint: ${currentFingerprint.slice(0, 32)})`
                 );
@@ -165,7 +181,9 @@ export class AgentLoopCoordinator {
                   response: {
                     ...executed.response,
                     errorCode: failureCode,
-                    explanation: `[Duplicate Recovery Plan] The planned topology is identical to a previous failed planning attempt (${currentFingerprint.slice(0, 48)}).`,
+                    explanation: isScopeRecovery
+                      ? "[Duplicate Recovery Plan] The active stage repeated a previously rejected planning topology without materially new repository facts."
+                      : `[Duplicate Recovery Plan] The planned topology is identical to a previous failed planning attempt (${currentFingerprint.slice(0, 48)}).`,
                   },
                   loop: {
                     outcome: "VALIDATION_FAILURE",
@@ -179,6 +197,11 @@ export class AgentLoopCoordinator {
 
               // Recovery budget check (max 3 planning attempts total per stage: 1 initial + 2 recoveries)
               if (currentAttemptNumber >= MAX_STAGE_PLANNING_ATTEMPTS) {
+                if (isScopeRecovery) {
+                  console.warn(
+                    `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nresult=EXHAUSTED`
+                  );
+                }
                 console.warn(
                   `[PLAN_RECOVERY] stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} result=EXHAUSTED`
                 );
@@ -199,7 +222,9 @@ export class AgentLoopCoordinator {
                   response: {
                     ...executed.response,
                     errorCode: failureCode,
-                    explanation: `[Planning Recovery Exhausted] Active stage ${activeStageId} exceeded planning recovery budget (${MAX_STAGE_PLANNING_ATTEMPTS} attempts). Final validation errors:\n${executed.response.explanation}`,
+                    explanation: isScopeRecovery
+                      ? `[Planning Recovery Exhausted] Active stage ${activeStageId} exhausted its ${MAX_STAGE_PLANNING_ATTEMPTS}-attempt planning budget without finding a safe authorized topology.`
+                      : `[Planning Recovery Exhausted] Active stage ${activeStageId} exceeded planning recovery budget (${MAX_STAGE_PLANNING_ATTEMPTS} attempts). Final validation errors:\n${executed.response.explanation}`,
                   },
                   loop: {
                     outcome: "VALIDATION_FAILURE",
@@ -215,7 +240,8 @@ export class AgentLoopCoordinator {
                 stageId: activeStageId,
                 attemptNumber: currentAttemptNumber,
                 fingerprint: currentFingerprint,
-                failureFacts: executed.response.planningFailureFacts || [],
+                repositoryRevision: executed.response.repositoryRevision,
+                failureFacts: planningFacts,
                 rejectedPaths: executed.response.rejectedPaths || [],
                 authorizedPaths: executed.response.authorizedPaths || [],
                 validationErrors: executed.response.validationErrors,
@@ -242,9 +268,24 @@ export class AgentLoopCoordinator {
                 `[PLAN_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nfingerprint=${currentFingerprint.slice(0, 32)}\nfailureKinds=${failureKinds}`
               );
               console.log(`[PLAN_RECOVERY]\nresult=REINVESTIGATE`);
+              if (isScopeRecovery) {
+                console.log(
+                  `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nrejected=${record.rejectedPaths.length}\nrecoverable=${recoverableCount}\nhardCandidates=${hardCandidateCount}\nterminal=${terminalCount}\nfingerprint=${currentFingerprint.slice(0, 32)}\nresult=REINVESTIGATE`
+                );
+              }
 
               await input.onRevisionRequired?.(executed.response, undefined as any, iteration);
               continue;
+            }
+
+            if (
+              code === "PLANNING_SCOPE_REJECTED" &&
+              executed.response.planningFailureFacts?.some((fact) => fact.kind === "AUTHORITY_REJECTION")
+            ) {
+              const activeStageId = executed.response.taskExecutionPlan?.stages[
+                executed.response.taskExecutionPlan.currentStageIndex
+              ]?.id || "stage-default";
+              console.warn(`[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nresult=TERMINAL`);
             }
 
             const category = REINVESTIGATION_OUTCOMES.has(code) || code === "REPAIR_UNRESOLVED"

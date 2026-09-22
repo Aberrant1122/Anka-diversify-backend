@@ -49,6 +49,8 @@ import { authoritySnapshot } from "../repository/AuthorityWorktree";
 import {
   extractPlanningFailureFacts,
   computeManifestAttemptFingerprint,
+  classifyWriteRejection,
+  isTaskLevelActionProhibition,
   StagePlanningRecoveryRecord,
 } from "../planning/PlanningFailureFacts";
 
@@ -985,10 +987,46 @@ export class AgentPlanner {
             .map((r) => `• ${r.path}: ${r.reason}`)
             .join("\n");
           const failureExplanation = `[Planning Scope Rejected] Manifest requests lacked required deterministic planning evidence:\n${rejectedReasons}`;
-          await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
+
+          const basePlanningFailureFacts = extractPlanningFailureFacts({
+            rejectedPaths: planningEvidenceResult.rejectedPaths,
+            proposedFiles: rawManifest.files,
+          });
+          const manifestFingerprint = computeManifestAttemptFingerprint({
+            stageId: activeStage.id,
+            repositoryRevision: currentPlanningRevision,
+            files: rawManifest.files,
+          });
+          const requestedOperationKinds = taskIntentSpec.operations.map((operation) => operation.kind);
+          const rejectedPaths = planningEvidenceResult.rejectedPaths.map((rejection) => {
+            const taskLevelActionProhibition = isTaskLevelActionProhibition(
+              rejection,
+              requestedOperationKinds,
+            );
+            return {
+              ...rejection,
+              classification: taskLevelActionProhibition
+                ? "TERMINAL_TASK" as const
+                : classifyWriteRejection(rejection.reasonCode),
+            };
+          });
+          const classificationByPath = new Map(
+            rejectedPaths.map((rejection) => [normalizeRepoPath(rejection.path), rejection.classification]),
+          );
+          const planningFailureFacts = basePlanningFailureFacts.map((fact) =>
+            fact.kind === "AUTHORITY_REJECTION" && fact.affectedPath
+              ? { ...fact, classification: classificationByPath.get(normalizeRepoPath(fact.affectedPath)) || fact.classification }
+              : fact
+          );
+          const hasTerminalTaskFailure = planningFailureFacts.some(
+            (fact) => fact.classification === "TERMINAL_TASK",
+          );
+          const responseExplanation = hasTerminalTaskFailure
+            ? "[Planning Scope Rejected] The authenticated stage cannot proceed under the current policy or workspace authority."
+            : failureExplanation;
 
           return {
-            explanation: failureExplanation,
+            explanation: responseExplanation,
             changes: [],
             commitMessage: "",
             sessionId: session.id,
@@ -999,9 +1037,18 @@ export class AgentPlanner {
             targetPath: intentResult.targetPath,
             confidence: finalConfidence,
             buildVerified: false,
-            buildErrors: failureExplanation,
+            buildErrors: responseExplanation,
             lifecycleStage: "ManifestValidationFailed",
-            errorCode: "PLANNING_SCOPE_REJECTED",
+            errorCode: hasTerminalTaskFailure
+              ? "PLANNING_SCOPE_REJECTED"
+              : "PLANNING_REINVESTIGATION_REQUIRED",
+            planningFailureFacts,
+            manifestFingerprint,
+            authorizedPaths: [],
+            rejectedPaths,
+            repositoryRevision: currentPlanningRevision,
+            taskExecutionPlan: input.taskExecutionPlan,
+            compoundTaskStatus: "RUNNING",
           };
         }
 
@@ -1123,8 +1170,6 @@ export class AgentPlanner {
           if (!approvedManifest) {
             const errorDetails = valRes.errors.map((e) => `• [${e.type}] ${e.message} (${e.suggestion})`).join("\n");
             const failureExplanation = `[Manifest Validation Failed] The planned file manifest violated execution contract constraints:\n${errorDetails}`;
-            await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
-
             const planningFailureFacts = extractPlanningFailureFacts({
               validationErrors: valRes.errors,
               rejectedPaths: planningEvidenceResult.rejectedPaths,
@@ -1133,7 +1178,7 @@ export class AgentPlanner {
 
             const manifestFingerprint = computeManifestAttemptFingerprint({
               stageId: activeStage.id,
-              repositoryRevision: effectiveRevision,
+              repositoryRevision: currentPlanningRevision,
               files: rawManifest?.files || [],
             });
 
@@ -1158,9 +1203,12 @@ export class AgentPlanner {
               rejectedPaths: planningEvidenceResult.rejectedPaths.map((r) => ({
                 path: r.path,
                 reason: r.reason,
-                action: rawManifest?.files?.find((f) => normalizeRepoPath(f.path) === normalizeRepoPath(r.path))?.action as any,
+                action: r.action,
+                reasonCode: r.reasonCode,
+                classification: classifyWriteRejection(r.reasonCode),
               })),
               validationErrors: valRes.errors,
+              repositoryRevision: currentPlanningRevision,
               taskExecutionPlan: input.taskExecutionPlan,
               compoundTaskStatus: "RUNNING",
             };

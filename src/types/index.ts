@@ -550,9 +550,16 @@ export interface AgentResponse {
   planningFailureFacts?: import("../ai/planning/PlanningFailureFacts").PlanningFailureFact[];
   manifestFingerprint?: string;
   authorizedPaths?: string[];
-  rejectedPaths?: Array<{ path: string; action?: "create" | "modify" | "delete"; reason?: string }>;
+  rejectedPaths?: Array<{
+    path: string;
+    action?: "create" | "modify" | "delete";
+    reasonCode?: import("../ai/contracts/EvidenceBoundWriteSetResolver").WriteRejectionCode;
+    reason?: string;
+    classification?: import("../ai/planning/PlanningFailureFacts").PlanningFailureClassification;
+  }>;
   validationErrors?: ValidationError[];
   planningAttemptNumber?: number;
+  repositoryRevision?: string;
   checkpointJournal?: ReadonlyArray<{
     journalId: string;
     sequence: number;
