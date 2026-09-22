@@ -207,21 +207,28 @@ export class AgentPipeline {
           persistenceSession,
           rejectedFailedActionStates,
           retryStateRevision: currentObservationRevision,
+          planningRecoveryHistory: workingPlan.snapshot().planningRecoveryHistory,
         });
         if (response.taskExecutionPlan) {
           iterationRequest = {
             ...iterationRequest,
-            context: { ...(iterationRequest.context ?? {}), taskExecutionPlan: response.taskExecutionPlan },
+            context: {
+              ...(iterationRequest.context ?? {}),
+              taskExecutionPlan: response.taskExecutionPlan,
+              planningRecoveryHistory: workingPlan.snapshot().planningRecoveryHistory,
+            },
           };
         }
         return { response, journalEntry: journal.snapshot()[before] };
       },
       onRevisionRequired: (response, entry) => {
-        rejectedFailedActionStates.add(failedActionStateFingerprint(
-          currentObservationRevision,
-          response.taskExecutionPlan,
-          entry.proposedActions,
-        ));
+        if (entry && entry.proposedActions) {
+          rejectedFailedActionStates.add(failedActionStateFingerprint(
+            currentObservationRevision,
+            response.taskExecutionPlan,
+            entry.proposedActions,
+          ));
+        }
         const failedPlan = response.taskExecutionPlan;
         if (!failedPlan) return;
         const retryStages = failedPlan.stages.map((stage, index) =>
@@ -234,6 +241,7 @@ export class AgentPipeline {
           context: {
             ...(iterationRequest.context ?? {}),
             taskExecutionPlan: { ...failedPlan, stages: retryStages, status: "RUNNING" },
+            planningRecoveryHistory: workingPlan.snapshot().planningRecoveryHistory,
           },
         };
       },
@@ -745,9 +753,14 @@ export class AgentPipeline {
       authorizedCapabilityScope: options?.authorizedCapabilityScope,
       baseCommitSha: options?.baseCommitSha,
       priorVerifiedTargets: taskExecutionPlan.priorVerifiedTargets,
+      taskExecutionPlan,
+      planningRecoveryHistory: options?.planningRecoveryHistory || (request.context as any)?.planningRecoveryHistory,
     });
     if (!("planningComplete" in manifestPlanning)) {
-      return manifestPlanning;
+      return {
+        ...manifestPlanning,
+        taskExecutionPlan: manifestPlanning.taskExecutionPlan || taskExecutionPlan,
+      };
     }
     const { approvedManifest, durationMs: s6Time } = manifestPlanning;
     executionContract = manifestPlanning.executionContract;

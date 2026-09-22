@@ -11,6 +11,10 @@ import {
 } from "../ai/planning/RepositoryArchitectureDetector";
 import { LLMGateway } from "../ai/gateway/LLMGateway";
 import { PipelineStages } from "../ai/gateway/PipelineStage";
+import {
+  StagePlanningRecoveryRecord,
+  formatPlanningFailureContext,
+} from "../ai/planning/PlanningFailureFacts";
 
 export interface ManifestPlanningContext {
   existingFiles?: string[];
@@ -20,6 +24,7 @@ export interface ManifestPlanningContext {
   baselineDiagnostics?: Array<{ filePath?: string; errorCode?: string; symbolName?: string; message: string }>;
   actionObligations?: FileActionObligation[];
   priorVerifiedTargets?: Array<{ path: string; action: "create" | "modify" | "delete" }>;
+  planningRecoveryHistory?: readonly StagePlanningRecoveryRecord[];
   [key: string]: any;
 }
 
@@ -135,6 +140,10 @@ export class ManifestGenerator {
       }
       contextText += `- Re-check these paths against the current stage intent and current repository evidence before selecting targets. Prefer a prior target only when it remains relevant. A different target is valid when the current stage requires it.\n`;
       contextText += `- This context grants no mutation authority and supplies no reusable evidence IDs, capability, or execution manifest.\n\n`;
+    }
+
+    if (repositoryContext.planningRecoveryHistory && repositoryContext.planningRecoveryHistory.length > 0) {
+      contextText += formatPlanningFailureContext(repositoryContext.planningRecoveryHistory);
     }
 
     if (repositoryContext.resolvedTarget) {

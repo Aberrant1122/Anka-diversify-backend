@@ -39,10 +39,18 @@ import { matchesModuleSpecifier, TargetScopeExpander } from "../contracts/Target
 import { EvidenceBoundWriteSetResolver, PlannedChange } from "../contracts/EvidenceBoundWriteSetResolver";
 import { ManifestValidator } from "../../services/manifest-validator";
 import { ManifestCorrectionEngine } from "../planning/ManifestCorrectionEngine";
-import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
+import {
+  detectRepositoryArchitecture,
+  detectPrimaryActiveEntryPoint,
+} from "../planning/RepositoryArchitectureDetector";
 import { TaskDecomposer } from "../generation/TaskDecomposer";
 import { DeterministicRelationEvidenceAcquirer } from "../contracts/DeterministicRelationEvidenceAcquirer";
 import { authoritySnapshot } from "../repository/AuthorityWorktree";
+import {
+  extractPlanningFailureFacts,
+  computeManifestAttemptFingerprint,
+  StagePlanningRecoveryRecord,
+} from "../planning/PlanningFailureFacts";
 
 const prisma = new PrismaClient();
 
@@ -141,6 +149,8 @@ export interface AgentManifestPlanningInput {
   onProgress?: (event: AgentProgressEvent) => void;
   authorizedCapabilityScope?: AuthorizedCapabilityScope;
   baseCommitSha?: string;
+  taskExecutionPlan?: TaskExecutionPlan;
+  planningRecoveryHistory?: readonly StagePlanningRecoveryRecord[];
 }
 
 export interface AgentManifestPlanningSuccess {
@@ -632,6 +642,21 @@ export class AgentPlanner {
         }
       }
 
+      const planningRecoveryHistory = input.planningRecoveryHistory || (input.request?.context as any)?.planningRecoveryHistory;
+      if (planningRecoveryHistory && planningRecoveryHistory.length > 0) {
+        const latestRecovery = planningRecoveryHistory[planningRecoveryHistory.length - 1];
+        const hasOrphanFact = latestRecovery.failureFacts.some((f: any) => f.kind === "ORPHAN_CREATE");
+        if (hasOrphanFact) {
+          const entryPoint = detectPrimaryActiveEntryPoint(canonicalExistingFiles);
+          if (entryPoint && !relevantPlanningFiles.some((f: any) => normalizeRepoPath(f.path) === normalizeRepoPath(entryPoint))) {
+            const entrySnapshot = rawSnapshotFiles.find((f: any) => normalizeRepoPath(f.path || "") === normalizeRepoPath(entryPoint));
+            if (entrySnapshot && typeof entrySnapshot.content === "string") {
+              relevantPlanningFiles.unshift({ path: entryPoint, content: entrySnapshot.content });
+            }
+          }
+        }
+      }
+
       const planningContext = {
         ...projectContext,
         existingFiles: canonicalExistingFiles,
@@ -644,6 +669,7 @@ export class AgentPlanner {
         actionObligations: executionContract.actionObligations || resolvedTaskTarget?.actionObligations,
         priorVerifiedTargets,
         configurationFiles: dependencyConfigurationFiles,
+        planningRecoveryHistory,
       };
 
       onProgress?.({
@@ -1099,6 +1125,18 @@ export class AgentPlanner {
             const failureExplanation = `[Manifest Validation Failed] The planned file manifest violated execution contract constraints:\n${errorDetails}`;
             await MemoryPersistence.saveMessage(session.id, "assistant", failureExplanation);
 
+            const planningFailureFacts = extractPlanningFailureFacts({
+              validationErrors: valRes.errors,
+              rejectedPaths: planningEvidenceResult.rejectedPaths,
+              proposedFiles: rawManifest?.files,
+            });
+
+            const manifestFingerprint = computeManifestAttemptFingerprint({
+              stageId: activeStage.id,
+              repositoryRevision: effectiveRevision,
+              files: rawManifest?.files || [],
+            });
+
             return {
               explanation: failureExplanation,
               changes: [],
@@ -1113,6 +1151,18 @@ export class AgentPlanner {
               buildVerified: false,
               buildErrors: failureExplanation,
               lifecycleStage: "ManifestValidationFailed",
+              errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
+              planningFailureFacts,
+              manifestFingerprint,
+              authorizedPaths: planningEvidenceResult.approvedPaths,
+              rejectedPaths: planningEvidenceResult.rejectedPaths.map((r) => ({
+                path: r.path,
+                reason: r.reason,
+                action: rawManifest?.files?.find((f) => normalizeRepoPath(f.path) === normalizeRepoPath(r.path))?.action as any,
+              })),
+              validationErrors: valRes.errors,
+              taskExecutionPlan: input.taskExecutionPlan,
+              compoundTaskStatus: "RUNNING",
             };
           }
         }

@@ -5,6 +5,10 @@ import { WorkingPlan } from "../runtime/WorkingPlan";
 import type { DiagnosticBaselineComparison } from "../runtime/BaselineDiagnosticVerifier";
 import type { ActionGroupJournalEntry } from "../runtime/VerifiedCheckpointJournal";
 import type { AgentResponse } from "../shared/types";
+import {
+  StagePlanningRecoveryRecord,
+  MAX_STAGE_PLANNING_ATTEMPTS,
+} from "../planning/PlanningFailureFacts";
 
 export type AgentLoopStopReason =
   | "AWAITING_COMPLETION_EVALUATION"
@@ -88,6 +92,7 @@ export class AgentLoopCoordinator {
     let lastResponse: AgentResponse | undefined;
     const verifiedCheckpointIds: string[] = [];
     const failedActionFingerprints = new Set<string>();
+    const stagePlanningAttempts = new Map<string, StagePlanningRecoveryRecord[]>();
 
     for (let iteration = 1; iteration <= input.maxIterations; iteration += 1) {
       try {
@@ -128,6 +133,120 @@ export class AgentLoopCoordinator {
                 },
               };
             }
+
+            if (code === "PLANNING_REINVESTIGATION_REQUIRED") {
+              const activeStageId = executed.response.taskExecutionPlan?.stages[
+                executed.response.taskExecutionPlan.currentStageIndex
+              ]?.id || "stage-default";
+              const history = stagePlanningAttempts.get(activeStageId) || [];
+              const currentAttemptNumber = history.length + 1;
+              const currentFingerprint = executed.response.manifestFingerprint || "";
+
+              // Duplicate planning topology check
+              const isDuplicate = history.some((rec) => rec.fingerprint === currentFingerprint);
+              if (isDuplicate) {
+                console.warn(
+                  `[PLAN_RECOVERY] stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} Duplicate plan detected (fingerprint: ${currentFingerprint.slice(0, 32)})`
+                );
+                const failureCode = "DUPLICATE_RECOVERY_PLAN";
+                let workspace = input.runtime.workspaceState().withFailureFact({
+                  id: `pipeline:${iteration}:${failureCode}`,
+                  code: failureCode,
+                  category: "VALIDATION_FAILURE",
+                  source: "DETERMINISTIC_RUNTIME",
+                });
+                workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
+                input.runtime.updateWorkspace(workspace.withWorkingPlan({
+                  id: workingPlan.snapshot().id,
+                  revision: workingPlan.snapshot().revision,
+                  status: workingPlan.snapshot().status,
+                }));
+                return {
+                  response: {
+                    ...executed.response,
+                    errorCode: failureCode,
+                    explanation: `[Duplicate Recovery Plan] The planned topology is identical to a previous failed planning attempt (${currentFingerprint.slice(0, 48)}).`,
+                  },
+                  loop: {
+                    outcome: "VALIDATION_FAILURE",
+                    iterations: iteration,
+                    workingPlan,
+                    verifiedCheckpointIds,
+                    failureCode,
+                  },
+                };
+              }
+
+              // Recovery budget check (max 3 planning attempts total per stage: 1 initial + 2 recoveries)
+              if (currentAttemptNumber >= MAX_STAGE_PLANNING_ATTEMPTS) {
+                console.warn(
+                  `[PLAN_RECOVERY] stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} result=EXHAUSTED`
+                );
+                const failureCode = "PLANNING_RECOVERY_EXHAUSTED";
+                let workspace = input.runtime.workspaceState().withFailureFact({
+                  id: `pipeline:${iteration}:${failureCode}`,
+                  code: failureCode,
+                  category: "VALIDATION_FAILURE",
+                  source: "DETERMINISTIC_RUNTIME",
+                });
+                workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
+                input.runtime.updateWorkspace(workspace.withWorkingPlan({
+                  id: workingPlan.snapshot().id,
+                  revision: workingPlan.snapshot().revision,
+                  status: workingPlan.snapshot().status,
+                }));
+                return {
+                  response: {
+                    ...executed.response,
+                    errorCode: failureCode,
+                    explanation: `[Planning Recovery Exhausted] Active stage ${activeStageId} exceeded planning recovery budget (${MAX_STAGE_PLANNING_ATTEMPTS} attempts). Final validation errors:\n${executed.response.explanation}`,
+                  },
+                  loop: {
+                    outcome: "VALIDATION_FAILURE",
+                    iterations: iteration,
+                    workingPlan,
+                    verifiedCheckpointIds,
+                    failureCode,
+                  },
+                };
+              }
+
+              const record: StagePlanningRecoveryRecord = {
+                stageId: activeStageId,
+                attemptNumber: currentAttemptNumber,
+                fingerprint: currentFingerprint,
+                failureFacts: executed.response.planningFailureFacts || [],
+                rejectedPaths: executed.response.rejectedPaths || [],
+                authorizedPaths: executed.response.authorizedPaths || [],
+                validationErrors: executed.response.validationErrors,
+              };
+              history.push(record);
+              stagePlanningAttempts.set(activeStageId, history);
+
+              workingPlan = workingPlan.withPlanningRecovery(record);
+              let workspace = input.runtime.workspaceState().withFailureFact({
+                id: `pipeline:${iteration}:PLANNING_REINVESTIGATION_REQUIRED`,
+                code: "PLANNING_REINVESTIGATION_REQUIRED",
+                category: "VALIDATION_FAILURE",
+                source: "DETERMINISTIC_RUNTIME",
+              });
+              workspace = workspace.withWorkingPlan({
+                id: workingPlan.snapshot().id,
+                revision: workingPlan.snapshot().revision,
+                status: workingPlan.snapshot().status,
+              });
+              input.runtime.updateWorkspace(workspace);
+
+              const failureKinds = Array.from(new Set(record.failureFacts.map((f) => f.kind))).join(",");
+              console.log(
+                `[PLAN_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nfingerprint=${currentFingerprint.slice(0, 32)}\nfailureKinds=${failureKinds}`
+              );
+              console.log(`[PLAN_RECOVERY]\nresult=REINVESTIGATE`);
+
+              await input.onRevisionRequired?.(executed.response, undefined as any, iteration);
+              continue;
+            }
+
             const category = REINVESTIGATION_OUTCOMES.has(code) || code === "REPAIR_UNRESOLVED"
               ? "VALIDATION_FAILURE"
               : code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE"
@@ -240,6 +359,18 @@ export class AgentLoopCoordinator {
         }
 
         verifiedCheckpointIds.push(entry.journalId);
+        const currentStageId = executed.response.taskExecutionPlan?.stages[
+          executed.response.taskExecutionPlan.currentStageIndex
+        ]?.id || "stage-default";
+        const stageHistory = stagePlanningAttempts.get(currentStageId);
+        if (stageHistory && stageHistory.length > 0) {
+          const prev = stageHistory[stageHistory.length - 1];
+          const newFingerprint = executed.response.manifestFingerprint || "verified";
+          console.log(
+            `[PLAN_RECOVERY]\nattempt=${stageHistory.length + 1}/${MAX_STAGE_PLANNING_ATTEMPTS}\npreviousFingerprint=${prev.fingerprint.slice(0, 32)}\nnewFingerprint=${newFingerprint.slice(0, 32)}`
+          );
+          console.log(`[PLAN_RECOVERY]\nresult=RECOVERED`);
+        }
         workspace = workspace.withRelevantPaths([
           ...workspace.snapshot().relevantPaths,
           ...entry.attemptedActions.map((action) => action.path),

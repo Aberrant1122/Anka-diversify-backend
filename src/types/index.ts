@@ -547,6 +547,12 @@ export interface AgentResponse {
   dependentStagesSkipped?: string[];
   checkpointId?: string;
   actionGroupId?: string;
+  planningFailureFacts?: import("../ai/planning/PlanningFailureFacts").PlanningFailureFact[];
+  manifestFingerprint?: string;
+  authorizedPaths?: string[];
+  rejectedPaths?: Array<{ path: string; action?: "create" | "modify" | "delete"; reason?: string }>;
+  validationErrors?: ValidationError[];
+  planningAttemptNumber?: number;
   checkpointJournal?: ReadonlyArray<{
     journalId: string;
     sequence: number;
@@ -937,4 +943,4 @@ export interface VisualVerificationResult {
 }
 
 export * from "../ai/shared/TaskExecutionPlan";
-
+export * from "../ai/planning/PlanningFailureFacts";
