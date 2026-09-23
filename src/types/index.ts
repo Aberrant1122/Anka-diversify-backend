@@ -752,6 +752,59 @@ export interface FileDeclaration {
   evidenceIds?: string[];
 }
 
+export type ProspectiveNodeKind = "PROSPECTIVE" | "EXISTING";
+export type ProspectiveNodeRole =
+  | "ROUTE"
+  | "COMPONENT"
+  | "CHILD_COMPONENT"
+  | "MODULE"
+  | "EXISTING_DEPENDENCY"
+  | "INTEGRATION_ROOT";
+export type ProspectiveEdgeRelation = "RENDERS" | "IMPORTS" | "DEPENDS_ON" | "REGISTERS" | "ROUTES_TO";
+
+/** Authority-zero planner hypothesis. Temporary IDs are references only. */
+export interface ProspectiveFeatureGraphProposal {
+  nodes: Array<{
+    temporaryId: string;
+    path: string;
+    kind: ProspectiveNodeKind;
+    role: ProspectiveNodeRole;
+    symbol?: string;
+  }>;
+  edges: Array<{
+    sourceId: string;
+    targetId: string;
+    relation: ProspectiveEdgeRelation;
+    rawImportHint?: string;
+  }>;
+  featureRoots: string[];
+}
+
+export interface VerifiedProspectiveFeatureGraph {
+  authority: 0;
+  stageId: string;
+  userClauseId: string;
+  workspaceRoot: string;
+  repositoryRevision: string;
+  nodes: Array<{
+    id: string;
+    path: string;
+    kind: ProspectiveNodeKind;
+    role: ProspectiveNodeRole;
+    action?: "create" | "modify" | "delete";
+    symbol?: string;
+  }>;
+  edges: Array<{
+    sourceId: string;
+    targetId: string;
+    relation: ProspectiveEdgeRelation;
+    canonicalTargetPath: string;
+    canonicalSpecifier?: string;
+  }>;
+  featureRoots: string[];
+  fingerprint: string;
+}
+
 export interface FileManifest {
   /** Array of file declarations */
   files: FileDeclaration[];
@@ -759,6 +812,10 @@ export interface FileManifest {
   totalFiles: number;
   /** Manifest schema version (e.g., "1.0.0") */
   manifestVersion: string;
+  /** Optional typed topology. It is a proposal and confers no authority. */
+  prospectiveTopology?: ProspectiveFeatureGraphProposal;
+  /** Backend-only canonical topology supplied to generation and validation. */
+  verifiedTopology?: VerifiedProspectiveFeatureGraph;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -773,6 +830,7 @@ export type ValidationErrorType =
   | "orphan"
   | "path_constraint"
   | "router-architecture"
+  | "prospective-topology"
   | "modify-source-missing";
 
 export interface ValidationError {
@@ -791,6 +849,8 @@ export interface ValidationResult {
   valid: boolean;
   /** Array of validation errors (empty if valid) */
   errors: ValidationError[];
+  /** Present only when an authority-zero prospective topology was canonicalized. */
+  verifiedTopology?: VerifiedProspectiveFeatureGraph;
 }
 
 // ────────────────────────────────────────────────────────────────────────────

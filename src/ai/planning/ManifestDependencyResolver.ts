@@ -265,6 +265,46 @@ export class ManifestDependencyResolver {
     return { classification: "UNRESOLVED", value, reason: "Dependency is neither a resolvable repository reference nor an unambiguous package specifier" };
   }
 
+  /**
+   * Produces a deterministic module specifier for an already-canonical source
+   * and target. This is identity projection only; it grants no authority.
+   */
+  public canonicalSpecifierFor(ownerPath: string, targetPath: string): string | null {
+    const owner = normalizeRepoPath(ownerPath);
+    const target = findRepositoryMatch(targetPath, this.allRepositoryFiles);
+    if (!owner || !target) return null;
+
+    const ownerWorkspace = this.workspaceForPath(owner);
+    const targetWorkspace = this.workspaceForPath(target);
+    if (ownerWorkspace?.name !== targetWorkspace?.name) {
+      if (!ownerWorkspace || !targetWorkspace || !ownerWorkspace.dependencies.has(targetWorkspace.name)) return null;
+      let subpath = target.slice(targetWorkspace.relativePath.length).replace(/^\/+/, "");
+      subpath = subpath.replace(/^src\//, "");
+      subpath = extensionless(subpath).replace(/\/index$/, "");
+      const workspaceSpecifier = subpath ? `${targetWorkspace.name}/${subpath}` : targetWorkspace.name;
+      const resolved = this.resolve(owner, { value: workspaceSpecifier, intent: "REPOSITORY" });
+      return resolved.classification === "REPOSITORY" && resolved.resolvedPath.toLowerCase() === target.toLowerCase()
+        ? workspaceSpecifier
+        : null;
+    }
+
+    let relative = normalizeSlashes(path.posix.relative(path.posix.dirname(owner), target));
+    relative = extensionless(relative).replace(/\/index$/, "");
+    if (!relative.startsWith(".")) relative = `./${relative}`;
+    const resolved = this.resolve(owner, { value: relative, intent: "REPOSITORY" });
+    return resolved.classification === "REPOSITORY" && resolved.resolvedPath.toLowerCase() === target.toLowerCase()
+      ? relative
+      : null;
+  }
+
+  private workspaceForPath(filePath: string) {
+    if (!this.monorepo?.isMonorepo) return null;
+    const normalized = normalizeRepoPath(filePath);
+    return [...this.monorepo.workspaces]
+      .sort((left, right) => right.relativePath.length - left.relativePath.length)
+      .find((workspace) => normalized === workspace.relativePath || normalized.startsWith(`${workspace.relativePath}/`)) || null;
+  }
+
   private resolveRepositoryCandidate(value: string, resolved: string, source: "REPOSITORY" | "ALIAS", knownLocal: boolean): ManifestDependencyResolution {
     const match = findRepositoryMatch(resolved, this.allRepositoryFiles);
     if (match) return this.repositoryResult(value, match, source);

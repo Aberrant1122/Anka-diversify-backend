@@ -19,7 +19,7 @@ import {
   PriorVerifiedTarget,
 } from "../shared/TaskExecutionPlan";
 import { TaskExecutionPlanManager } from "../planning/TaskExecutionPlanManager";
-import { BaselineDiagnostic, FileManifest } from "../../types";
+import { BaselineDiagnostic, FileManifest, VerifiedProspectiveFeatureGraph } from "../../types";
 import { SnapshotFileInput, MonorepoDescriptor } from "../workspace/MonorepoDetector";
 import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { PolicyContract } from "../contracts/PolicyContract";
@@ -54,6 +54,10 @@ import {
   isTaskLevelActionProhibition,
   StagePlanningRecoveryRecord,
 } from "../planning/PlanningFailureFacts";
+import {
+  canonicalizeProspectiveFeatureGraph,
+  closeProspectiveGraphAfterAuthorization,
+} from "../planning/ProspectiveFeatureGraph";
 
 const prisma = new PrismaClient();
 
@@ -729,6 +733,71 @@ export class AgentPlanner {
         };
       }
 
+      let preAuthorizationTopology: VerifiedProspectiveFeatureGraph | undefined;
+      if (rawManifest?.prospectiveTopology) {
+        if (!planningRevision || !effectiveLocalPath || !constructiveEnvelope) {
+          const failureExplanation = "[Prospective Topology Invalid] Current stage, clause, workspace, and repository revision bindings are required.";
+          return {
+            explanation: failureExplanation,
+            changes: [],
+            commitMessage: "",
+            sessionId: session.id,
+            intent: intentResult.intent,
+            taskType: intentResult.taskType,
+            risk: intentResult.risk,
+            estimatedComplexity: intentResult.estimatedComplexity,
+            targetPath: intentResult.targetPath,
+            confidence: finalConfidence,
+            buildVerified: false,
+            buildErrors: failureExplanation,
+            lifecycleStage: "ManifestValidationFailed",
+            errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
+            repositoryRevision: planningRevision,
+            taskExecutionPlan: input.taskExecutionPlan,
+            compoundTaskStatus: "RUNNING",
+          };
+        }
+        const graphResult = canonicalizeProspectiveFeatureGraph(rawManifest.prospectiveTopology, rawManifest, {
+          stageId: activeStage.id,
+          userClauseId: constructiveEnvelope.userClauseId,
+          workspaceRoot: effectiveLocalPath,
+          repositoryRevision: planningRevision,
+          existingFiles: canonicalExistingFiles,
+          architecture: architectureSummary,
+          installedPackages: architectureSummary.installedPackages,
+          configurationFiles: dependencyConfigurationFiles,
+          monorepo,
+        });
+        console.log(`[PLAN_GRAPH] stage=${activeStage.id} revision=${planningRevision} nodes=${rawManifest.prospectiveTopology.nodes.length} edges=${rawManifest.prospectiveTopology.edges.length}`);
+        if (!graphResult.valid || !graphResult.graph) {
+          const failureExplanation = `[Prospective Topology Invalid] ${graphResult.errors.map((error) => error.message).join("; ")}`;
+          return {
+            explanation: failureExplanation,
+            changes: [],
+            commitMessage: "",
+            sessionId: session.id,
+            intent: intentResult.intent,
+            taskType: intentResult.taskType,
+            risk: intentResult.risk,
+            estimatedComplexity: intentResult.estimatedComplexity,
+            targetPath: intentResult.targetPath,
+            confidence: finalConfidence,
+            buildVerified: false,
+            buildErrors: failureExplanation,
+            lifecycleStage: "ManifestValidationFailed",
+            errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
+            planningFailureFacts: extractPlanningFailureFacts({ validationErrors: graphResult.errors, proposedFiles: rawManifest.files }),
+            manifestFingerprint: `${activeStage.id}@${planningRevision}:${rawManifest.prospectiveTopology.nodes.length}:${rawManifest.prospectiveTopology.edges.length}`,
+            validationErrors: graphResult.errors,
+            repositoryRevision: planningRevision,
+            taskExecutionPlan: input.taskExecutionPlan,
+            compoundTaskStatus: "RUNNING",
+          };
+        }
+        preAuthorizationTopology = graphResult.graph;
+        console.log(`[GRAPH_CANONICAL] existingNodes=${graphResult.graph.nodes.filter((node) => node.kind === "EXISTING").length} prospectiveNodes=${graphResult.graph.nodes.filter((node) => node.kind === "PROSPECTIVE").length} canonicalEdges=${graphResult.graph.edges.length}`);
+      }
+
       if (rawManifest && Array.isArray(rawManifest.files)) {
         const obligations: FileActionObligation[] =
           executionContract.actionObligations || planningContext.actionObligations || [];
@@ -1003,7 +1072,7 @@ export class AgentPlanner {
             rejectedPaths: planningEvidenceResult.rejectedPaths,
             proposedFiles: rawManifest.files,
           });
-          const manifestFingerprint = computeManifestAttemptFingerprint({
+          const manifestFingerprint = preAuthorizationTopology?.fingerprint || computeManifestAttemptFingerprint({
             stageId: activeStage.id,
             repositoryRevision: currentPlanningRevision,
             files: rawManifest.files,
@@ -1117,7 +1186,41 @@ export class AgentPlanner {
           files: coherentFiles,
           totalFiles: coherentFiles.length,
           manifestVersion: rawManifest.manifestVersion || "1.0.0",
+          ...(rawManifest.prospectiveTopology ? { prospectiveTopology: rawManifest.prospectiveTopology } : {}),
         };
+
+        if (preAuthorizationTopology) {
+          const closure = closeProspectiveGraphAfterAuthorization(preAuthorizationTopology, planningEvidenceResult.approvedPaths);
+          console.log(`[GRAPH_AUTH] approvedNodes=${planningEvidenceResult.approvedPaths.length} rejectedNodes=${planningEvidenceResult.rejectedPaths.length} closureValid=${closure.valid}`);
+          if (!closure.valid || !closure.graph) {
+            const failureExplanation = `[Prospective Topology Authorization Closure Failed] ${closure.errors.map((error) => error.message).join("; ")}`;
+            return {
+              explanation: failureExplanation,
+              changes: [],
+              commitMessage: "",
+              sessionId: session.id,
+              intent: intentResult.intent,
+              taskType: intentResult.taskType,
+              risk: intentResult.risk,
+              estimatedComplexity: intentResult.estimatedComplexity,
+              targetPath: intentResult.targetPath,
+              confidence: finalConfidence,
+              buildVerified: false,
+              buildErrors: failureExplanation,
+              lifecycleStage: "ManifestValidationFailed",
+              errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
+              planningFailureFacts: extractPlanningFailureFacts({ validationErrors: closure.errors, rejectedPaths: planningEvidenceResult.rejectedPaths, proposedFiles: rawManifest.files }),
+              manifestFingerprint: preAuthorizationTopology.fingerprint,
+              authorizedPaths: planningEvidenceResult.approvedPaths,
+              rejectedPaths: planningEvidenceResult.rejectedPaths.map((rejection) => ({ ...rejection, classification: classifyWriteRejection(rejection.reasonCode) })),
+              validationErrors: closure.errors,
+              repositoryRevision: planningRevision,
+              taskExecutionPlan: input.taskExecutionPlan,
+              compoundTaskStatus: "RUNNING",
+            };
+          }
+          coherentPlanningManifest.verifiedTopology = closure.graph;
+        }
 
         const validator = new ManifestValidator(executionContract, {
           existingFiles: canonicalExistingFiles,
@@ -1125,6 +1228,13 @@ export class AgentPlanner {
           packageVersions: architectureSummary.packageVersions,
           monorepo,
           configurationFiles: dependencyConfigurationFiles,
+          architecture: architectureSummary,
+          graphBinding: planningRevision && effectiveLocalPath && constructiveEnvelope ? {
+            stageId: activeStage.id,
+            userClauseId: constructiveEnvelope.userClauseId,
+            workspaceRoot: effectiveLocalPath,
+            repositoryRevision: planningRevision,
+          } : undefined,
         });
         let valRes = validator.validate(coherentPlanningManifest);
 
@@ -1187,7 +1297,7 @@ export class AgentPlanner {
               proposedFiles: rawManifest?.files,
             });
 
-            const manifestFingerprint = computeManifestAttemptFingerprint({
+            const manifestFingerprint = preAuthorizationTopology?.fingerprint || computeManifestAttemptFingerprint({
               stageId: activeStage.id,
               repositoryRevision: currentPlanningRevision,
               files: rawManifest?.files || [],

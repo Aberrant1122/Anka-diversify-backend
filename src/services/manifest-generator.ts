@@ -75,6 +75,32 @@ function isExternalPackageIntent(value: unknown): boolean {
     (dependency.subpath === undefined || (typeof dependency.subpath === "string" && !!dependency.subpath.trim()));
 }
 
+function isProspectiveTopologyProposal(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const graph = value as Record<string, unknown>;
+  if (Object.keys(graph).some((key) => !["nodes", "edges", "featureRoots"].includes(key)) ||
+      !Array.isArray(graph.nodes) || !Array.isArray(graph.edges) || !Array.isArray(graph.featureRoots)) return false;
+  const ids = new Set<string>();
+  for (const rawNode of graph.nodes) {
+    if (!rawNode || typeof rawNode !== "object" || Array.isArray(rawNode)) return false;
+    const node = rawNode as Record<string, unknown>;
+    if (Object.keys(node).some((key) => !["temporaryId", "path", "kind", "role", "symbol"].includes(key)) ||
+        typeof node.temporaryId !== "string" || !node.temporaryId || ids.has(node.temporaryId) ||
+        !isSafeManifestPath(node.path) || !["PROSPECTIVE", "EXISTING"].includes(String(node.kind)) ||
+        !["ROUTE", "COMPONENT", "CHILD_COMPONENT", "MODULE", "EXISTING_DEPENDENCY", "INTEGRATION_ROOT"].includes(String(node.role)) ||
+        (node.symbol !== undefined && (typeof node.symbol !== "string" || !node.symbol.trim()))) return false;
+    ids.add(node.temporaryId);
+  }
+  return graph.edges.every((rawEdge) => {
+    if (!rawEdge || typeof rawEdge !== "object" || Array.isArray(rawEdge)) return false;
+    const edge = rawEdge as Record<string, unknown>;
+    return !Object.keys(edge).some((key) => !["sourceId", "targetId", "relation", "rawImportHint"].includes(key)) &&
+      typeof edge.sourceId === "string" && typeof edge.targetId === "string" &&
+      ["RENDERS", "IMPORTS", "DEPENDS_ON", "REGISTERS", "ROUTES_TO"].includes(String(edge.relation)) &&
+      (edge.rawImportHint === undefined || typeof edge.rawImportHint === "string");
+  }) && graph.featureRoots.every((root) => typeof root === "string");
+}
+
 export class ManifestGenerator {
   private openai: OpenAI;
 
@@ -173,7 +199,8 @@ export class ManifestGenerator {
     }
 
     contextText += `AUTHORIZATION BOUNDARY:\n`;
-    contextText += `- Propose only path, action, dependencies, and description.\n`;
+    contextText += `- Propose path, action, dependency intent, and an optional typed prospectiveTopology for coherent multi-file features.\n`;
+    contextText += `- In prospectiveTopology, use temporary node IDs, typed roles/relations, and feature roots. Raw import hints are diagnostic only; the backend owns canonical targets and specifiers.\n`;
     contextText += `- Do not emit repository evidence IDs. The backend independently acquires and binds current-revision authorization evidence after validating this proposal.\n\n`;
 
     contextText += `VERIFIED REPOSITORY ARCHITECTURE:\n`;
@@ -242,7 +269,7 @@ export class ManifestGenerator {
 
     try {
       const gateway = LLMGateway.getInstance();
-      const response = await gateway.callStructured<{ files: any[]; totalFiles: number; manifestVersion: string }>({
+      const response = await gateway.callStructured<{ files: any[]; totalFiles: number; manifestVersion: string; prospectiveTopology?: unknown }>({
         stage: PipelineStages.MANIFEST_GENERATION,
         openaiClient: this.openai,
         messages: [
@@ -296,11 +323,48 @@ export class ManifestGenerator {
               },
               totalFiles: { type: "number" },
               manifestVersion: { type: "string", enum: ["1.0.0"] },
+              prospectiveTopology: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  nodes: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        temporaryId: { type: "string" },
+                        path: { type: "string" },
+                        kind: { type: "string", enum: ["PROSPECTIVE", "EXISTING"] },
+                        role: { type: "string", enum: ["ROUTE", "COMPONENT", "CHILD_COMPONENT", "MODULE", "EXISTING_DEPENDENCY", "INTEGRATION_ROOT"] },
+                        symbol: { type: "string" },
+                      },
+                      required: ["temporaryId", "path", "kind", "role"],
+                    },
+                  },
+                  edges: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        sourceId: { type: "string" },
+                        targetId: { type: "string" },
+                        relation: { type: "string", enum: ["RENDERS", "IMPORTS", "DEPENDS_ON", "REGISTERS", "ROUTES_TO"] },
+                        rawImportHint: { type: "string" },
+                      },
+                      required: ["sourceId", "targetId", "relation"],
+                    },
+                  },
+                  featureRoots: { type: "array", items: { type: "string" } },
+                },
+                required: ["nodes", "edges", "featureRoots"],
+              },
             },
             required: ["files", "totalFiles", "manifestVersion"],
           },
           validate: (parsed) => {
-            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).some((key) => !["files", "totalFiles", "manifestVersion"].includes(key))) return { valid: false, errors: ["Parsed manifest is not an exact object"] };
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).some((key) => !["files", "totalFiles", "manifestVersion", "prospectiveTopology"].includes(key))) return { valid: false, errors: ["Parsed manifest is not an exact object"] };
             if (!Array.isArray(parsed.files) || parsed.files.length === 0 || parsed.files.length > contract.maxFiles) return { valid: false, errors: ["Manifest file count is invalid"] };
             if (parsed.totalFiles !== parsed.files.length || parsed.manifestVersion !== "1.0.0") return { valid: false, errors: ["Manifest metadata is inconsistent"] };
             const paths = new Set<string>();
@@ -317,6 +381,7 @@ export class ManifestGenerator {
               // Its contents are deliberately not inspected: backend binding
               // replaces the field before any authority resolver is invoked.
             }
+            if (parsed.prospectiveTopology !== undefined && !isProspectiveTopologyProposal(parsed.prospectiveTopology)) return { valid: false, errors: ["Prospective topology is invalid"] };
             return { valid: true, data: parsed };
           },
         },
@@ -443,6 +508,9 @@ export class ManifestGenerator {
       files: boundedFiles,
       totalFiles: boundedFiles.length,
       manifestVersion: "1.0.0",
+      ...(parsed.prospectiveTopology && isProspectiveTopologyProposal(parsed.prospectiveTopology)
+        ? { prospectiveTopology: parsed.prospectiveTopology }
+        : {}),
     };
   }
 

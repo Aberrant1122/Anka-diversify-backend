@@ -1,5 +1,6 @@
 import path from "path";
 import type { ConstructiveArchitectureFacts, ConstructiveRegionFact } from "../contracts/ConstructiveCapabilityEnvelope";
+import { describeFrameworkRoute } from "../repository/FrameworkRouteMatcher";
 
 export type FrameworkType = "NEXT_JS" | "VITE_REACT" | "EXPRESS" | "NODE_JS" | "UNKNOWN";
 export type RouterType = "APP_ROUTER" | "PAGES_ROUTER" | "HYBRID" | "NONE";
@@ -315,15 +316,13 @@ export function detectAllActiveEntryRoots(
     }
   }
 
-  // 3. Next.js recognized route / page / layout entries (App Router & Pages Router)
-  for (const f of normalizedFiles) {
-    // App Router: (apps/.../)?(src/)?app/(.../)?(page|layout).(tsx|jsx|js|ts)
-    const isAppRoute = /^(?:apps\/[^\/]+\/)?(?:src\/)?app\/(?:.*\/)?(?:page|layout)\.(?:tsx|jsx|js|ts)$/i.test(f.norm);
-    // Pages Router: (apps/.../)?(src/)?pages/(?!api/).*.(tsx|jsx|js|ts)
-    const isPagesRoute = /^(?:apps\/[^\/]+\/)?(?:src\/)?pages\/(?!api\/).*\.(?:tsx|jsx|js|ts)$/i.test(f.norm);
-
-    if (isAppRoute || isPagesRoute) {
-      roots.add(f.original.replace(/\\/g, "/"));
+  // 3. Filesystem routes are roots only when current architecture is
+  // unambiguous and the shared framework matcher proves the path is a route.
+  if (arch?.framework === "NEXT_JS" && (arch.router === "APP_ROUTER" || arch.router === "PAGES_ROUTER")) {
+    const expectedFramework = arch.router === "APP_ROUTER" ? "NEXT_APP_ROUTER" : "NEXT_PAGES_ROUTER";
+    for (const f of normalizedFiles) {
+      const descriptor = describeFrameworkRoute(f.original);
+      if (descriptor?.framework === expectedFramework) roots.add(f.original.replace(/\\/g, "/"));
     }
   }
 
