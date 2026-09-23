@@ -33,6 +33,8 @@ import { AgentLoopCoordinator } from "./AgentLoopCoordinator";
 import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
 import { TaskRuntime } from "../runtime/TaskRuntime";
 import { WorkingPlan } from "../runtime/WorkingPlan";
+import { authoritySnapshot } from "../repository/AuthorityWorktree";
+import { canonicalWorkspaceIdentity, createPreCanonicalRecoveryEvent, PlanningFailureFact } from "../planning/PlanningFailureFacts";
 import { CompletionEvaluationResult, CompletionEvaluator } from "../runtime/CompletionEvaluator";
 import {
   BaselineDiagnosticVerifier,
@@ -184,10 +186,20 @@ export class AgentPipeline {
         const observation = await RepositoryObserver.observe(projectId, iterationRequest, facts, options);
         preparedFacts = facts;
         preparedObservation = observation;
+        const previouslyObservedRoot = initialObservation?.effectiveLocalPath;
+        if (
+          previouslyObservedRoot && observation.effectiveLocalPath
+          && canonicalWorkspaceIdentity(previouslyObservedRoot) !== canonicalWorkspaceIdentity(observation.effectiveLocalPath)
+        ) {
+          throw new Error("WORKSPACE_BINDING_INVALID: repository observation changed workspace root during one task");
+        }
         initialObservation ??= observation;
         const revision = observation.currentRevisionHash ?? `unversioned-iteration-${iteration}`;
         currentObservationRevision = revision;
-        const workspace = runtime.workspaceState().withEvidence({
+        const workspace = runtime.workspaceState().withRepositoryObservation({
+          root: observation.effectiveLocalPath || runtime.workspaceState().snapshot().repository.root,
+          revision,
+        }).withEvidence({
           id: `loop-observation:${iteration}:${revision}`,
           kind: "MATERIALIZED_REPOSITORY",
           description: `RepositoryObserver captured current repository bytes for agent-loop iteration ${iteration}.`,
@@ -715,6 +727,7 @@ export class AgentPipeline {
       rawSnapshotFiles,
       finalConfidence,
       searchSummary,
+      investigationReadiness,
       inspectedFiles: inspectedFilesArr,
       scannedCount,
       extractedSymbolsCount,
@@ -726,6 +739,79 @@ export class AgentPipeline {
       stage4DurationMs: s4Time,
       stage5DurationMs: s5Time,
     } = contextAssembly;
+    if (!investigationReadiness) {
+      return {
+        explanation: "[Internal Recovery Contract Error] Repository search omitted deterministic investigation readiness.",
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        buildVerified: false,
+        errorCode: "INTERNAL_RECOVERY_CONTRACT_ERROR",
+      };
+    }
+    if (!investigationReadiness.readyToPlan) {
+      if (!effectiveLocalPath) {
+        return {
+          explanation: "[Internal Recovery Contract Error] Investigation recovery requires a canonical workspace.",
+          changes: [],
+          commitMessage: "",
+          sessionId: session.id,
+          buildVerified: false,
+          errorCode: "INTERNAL_RECOVERY_CONTRACT_ERROR",
+        };
+      }
+      const repositoryRevision = authoritySnapshot(effectiveLocalPath).revision;
+      const failureFacts: PlanningFailureFact[] = investigationReadiness.missingEvidenceKinds.flatMap((kind) => {
+        const matchingTargets = investigationReadiness.missingTargets.length > 0
+          ? investigationReadiness.missingTargets
+          : [undefined];
+        return matchingTargets.map((affectedPath) => ({
+          kind: "INVESTIGATION_READINESS" as const,
+          ...(affectedPath ? { affectedPath } : {}),
+          reason: kind,
+        }));
+      });
+      if (failureFacts.length === 0) {
+        return {
+          explanation: "[Internal Recovery Contract Error] Investigation reported not ready without a typed blocking fact.",
+          changes: [],
+          commitMessage: "",
+          sessionId: session.id,
+          buildVerified: false,
+          errorCode: "INTERNAL_RECOVERY_CONTRACT_ERROR",
+        };
+      }
+      const planningRecoveryEvent = createPreCanonicalRecoveryEvent({
+        phase: "INVESTIGATION",
+        stageId: activeStage.id,
+        workspaceRoot: effectiveLocalPath,
+        repositoryRevision,
+        failureFacts,
+        operationKinds: activeStage.intent.operations.map((operation) => operation.kind),
+        missingTargets: investigationReadiness.missingTargets,
+        inspectedPaths: investigationReadiness.inspectedPaths,
+        deterministicFacts: investigationReadiness.missingEvidenceKinds,
+      });
+      return {
+        explanation: "[Investigation Incomplete] Required deterministic repository evidence is still missing after the bounded investigation rounds.",
+        changes: [],
+        commitMessage: "",
+        sessionId: session.id,
+        intent: intentResult.intent,
+        taskType: intentResult.taskType,
+        risk: intentResult.risk,
+        estimatedComplexity: intentResult.estimatedComplexity,
+        confidence: finalConfidence,
+        buildVerified: false,
+        lifecycleStage: "InsufficientRepositoryEvidence",
+        errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
+        planningFailureFacts: [...planningRecoveryEvent.failureFacts],
+        planningRecoveryEvent,
+        repositoryRevision,
+        taskExecutionPlan,
+        compoundTaskStatus: "RUNNING",
+      };
+    }
     const manifestPlanning = await AgentPlanner.planManifest({
       projectId,
       sessionId: session.id,

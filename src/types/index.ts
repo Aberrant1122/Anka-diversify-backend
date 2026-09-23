@@ -548,6 +548,7 @@ export interface AgentResponse {
   checkpointId?: string;
   actionGroupId?: string;
   planningFailureFacts?: import("../ai/planning/PlanningFailureFacts").PlanningFailureFact[];
+  planningRecoveryEvent?: import("../ai/planning/PlanningFailureFacts").StagePlanningRecoveryEvent;
   manifestFingerprint?: string;
   authorizedPaths?: string[];
   rejectedPaths?: Array<{

@@ -171,6 +171,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Found semantic candidates",
         inspectedFiles: ["src/Dashboard.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/Dashboard.tsx"] },
       } as any;
     });
 
@@ -233,6 +234,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Found entry point",
         inspectedFiles: ["src/App.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/App.tsx"] },
       } as any;
     });
 
@@ -298,6 +300,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Verified Button relation",
         inspectedFiles: ["src/Button.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/Button.tsx"] },
       } as any;
     });
 
@@ -378,6 +381,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Verified App integration site",
         inspectedFiles: ["src/App.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/App.tsx"] },
       } as any;
     });
 
@@ -467,6 +471,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Summary",
         inspectedFiles: ["src/Dashboard.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/Dashboard.tsx"] },
       } as any;
     });
 
@@ -559,6 +564,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Investigation completed in 3 rounds",
         inspectedFiles: ["src/App.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/App.tsx"] },
       } as any;
     });
 

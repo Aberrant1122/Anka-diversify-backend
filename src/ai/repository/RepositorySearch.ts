@@ -166,6 +166,12 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
     finalConfidence: number;
     searchSummary: string;
     evidenceStore: RepositoryEvidenceStore;
+    investigationReadiness: {
+      readyToPlan: boolean;
+      missingEvidenceKinds: readonly import("./RepositoryInvestigationAgent").InvestigationMissingEvidenceKind[];
+      missingTargets: readonly string[];
+      inspectedPaths: readonly string[];
+    };
   }> {
     const taskId = `task-${Date.now()}`;
     const effectiveSnap = RepositoryScanner.getEffectiveSnapshot(snapshot, localPath);
@@ -202,6 +208,12 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
         finalConfidence: 1.0,
         searchSummary: `Standalone Pipeline active — Repository search bypassed. ${Object.keys(existingFiles).length} existing standalone file(s) included in context.`,
         evidenceStore: store,
+        investigationReadiness: {
+          readyToPlan: true,
+          missingEvidenceKinds: [],
+          missingTargets: [],
+          inspectedPaths: Object.keys(existingFiles),
+        },
       };
     }
 
@@ -300,6 +312,12 @@ Respond with ONLY valid JSON: { "approach": "string", "filesToRead": ["path1", "
       finalConfidence: executionMemory.currentConfidence,
       searchSummary: investigationResult.summary,
       evidenceStore: store,
+      investigationReadiness: {
+        readyToPlan: investigationResult.readyToPlan,
+        missingEvidenceKinds: investigationResult.missingEvidenceKinds,
+        missingTargets: investigationResult.missingTargets,
+        inspectedPaths: investigationResult.allExploredFiles,
+      },
     };
   }
 }

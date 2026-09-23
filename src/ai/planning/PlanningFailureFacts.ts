@@ -1,3 +1,5 @@
+import { createHash } from "crypto";
+import path from "path";
 import { ValidationError } from "../../types";
 import type {
   RejectedWriteCandidate,
@@ -11,7 +13,9 @@ export type PlanningFailureFactKind =
   | "ORPHAN_CREATE"
   | "AUTHORITY_REJECTION"
   | "DEPENDENCY_CLOSURE"
-  | "INVALID_MANIFEST_STRUCTURE";
+  | "INVALID_MANIFEST_STRUCTURE"
+  | "INVESTIGATION_READINESS"
+  | "TOPOLOGY_PRECONDITION";
 
 export type PlanningFailureClassification =
   | "RECOVERABLE_CANDIDATE"
@@ -28,12 +32,43 @@ export interface PlanningFailureFact {
   classification?: PlanningFailureClassification;
 }
 
-export interface StagePlanningRecoveryRecord {
+export type NonEmptyPlanningFailureFacts = readonly [PlanningFailureFact, ...PlanningFailureFact[]];
+
+export type PlanningRecoveryPhase =
+  | "INVESTIGATION"
+  | "TOPOLOGY_CANONICALIZATION"
+  | "AUTHORIZATION"
+  | "MANIFEST_VALIDATION"
+  | "LOCAL_CORRECTION"
+  | "FRESH_AUTHORIZATION"
+  | "FULL_STAGE_REINVESTIGATION";
+
+interface StagePlanningRecoveryEventBase {
+  readonly stageId: string;
+  readonly workspaceIdentity: string;
+  readonly repositoryRevision: string;
+  readonly failureFacts: NonEmptyPlanningFailureFacts;
+}
+
+export interface PreCanonicalRecoveryEvent extends StagePlanningRecoveryEventBase {
+  readonly kind: "PRE_CANONICAL";
+  readonly phase: "INVESTIGATION" | "TOPOLOGY_CANONICALIZATION" | "FRESH_AUTHORIZATION" | "FULL_STAGE_REINVESTIGATION";
+  readonly recoveryIdentity: string;
+  readonly progressMarker: string;
+  readonly userClauseId?: string;
+}
+
+export interface CanonicalPlanRecoveryEvent extends StagePlanningRecoveryEventBase {
+  readonly kind: "CANONICAL_PLAN";
+  readonly phase: "AUTHORIZATION" | "MANIFEST_VALIDATION" | "LOCAL_CORRECTION" | "FRESH_AUTHORIZATION" | "FULL_STAGE_REINVESTIGATION";
+  readonly manifestFingerprint: string;
+}
+
+export type StagePlanningRecoveryEvent = PreCanonicalRecoveryEvent | CanonicalPlanRecoveryEvent;
+
+export type StagePlanningRecoveryRecord = StagePlanningRecoveryEvent & {
   readonly stageId: string;
   readonly attemptNumber: number;
-  readonly fingerprint: string;
-  readonly repositoryRevision?: string;
-  readonly failureFacts: readonly PlanningFailureFact[];
   readonly rejectedPaths: ReadonlyArray<{
     path: string;
     action?: PlanningFileAction;
@@ -43,7 +78,7 @@ export interface StagePlanningRecoveryRecord {
   }>;
   readonly authorizedPaths: readonly string[];
   readonly validationErrors?: readonly ValidationError[];
-}
+};
 
 export const MAX_STAGE_PLANNING_ATTEMPTS = 3;
 
@@ -89,6 +124,111 @@ export function isTaskLevelActionProhibition(
 
 function normalizeRepoPath(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/^\.\//, "").trim();
+}
+
+function requireNonEmptyText(value: string | undefined, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`INTERNAL_RECOVERY_CONTRACT_ERROR: ${field} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+export function requireNonEmptyFailureFacts(
+  facts: readonly PlanningFailureFact[] | undefined,
+): NonEmptyPlanningFailureFacts {
+  if (!facts || facts.length === 0) {
+    throw new Error("INTERNAL_RECOVERY_CONTRACT_ERROR: recovery failureFacts must be non-empty");
+  }
+  return facts as NonEmptyPlanningFailureFacts;
+}
+
+export function canonicalWorkspaceIdentity(workspaceRoot: string): string {
+  const resolved = path.resolve(requireNonEmptyText(workspaceRoot, "workspaceRoot")).replace(/\\/g, "/");
+  return /^[A-Z]:/.test(resolved) ? `${resolved[0].toLowerCase()}${resolved.slice(1)}` : resolved;
+}
+
+function stableHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function normalizedFactIdentity(fact: PlanningFailureFact): Record<string, string> {
+  return {
+    kind: fact.kind,
+    action: fact.action || "",
+    reasonCode: fact.reasonCode || "",
+    classification: fact.classification || "",
+  };
+}
+
+function sortedNormalizedPaths(values: readonly string[] | undefined): string[] {
+  return Array.from(new Set((values || []).map(normalizeRepoPath).filter(Boolean))).sort();
+}
+
+export function createPreCanonicalRecoveryEvent(input: {
+  phase: PreCanonicalRecoveryEvent["phase"];
+  stageId: string;
+  workspaceRoot: string;
+  repositoryRevision: string;
+  failureFacts: readonly PlanningFailureFact[];
+  userClauseId?: string;
+  operationKinds?: readonly string[];
+  missingTargets?: readonly string[];
+  inspectedPaths?: readonly string[];
+  deterministicFacts?: readonly string[];
+}): PreCanonicalRecoveryEvent {
+  const stageId = requireNonEmptyText(input.stageId, "stageId");
+  const workspaceIdentity = canonicalWorkspaceIdentity(input.workspaceRoot);
+  const repositoryRevision = requireNonEmptyText(input.repositoryRevision, "repositoryRevision");
+  const failureFacts = requireNonEmptyFailureFacts(input.failureFacts);
+  const operationKinds = Array.from(new Set(input.operationKinds || [])).sort();
+  const failureKinds = failureFacts.map(normalizedFactIdentity).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const identityMaterial = {
+    kind: "PRE_CANONICAL",
+    phase: input.phase,
+    stageId,
+    userClauseId: input.userClauseId || "",
+    workspaceIdentity,
+    repositoryRevision,
+    operationKinds,
+    failureKinds,
+  };
+  const progressMaterial = {
+    missingTargets: sortedNormalizedPaths(input.missingTargets),
+    inspectedPaths: sortedNormalizedPaths(input.inspectedPaths),
+    affectedPaths: sortedNormalizedPaths(failureFacts.map((fact) => fact.affectedPath || "")),
+    dependencies: Array.from(new Set(failureFacts.map((fact) => fact.dependency || "").filter(Boolean))).sort(),
+    deterministicFacts: Array.from(new Set(input.deterministicFacts || [])).sort(),
+  };
+  return {
+    kind: "PRE_CANONICAL",
+    phase: input.phase,
+    stageId,
+    workspaceIdentity,
+    repositoryRevision,
+    failureFacts,
+    recoveryIdentity: stableHash(identityMaterial),
+    progressMarker: stableHash(progressMaterial),
+    ...(input.userClauseId ? { userClauseId: requireNonEmptyText(input.userClauseId, "userClauseId") } : {}),
+  };
+}
+
+export function createCanonicalPlanRecoveryEvent(input: {
+  phase: CanonicalPlanRecoveryEvent["phase"];
+  stageId: string;
+  workspaceRoot: string;
+  repositoryRevision: string;
+  manifestFingerprint: string;
+  failureFacts: readonly PlanningFailureFact[];
+}): CanonicalPlanRecoveryEvent {
+  return {
+    kind: "CANONICAL_PLAN",
+    phase: input.phase,
+    stageId: requireNonEmptyText(input.stageId, "stageId"),
+    workspaceIdentity: canonicalWorkspaceIdentity(input.workspaceRoot),
+    repositoryRevision: requireNonEmptyText(input.repositoryRevision, "repositoryRevision"),
+    manifestFingerprint: requireNonEmptyText(input.manifestFingerprint, "manifestFingerprint"),
+    failureFacts: requireNonEmptyFailureFacts(input.failureFacts),
+  };
 }
 
 /**

@@ -77,6 +77,7 @@ export interface RepositoryContextAssemblyResult {
   rawSnapshotFiles: SnapshotFileInput[];
   finalConfidence: number;
   searchSummary: string;
+  investigationReadiness: Awaited<ReturnType<typeof RepositorySearch.runIterativeRepositorySearch>>["investigationReadiness"];
   inspectedFiles: string[];
   scannedCount: number;
   extractedSymbolsCount: number;
@@ -232,7 +233,7 @@ export class RepositoryObserver {
 
     // Stage 3: Iterative Repository Search Loop
     const s3Start = performance.now();
-    const { optimizedContext, executionMemory, finalConfidence, searchSummary } =
+    const { optimizedContext, executionMemory, finalConfidence, searchSummary, investigationReadiness } =
       await RepositorySearch.runIterativeRepositorySearch(
         effectiveGoal,
         effectiveSnapshot,
@@ -475,6 +476,7 @@ export class RepositoryObserver {
       rawSnapshotFiles,
       finalConfidence,
       searchSummary,
+      investigationReadiness,
       inspectedFiles: inspectedFilesArr,
       scannedCount,
       extractedSymbolsCount,

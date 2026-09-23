@@ -51,7 +51,10 @@ import {
   extractPlanningFailureFacts,
   computeManifestAttemptFingerprint,
   classifyWriteRejection,
+  createCanonicalPlanRecoveryEvent,
+  createPreCanonicalRecoveryEvent,
   isTaskLevelActionProhibition,
+  PlanningFailureFact,
   StagePlanningRecoveryRecord,
 } from "../planning/PlanningFailureFacts";
 import {
@@ -60,6 +63,21 @@ import {
 } from "../planning/ProspectiveFeatureGraph";
 
 const prisma = new PrismaClient();
+
+export type ProspectiveTopologyApplicability =
+  | "NOT_PROPOSED"
+  | "INAPPLICABLE_NON_CREATE"
+  | "CANONICALIZE"
+  | "FAIL_MISSING_CREATE_ENVELOPE";
+
+export function evaluateProspectiveTopologyApplicability(
+  manifest: FileManifest | null | undefined,
+  hasConstructiveEnvelope: boolean,
+): ProspectiveTopologyApplicability {
+  if (!manifest?.prospectiveTopology) return "NOT_PROPOSED";
+  if (!manifest.files.some((file) => file.action === "create")) return "INAPPLICABLE_NON_CREATE";
+  return hasConstructiveEnvelope ? "CANONICALIZE" : "FAIL_MISSING_CREATE_ENVELOPE";
+}
 
 /**
  * Converts model planning fields into resolver input by replacing every
@@ -734,9 +752,40 @@ export class AgentPlanner {
       }
 
       let preAuthorizationTopology: VerifiedProspectiveFeatureGraph | undefined;
+      const topologyApplicability = evaluateProspectiveTopologyApplicability(rawManifest, Boolean(constructiveEnvelope));
+      if (topologyApplicability === "INAPPLICABLE_NON_CREATE" && rawManifest) {
+        const { prospectiveTopology: ignoredTopology, ...nonConstructiveManifest } = rawManifest;
+        rawManifest = nonConstructiveManifest as FileManifest;
+        console.log(`[PLAN_GRAPH] stage=${activeStage.id} applicability=INAPPLICABLE_NON_CREATE result=IGNORED`);
+      }
       if (rawManifest?.prospectiveTopology) {
         if (!planningRevision || !effectiveLocalPath || !constructiveEnvelope) {
           const failureExplanation = "[Prospective Topology Invalid] Current stage, clause, workspace, and repository revision bindings are required.";
+          const failureFacts: readonly PlanningFailureFact[] = [{
+            kind: "TOPOLOGY_PRECONDITION",
+            action: "create",
+            reason: "A prospective CREATE topology lacked a valid constructive stage, clause, workspace, or repository revision binding.",
+          }];
+          if (!planningRevision || !effectiveLocalPath) {
+            return {
+              explanation: "[Internal Recovery Contract Error] Prospective topology recovery requires a bound workspace and repository revision.",
+              changes: [],
+              commitMessage: "",
+              sessionId: session.id,
+              buildVerified: false,
+              errorCode: "INTERNAL_RECOVERY_CONTRACT_ERROR",
+            };
+          }
+          const planningRecoveryEvent = createPreCanonicalRecoveryEvent({
+            phase: "TOPOLOGY_CANONICALIZATION",
+            stageId: activeStage.id,
+            workspaceRoot: effectiveLocalPath,
+            repositoryRevision: planningRevision,
+            failureFacts,
+            operationKinds: activeStage.intent.operations.map((operation) => operation.kind),
+            missingTargets: rawManifest.files.filter((file) => file.action === "create").map((file) => file.path),
+            inspectedPaths: relevantPlanningFiles.map((file) => file.path),
+          });
           return {
             explanation: failureExplanation,
             changes: [],
@@ -752,6 +801,8 @@ export class AgentPlanner {
             buildErrors: failureExplanation,
             lifecycleStage: "ManifestValidationFailed",
             errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
+            planningFailureFacts: [...failureFacts],
+            planningRecoveryEvent,
             repositoryRevision: planningRevision,
             taskExecutionPlan: input.taskExecutionPlan,
             compoundTaskStatus: "RUNNING",
@@ -771,6 +822,23 @@ export class AgentPlanner {
         console.log(`[PLAN_GRAPH] stage=${activeStage.id} revision=${planningRevision} nodes=${rawManifest.prospectiveTopology.nodes.length} edges=${rawManifest.prospectiveTopology.edges.length}`);
         if (!graphResult.valid || !graphResult.graph) {
           const failureExplanation = `[Prospective Topology Invalid] ${graphResult.errors.map((error) => error.message).join("; ")}`;
+          const planningFailureFacts = extractPlanningFailureFacts({ validationErrors: graphResult.errors, proposedFiles: rawManifest.files });
+          const planningRecoveryEvent = createPreCanonicalRecoveryEvent({
+            phase: "TOPOLOGY_CANONICALIZATION",
+            stageId: activeStage.id,
+            workspaceRoot: effectiveLocalPath,
+            repositoryRevision: planningRevision,
+            failureFacts: planningFailureFacts.length > 0 ? planningFailureFacts : [{
+              kind: "TOPOLOGY_PRECONDITION",
+              action: "create",
+              reason: "The prospective CREATE graph failed deterministic canonicalization.",
+            }],
+            userClauseId: constructiveEnvelope.userClauseId,
+            operationKinds: activeStage.intent.operations.map((operation) => operation.kind),
+            missingTargets: rawManifest.files.filter((file) => file.action === "create").map((file) => file.path),
+            inspectedPaths: relevantPlanningFiles.map((file) => file.path),
+            deterministicFacts: graphResult.errors.map((error) => error.type),
+          });
           return {
             explanation: failureExplanation,
             changes: [],
@@ -786,8 +854,8 @@ export class AgentPlanner {
             buildErrors: failureExplanation,
             lifecycleStage: "ManifestValidationFailed",
             errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
-            planningFailureFacts: extractPlanningFailureFacts({ validationErrors: graphResult.errors, proposedFiles: rawManifest.files }),
-            manifestFingerprint: `${activeStage.id}@${planningRevision}:${rawManifest.prospectiveTopology.nodes.length}:${rawManifest.prospectiveTopology.edges.length}`,
+            planningFailureFacts: [...planningRecoveryEvent.failureFacts],
+            planningRecoveryEvent,
             validationErrors: graphResult.errors,
             repositoryRevision: planningRevision,
             taskExecutionPlan: input.taskExecutionPlan,
@@ -1104,6 +1172,16 @@ export class AgentPlanner {
           const responseExplanation = hasTerminalTaskFailure
             ? "[Planning Scope Rejected] The authenticated stage cannot proceed under the current policy or workspace authority."
             : failureExplanation;
+          const planningRecoveryEvent = !hasTerminalTaskFailure && effectiveLocalPath && currentPlanningRevision
+            ? createCanonicalPlanRecoveryEvent({
+                phase: "AUTHORIZATION",
+                stageId: activeStage.id,
+                workspaceRoot: effectiveLocalPath,
+                repositoryRevision: currentPlanningRevision,
+                manifestFingerprint,
+                failureFacts: planningFailureFacts,
+              })
+            : undefined;
 
           return {
             explanation: responseExplanation,
@@ -1123,6 +1201,7 @@ export class AgentPlanner {
               ? "PLANNING_SCOPE_REJECTED"
               : "PLANNING_REINVESTIGATION_REQUIRED",
             planningFailureFacts,
+            planningRecoveryEvent,
             manifestFingerprint,
             authorizedPaths: [],
             rejectedPaths,
@@ -1194,6 +1273,29 @@ export class AgentPlanner {
           console.log(`[GRAPH_AUTH] approvedNodes=${planningEvidenceResult.approvedPaths.length} rejectedNodes=${planningEvidenceResult.rejectedPaths.length} closureValid=${closure.valid}`);
           if (!closure.valid || !closure.graph) {
             const failureExplanation = `[Prospective Topology Authorization Closure Failed] ${closure.errors.map((error) => error.message).join("; ")}`;
+            const planningFailureFacts = extractPlanningFailureFacts({ validationErrors: closure.errors, rejectedPaths: planningEvidenceResult.rejectedPaths, proposedFiles: rawManifest.files });
+            if (!effectiveLocalPath || !planningRevision) {
+              return {
+                explanation: "[Internal Recovery Contract Error] Canonical topology recovery requires a bound workspace and repository revision.",
+                changes: [],
+                commitMessage: "",
+                sessionId: session.id,
+                buildVerified: false,
+                errorCode: "INTERNAL_RECOVERY_CONTRACT_ERROR",
+              };
+            }
+            const planningRecoveryEvent = createCanonicalPlanRecoveryEvent({
+              phase: "AUTHORIZATION",
+              stageId: activeStage.id,
+              workspaceRoot: effectiveLocalPath,
+              repositoryRevision: planningRevision,
+              manifestFingerprint: preAuthorizationTopology.fingerprint,
+              failureFacts: planningFailureFacts.length > 0 ? planningFailureFacts : [{
+                kind: "DEPENDENCY_CLOSURE",
+                action: "create",
+                reason: "The canonical prospective graph failed post-authorization closure.",
+              }],
+            });
             return {
               explanation: failureExplanation,
               changes: [],
@@ -1209,7 +1311,8 @@ export class AgentPlanner {
               buildErrors: failureExplanation,
               lifecycleStage: "ManifestValidationFailed",
               errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
-              planningFailureFacts: extractPlanningFailureFacts({ validationErrors: closure.errors, rejectedPaths: planningEvidenceResult.rejectedPaths, proposedFiles: rawManifest.files }),
+              planningFailureFacts: [...planningRecoveryEvent.failureFacts],
+              planningRecoveryEvent,
               manifestFingerprint: preAuthorizationTopology.fingerprint,
               authorizedPaths: planningEvidenceResult.approvedPaths,
               rejectedPaths: planningEvidenceResult.rejectedPaths.map((rejection) => ({ ...rejection, classification: classifyWriteRejection(rejection.reasonCode) })),
@@ -1302,6 +1405,24 @@ export class AgentPlanner {
               repositoryRevision: currentPlanningRevision,
               files: rawManifest?.files || [],
             });
+            if (!effectiveLocalPath || !currentPlanningRevision) {
+              return {
+                explanation: "[Internal Recovery Contract Error] Canonical manifest recovery requires a bound workspace and repository revision.",
+                changes: [],
+                commitMessage: "",
+                sessionId: session.id,
+                buildVerified: false,
+                errorCode: "INTERNAL_RECOVERY_CONTRACT_ERROR",
+              };
+            }
+            const planningRecoveryEvent = createCanonicalPlanRecoveryEvent({
+              phase: "MANIFEST_VALIDATION",
+              stageId: activeStage.id,
+              workspaceRoot: effectiveLocalPath,
+              repositoryRevision: currentPlanningRevision,
+              manifestFingerprint,
+              failureFacts: planningFailureFacts,
+            });
 
             return {
               explanation: failureExplanation,
@@ -1319,6 +1440,7 @@ export class AgentPlanner {
               lifecycleStage: "ManifestValidationFailed",
               errorCode: "PLANNING_REINVESTIGATION_REQUIRED",
               planningFailureFacts,
+              planningRecoveryEvent,
               manifestFingerprint,
               authorizedPaths: planningEvidenceResult.approvedPaths,
               rejectedPaths: planningEvidenceResult.rejectedPaths.map((r) => ({

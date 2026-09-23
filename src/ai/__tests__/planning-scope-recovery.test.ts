@@ -8,6 +8,7 @@ import { AgentLoopCoordinator } from "../orchestration/AgentLoopCoordinator";
 import {
   classifyWriteRejection,
   computeManifestAttemptFingerprint,
+  createCanonicalPlanRecoveryEvent,
   formatPlanningFailureContext,
   isTaskLevelActionProhibition,
   PlanningFailureFact,
@@ -315,20 +316,28 @@ describe("Checkpoint B planning-scope recovery", () => {
   test("hard candidates from all stage records remain advisory and visible to replanning", () => {
     const records: StagePlanningRecoveryRecord[] = [
       {
-        stageId: "stage-2",
+        ...createCanonicalPlanRecoveryEvent({
+          phase: "AUTHORIZATION",
+          stageId: "stage-2",
+          workspaceRoot: tempDir,
+          repositoryRevision: "revision-1",
+          manifestFingerprint: "A",
+          failureFacts: [scopeFact("src/Foreign.tsx", "MULTI_REPO_ISOLATION_VIOLATION")],
+        }),
         attemptNumber: 1,
-        fingerprint: "A",
-        repositoryRevision: "revision-1",
-        failureFacts: [scopeFact("src/Foreign.tsx", "MULTI_REPO_ISOLATION_VIOLATION")],
         rejectedPaths: [],
         authorizedPaths: [],
       },
       {
-        stageId: "stage-2",
+        ...createCanonicalPlanRecoveryEvent({
+          phase: "AUTHORIZATION",
+          stageId: "stage-2",
+          workspaceRoot: tempDir,
+          repositoryRevision: "revision-1",
+          manifestFingerprint: "B",
+          failureFacts: [scopeFact("src/Unrelated.tsx", "NO_TASK_OR_STRUCTURAL_RELATION")],
+        }),
         attemptNumber: 2,
-        fingerprint: "B",
-        repositoryRevision: "revision-1",
-        failureFacts: [scopeFact("src/Unrelated.tsx", "NO_TASK_OR_STRUCTURAL_RELATION")],
         rejectedPaths: [],
         authorizedPaths: [],
       },

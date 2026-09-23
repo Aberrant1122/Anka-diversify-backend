@@ -105,6 +105,7 @@ describe("Deterministic Successful No-Op / ALREADY_SATISFIED (Pass 4)", () => {
       finalConfidence: 0.95,
       searchSummary: "Summary",
       inspectedFiles: ["src/app.ts"],
+      investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/app.ts"] },
     } as any);
 
     jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockResolvedValue({

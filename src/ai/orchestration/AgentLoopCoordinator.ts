@@ -6,7 +6,10 @@ import type { DiagnosticBaselineComparison } from "../runtime/BaselineDiagnostic
 import type { ActionGroupJournalEntry } from "../runtime/VerifiedCheckpointJournal";
 import type { AgentResponse } from "../shared/types";
 import {
+  canonicalWorkspaceIdentity,
+  createCanonicalPlanRecoveryEvent,
   StagePlanningRecoveryRecord,
+  StagePlanningRecoveryEvent,
   MAX_STAGE_PLANNING_ATTEMPTS,
 } from "../planning/PlanningFailureFacts";
 
@@ -53,6 +56,66 @@ function errorCode(error: unknown): string {
 function isAuthorizationError(error: unknown): boolean {
   const code = errorCode(error);
   return (code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE") || REINVESTIGATION_OUTCOMES.has(code);
+}
+
+function recoveryContractFailure(
+  response: AgentResponse,
+  message: string,
+): AgentResponse {
+  return {
+    ...response,
+    errorCode: "INTERNAL_RECOVERY_CONTRACT_ERROR",
+    explanation: `[Internal Recovery Contract Error] ${message}`,
+  };
+}
+
+function recoveryEventFromResponse(input: {
+  response: AgentResponse;
+  stageId: string;
+  workspaceRoot: string;
+  observedRevision: string;
+}): StagePlanningRecoveryEvent {
+  const event = input.response.planningRecoveryEvent;
+  if (event) {
+    if (event.stageId !== input.stageId) {
+      throw new Error("recovery event stage does not match the active stage");
+    }
+    if (event.workspaceIdentity !== canonicalWorkspaceIdentity(input.workspaceRoot)) {
+      throw new Error("recovery event workspace does not match the active workspace");
+    }
+    if (!event.repositoryRevision?.trim() || event.failureFacts.length === 0) {
+      throw new Error("recovery event revision and failure facts must be non-empty");
+    }
+    if (event.kind === "PRE_CANONICAL") {
+      if (!event.recoveryIdentity?.trim() || !event.progressMarker?.trim()) {
+        throw new Error("pre-canonical recovery identity and progress marker must be non-empty");
+      }
+    } else if (!event.manifestFingerprint?.trim()) {
+      throw new Error("canonical plan fingerprint must be non-empty");
+    }
+    return event;
+  }
+
+  // Compatibility boundary for older callers. Absence is never coerced to an
+  // empty plan identity: only a complete canonical event may be reconstructed.
+  const legacyFingerprint = input.response.manifestFingerprint;
+  const legacyFailureFacts = input.response.planningFailureFacts;
+  if (!legacyFingerprint?.trim()) {
+    throw new Error("legacy canonical recovery response is missing a non-empty manifest fingerprint");
+  }
+  if (!legacyFailureFacts || legacyFailureFacts.length === 0) {
+    throw new Error("legacy canonical recovery response is missing typed failure facts");
+  }
+  return createCanonicalPlanRecoveryEvent({
+    phase: legacyFailureFacts.some((fact) => fact.kind === "AUTHORITY_REJECTION")
+      ? "AUTHORIZATION"
+      : "MANIFEST_VALIDATION",
+    stageId: input.stageId,
+    workspaceRoot: input.workspaceRoot,
+    repositoryRevision: input.response.repositoryRevision || input.observedRevision,
+    manifestFingerprint: legacyFingerprint,
+    failureFacts: legacyFailureFacts,
+  });
 }
 
 const REINVESTIGATION_OUTCOMES = new Set([
@@ -139,9 +202,32 @@ export class AgentLoopCoordinator {
                 executed.response.taskExecutionPlan.currentStageIndex
               ]?.id || "stage-default";
               const history = stagePlanningAttempts.get(activeStageId) || [];
-              const currentAttemptNumber = history.length + 1;
-              const currentFingerprint = executed.response.manifestFingerprint || "";
-              const planningFacts = executed.response.planningFailureFacts || [];
+              let recoveryEvent: StagePlanningRecoveryEvent;
+              try {
+                recoveryEvent = recoveryEventFromResponse({
+                  response: executed.response,
+                  stageId: activeStageId,
+                  workspaceRoot: input.runtime.workspaceState().snapshot().repository.root,
+                  observedRevision: observation.revision,
+                });
+              } catch (contractError) {
+                const message = contractError instanceof Error ? contractError.message : "invalid recovery event";
+                const failureCode = "INTERNAL_RECOVERY_CONTRACT_ERROR";
+                workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
+                return {
+                  response: recoveryContractFailure(executed.response, message),
+                  loop: {
+                    outcome: "VALIDATION_FAILURE",
+                    iterations: iteration,
+                    workingPlan,
+                    verifiedCheckpointIds,
+                    failureCode,
+                  },
+                };
+              }
+              const sameKindHistory = history.filter((record) => record.kind === recoveryEvent.kind);
+              const currentAttemptNumber = sameKindHistory.length + 1;
+              const planningFacts = recoveryEvent.failureFacts;
               const isScopeRecovery = planningFacts.some((fact) => fact.kind === "AUTHORITY_REJECTION");
               const recoverableCount = planningFacts.filter(
                 (fact) => fact.classification === "RECOVERABLE_CANDIDATE",
@@ -153,16 +239,20 @@ export class AgentLoopCoordinator {
                 (fact) => fact.classification === "TERMINAL_TASK",
               ).length;
 
-              // Duplicate planning topology check
-              const isDuplicate = history.some((rec) => rec.fingerprint === currentFingerprint);
-              if (isDuplicate) {
+              const canonicalDuplicate = recoveryEvent.kind === "CANONICAL_PLAN" && history.some(
+                (record) => record.kind === "CANONICAL_PLAN"
+                  && record.manifestFingerprint === recoveryEvent.manifestFingerprint
+                  && record.repositoryRevision === recoveryEvent.repositoryRevision
+                  && record.workspaceIdentity === recoveryEvent.workspaceIdentity,
+              );
+              if (canonicalDuplicate && recoveryEvent.kind === "CANONICAL_PLAN") {
                 if (isScopeRecovery) {
                   console.warn(
-                    `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nfingerprint=${currentFingerprint.slice(0, 32)}\nresult=DUPLICATE`
+                    `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nfingerprint=${recoveryEvent.manifestFingerprint.slice(0, 32)}\nresult=DUPLICATE`
                   );
                 }
                 console.warn(
-                  `[PLAN_RECOVERY] stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} Duplicate plan detected (fingerprint: ${currentFingerprint.slice(0, 32)})`
+                  `[RECOVERY] kind=CANONICAL_PLAN stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} fingerprint=${recoveryEvent.manifestFingerprint.slice(0, 32)} result=DUPLICATE`
                 );
                 const failureCode = "DUPLICATE_RECOVERY_PLAN";
                 let workspace = input.runtime.workspaceState().withFailureFact({
@@ -183,7 +273,40 @@ export class AgentLoopCoordinator {
                     errorCode: failureCode,
                     explanation: isScopeRecovery
                       ? "[Duplicate Recovery Plan] The active stage repeated a previously rejected planning topology without materially new repository facts."
-                      : `[Duplicate Recovery Plan] The planned topology is identical to a previous failed planning attempt (${currentFingerprint.slice(0, 48)}).`,
+                      : "[Duplicate Recovery Plan] The active stage repeated a previously failed canonical plan at the same repository revision.",
+                  },
+                  loop: {
+                    outcome: "VALIDATION_FAILURE",
+                    iterations: iteration,
+                    workingPlan,
+                    verifiedCheckpointIds,
+                    failureCode,
+                  },
+                };
+              }
+
+              const preCanonicalStall = recoveryEvent.kind === "PRE_CANONICAL" && history.some(
+                (record) => record.kind === "PRE_CANONICAL"
+                  && record.recoveryIdentity === recoveryEvent.recoveryIdentity
+                  && record.progressMarker === recoveryEvent.progressMarker
+                  && record.repositoryRevision === recoveryEvent.repositoryRevision
+                  && record.workspaceIdentity === recoveryEvent.workspaceIdentity,
+              );
+              if (preCanonicalStall && recoveryEvent.kind === "PRE_CANONICAL") {
+                const failureCode = recoveryEvent.phase === "INVESTIGATION"
+                  ? "INVESTIGATION_STALLED"
+                  : "PRE_CANONICAL_RECOVERY_STALLED";
+                console.warn(
+                  `[RECOVERY] kind=PRE_CANONICAL phase=${recoveryEvent.phase} stage=${activeStageId} attempt=${currentAttemptNumber} identity=${recoveryEvent.recoveryIdentity.slice(0, 32)} progress=${recoveryEvent.progressMarker.slice(0, 32)} result=STALLED`,
+                );
+                workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
+                return {
+                  response: {
+                    ...executed.response,
+                    errorCode: failureCode,
+                    explanation: recoveryEvent.phase === "INVESTIGATION"
+                      ? "[Investigation Stalled] Deterministic repository investigation repeated without new materialized facts or reduced missing evidence."
+                      : "[Pre-Canonical Recovery Stalled] The same pre-canonical blocker repeated without deterministic progress.",
                   },
                   loop: {
                     outcome: "VALIDATION_FAILURE",
@@ -196,7 +319,7 @@ export class AgentLoopCoordinator {
               }
 
               // Recovery budget check (max 3 planning attempts total per stage: 1 initial + 2 recoveries)
-              if (currentAttemptNumber >= MAX_STAGE_PLANNING_ATTEMPTS) {
+              if (recoveryEvent.kind === "CANONICAL_PLAN" && currentAttemptNumber >= MAX_STAGE_PLANNING_ATTEMPTS) {
                 if (isScopeRecovery) {
                   console.warn(
                     `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nresult=EXHAUSTED`
@@ -237,11 +360,8 @@ export class AgentLoopCoordinator {
               }
 
               const record: StagePlanningRecoveryRecord = {
-                stageId: activeStageId,
+                ...recoveryEvent,
                 attemptNumber: currentAttemptNumber,
-                fingerprint: currentFingerprint,
-                repositoryRevision: executed.response.repositoryRevision,
-                failureFacts: planningFacts,
                 rejectedPaths: executed.response.rejectedPaths || [],
                 authorizedPaths: executed.response.authorizedPaths || [],
                 validationErrors: executed.response.validationErrors,
@@ -264,13 +384,19 @@ export class AgentLoopCoordinator {
               input.runtime.updateWorkspace(workspace);
 
               const failureKinds = Array.from(new Set(record.failureFacts.map((f) => f.kind))).join(",");
-              console.log(
-                `[PLAN_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nfingerprint=${currentFingerprint.slice(0, 32)}\nfailureKinds=${failureKinds}`
-              );
+              if (record.kind === "PRE_CANONICAL") {
+                console.log(
+                  `[RECOVERY] kind=PRE_CANONICAL phase=${record.phase} stage=${activeStageId} attempt=${currentAttemptNumber} identity=${record.recoveryIdentity.slice(0, 32)} progress=${record.progressMarker.slice(0, 32)} failureKinds=${failureKinds}`,
+                );
+              } else {
+                console.log(
+                  `[RECOVERY] kind=CANONICAL_PLAN phase=${record.phase} stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} fingerprint=${record.manifestFingerprint.slice(0, 32)} failureKinds=${failureKinds}`,
+                );
+              }
               console.log(`[PLAN_RECOVERY]\nresult=REINVESTIGATE`);
               if (isScopeRecovery) {
                 console.log(
-                  `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nrejected=${record.rejectedPaths.length}\nrecoverable=${recoverableCount}\nhardCandidates=${hardCandidateCount}\nterminal=${terminalCount}\nfingerprint=${currentFingerprint.slice(0, 32)}\nresult=REINVESTIGATE`
+                  `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nrejected=${record.rejectedPaths.length}\nrecoverable=${recoverableCount}\nhardCandidates=${hardCandidateCount}\nterminal=${terminalCount}\nresult=REINVESTIGATE`
                 );
               }
 
@@ -406,9 +532,11 @@ export class AgentLoopCoordinator {
         const stageHistory = stagePlanningAttempts.get(currentStageId);
         if (stageHistory && stageHistory.length > 0) {
           const prev = stageHistory[stageHistory.length - 1];
-          const newFingerprint = executed.response.manifestFingerprint || "verified";
+          const previousIdentity = prev.kind === "CANONICAL_PLAN"
+            ? prev.manifestFingerprint
+            : prev.recoveryIdentity;
           console.log(
-            `[PLAN_RECOVERY]\nattempt=${stageHistory.length + 1}/${MAX_STAGE_PLANNING_ATTEMPTS}\npreviousFingerprint=${prev.fingerprint.slice(0, 32)}\nnewFingerprint=${newFingerprint.slice(0, 32)}`
+            `[RECOVERY] kind=${prev.kind} stage=${currentStageId} previousIdentity=${previousIdentity.slice(0, 32)} result=RECOVERED`,
           );
           console.log(`[PLAN_RECOVERY]\nresult=RECOVERED`);
         }

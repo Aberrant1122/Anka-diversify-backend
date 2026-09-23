@@ -32,10 +32,28 @@ export interface InvestigationAgentResult {
   readyToPlan: boolean;
   evidenceIds: string[];
   missingEvidence: string[];
+  missingEvidenceKinds: InvestigationMissingEvidenceKind[];
+  missingTargets: string[];
   roundsExecuted: number;
   allExploredFiles: string[];
   summary: string;
   investigationHistory: InvestigationStepRecord[];
+}
+
+export type InvestigationMissingEvidenceKind =
+  | "AMBIGUOUS_RUNTIME_ROUTE"
+  | "NO_VERIFIED_EVIDENCE"
+  | "INVALID_EXPLICIT_TARGET"
+  | "MISSING_EXPLICIT_TARGET_EVIDENCE"
+  | "INVALID_DESTRUCTIVE_TARGET"
+  | "MISSING_DESTRUCTIVE_TARGET_EVIDENCE"
+  | "MISSING_TASK_GROUNDING";
+
+interface InvestigationReadinessCheck {
+  ready: boolean;
+  missing: string[];
+  kinds: InvestigationMissingEvidenceKind[];
+  missingTargets: string[];
 }
 
 export interface RepositoryInvestigationOptions {
@@ -148,6 +166,8 @@ export class RepositoryInvestigationAgent {
     let roundNumber = 1;
     let readyToPlan = false;
     let missingEvidence: string[] = [];
+    let missingEvidenceKinds: InvestigationMissingEvidenceKind[] = [];
+    let missingTargets: string[] = [];
 
     // Resolve natural-language destructive targets before readiness is checked.
     // The resolver derives the target from the trusted request and current
@@ -226,6 +246,8 @@ export class RepositoryInvestigationAgent {
           break;
         }
         missingEvidence = stopCheck.missing;
+        missingEvidenceKinds = stopCheck.kinds;
+        missingTargets = stopCheck.missingTargets;
       }
 
       if (!nextActions.toolCalls || nextActions.toolCalls.length === 0) {
@@ -271,6 +293,8 @@ export class RepositoryInvestigationAgent {
         }
       } else {
         missingEvidence = stopCheck.missing;
+        missingEvidenceKinds = stopCheck.kinds;
+        missingTargets = stopCheck.missingTargets;
       }
 
       roundNumber++;
@@ -283,6 +307,8 @@ export class RepositoryInvestigationAgent {
       readyToPlan,
       evidenceIds,
       missingEvidence,
+      missingEvidenceKinds,
+      missingTargets,
       roundsExecuted: Math.min(roundNumber, this.maxRounds),
       allExploredFiles: Array.from(allExploredFiles),
       summary: `Investigation completed in ${Math.min(roundNumber, this.maxRounds)} rounds with ${allEvidence.length} verified evidence items across ${allExploredFiles.size} files.`,
@@ -620,18 +646,20 @@ INSTRUCTIONS:
   /**
    * Stop condition evaluator: Task-sensitive but evidence-driven.
    */
-  private evaluateStopConditions(): { ready: boolean; missing: string[] } {
+  private evaluateStopConditions(): InvestigationReadinessCheck {
     const allEvidence = this.evidenceStore.getAllEvidence();
-    const missing: string[] = [];
+    const blocked = (
+      kind: InvestigationMissingEvidenceKind,
+      message: string,
+      missingTargets: string[] = [],
+    ): InvestigationReadinessCheck => ({ ready: false, missing: [message], kinds: [kind], missingTargets });
 
     if (this.ambiguousRuntimeRoutes.length > 0) {
-      missing.push(`Runtime route resolution is ambiguous: ${this.ambiguousRuntimeRoutes.join(", ")}`);
-      return { ready: false, missing };
+      return blocked("AMBIGUOUS_RUNTIME_ROUTE", `Runtime route resolution is ambiguous: ${this.ambiguousRuntimeRoutes.join(", ")}`);
     }
 
     if (allEvidence.length === 0) {
-      missing.push("No verified repository evidence discovered yet.");
-      return { ready: false, missing };
+      return blocked("NO_VERIFIED_EVIDENCE", "No verified repository evidence discovered yet.");
     }
 
     const materializedEvidencePaths = new Set(
@@ -642,15 +670,13 @@ INSTRUCTIONS:
     );
     const normalizedExplicitPaths = this.intentSpec.explicitUserPaths.map(normalizeExactRepositoryTarget);
     if (normalizedExplicitPaths.some((path) => path === null)) {
-      missing.push("Explicit repository target identity is missing or ambiguous after safe normalization.");
-      return { ready: false, missing };
+      return blocked("INVALID_EXPLICIT_TARGET", "Explicit repository target identity is missing or ambiguous after safe normalization.");
     }
     const missingExplicitPaths = normalizedExplicitPaths
       .filter((path): path is string => path !== null)
       .filter((path) => !materializedEvidencePaths.has(path));
     if (missingExplicitPaths.length > 0) {
-      missing.push(`Explicit repository target(s) lack materialized evidence: ${missingExplicitPaths.join(", ")}`);
-      return { ready: false, missing };
+      return blocked("MISSING_EXPLICIT_TARGET_EVIDENCE", `Explicit repository target(s) lack materialized evidence: ${missingExplicitPaths.join(", ")}`, missingExplicitPaths);
     }
 
     if (this.intentSpec.destructive) {
@@ -665,16 +691,14 @@ INSTRUCTIONS:
       const normalizedTargets = representedTargets.map(normalizeExactRepositoryTarget);
 
       if (normalizedTargets.length === 0 || normalizedTargets.some((target) => target === null)) {
-        missing.push("Destructive target identity is missing or ambiguous; target-bound evidence cannot be established.");
-        return { ready: false, missing };
+        return blocked("INVALID_DESTRUCTIVE_TARGET", "Destructive target identity is missing or ambiguous; target-bound evidence cannot be established.");
       }
 
       const missingDestructiveTargets = normalizedTargets
         .filter((target): target is string => target !== null)
         .filter((target) => !materializedEvidencePaths.has(target));
       if (missingDestructiveTargets.length > 0) {
-        missing.push(`Destructive repository target(s) lack exact materialized evidence: ${missingDestructiveTargets.join(", ")}`);
-        return { ready: false, missing };
+        return blocked("MISSING_DESTRUCTIVE_TARGET_EVIDENCE", `Destructive repository target(s) lack exact materialized evidence: ${missingDestructiveTargets.join(", ")}`, missingDestructiveTargets);
       }
     }
 
@@ -686,11 +710,10 @@ INSTRUCTIONS:
       const hasDeterministicTaskGrounding = !!workspace && !!this.evidenceStore.getCanonicalWorkspaceRoot() && withAuthoritySnapshot(workspace, () =>
         TaskRootedAuthorizationVerifier.roots(this.evidenceStore, this.intentSpec).length > 0);
       if (!hasDeterministicTaskGrounding) {
-        missing.push("Mutation planning requires deterministic task-grounded evidence; semantic candidates and FILE reads establish discovery or existence only.");
-        return { ready: false, missing };
+        return blocked("MISSING_TASK_GROUNDING", "Mutation planning requires deterministic task-grounded evidence; semantic candidates and FILE reads establish discovery or existence only.");
       }
     }
 
-    return { ready: true, missing: [] };
+    return { ready: true, missing: [], kinds: [], missingTargets: [] };
   }
 }

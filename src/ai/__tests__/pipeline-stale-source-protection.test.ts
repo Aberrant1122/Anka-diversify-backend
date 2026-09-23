@@ -127,6 +127,7 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
         searchSummary: "Summary",
         inspectedFiles: ["src/config.ts"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/config.ts"] },
       } as any;
     });
 
