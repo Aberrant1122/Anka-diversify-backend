@@ -46,6 +46,7 @@ import {
 import { TaskDecomposer } from "../generation/TaskDecomposer";
 import { DeterministicRelationEvidenceAcquirer } from "../contracts/DeterministicRelationEvidenceAcquirer";
 import { authoritySnapshot } from "../repository/AuthorityWorktree";
+import { ConstructiveCapabilityEnvelopeBuilder } from "../contracts/ConstructiveCapabilityEnvelope";
 import {
   extractPlanningFailureFacts,
   computeManifestAttemptFingerprint,
@@ -424,6 +425,17 @@ export class AgentPlanner {
       }
 
       const architectureSummary = detectRepositoryArchitecture(canonicalExistingFiles, packageJsonContent, monorepo);
+      const planningRevision = effectiveLocalPath
+        ? authoritySnapshot(effectiveLocalPath).revision
+        : undefined;
+      const constructiveEnvelope = effectiveLocalPath && planningRevision
+        ? ConstructiveCapabilityEnvelopeBuilder.build({
+            intentSpec: taskIntentSpec,
+            workspaceRoot: effectiveLocalPath,
+            repositoryRevision: planningRevision,
+            architecture: architectureSummary,
+          })
+        : null;
 
       // Select top bounded relevant files for manifest planning
       const relevantPlanningFiles: Array<{ path: string; content: string }> = [];
@@ -952,10 +964,9 @@ export class AgentPlanner {
           repositoryId: projectId,
           workspaceRoot: effectiveLocalPath || undefined,
           existingFiles: canonicalExistingFiles,
+          constructiveEnvelope,
         });
-        const currentPlanningRevision = effectiveLocalPath
-          ? authoritySnapshot(effectiveLocalPath).revision
-          : undefined;
+        const currentPlanningRevision = planningRevision;
         const evidenceGroundedPlannedChanges = bindBackendManifestEvidence({
           files: rawManifest.files || [],
           obligations: manifestObligations,

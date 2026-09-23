@@ -12,6 +12,16 @@ import { DestructiveTargetResolver } from "./DestructiveTargetResolver";
 import { ResolvedTaskTarget } from "../shared/TaskExecutionPlan";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { isExistingPrimaryUIRefinement } from "../planning/RepositoryArchitectureDetector";
+import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
+import {
+  authenticatedConstructiveClause,
+  candidateFitsAuthenticatedClause,
+  ConstructiveCandidateRelation,
+  ConstructiveCapabilityEnvelope,
+  ConstructiveCapabilityEnvelopeBuilder,
+  deriveConstructiveCandidateRelation,
+} from "./ConstructiveCapabilityEnvelope";
+import { trustedStageAuthorizationId } from "../repository/TrustedTaskContext";
 import path from "path";
 
 export interface TaskRootedAuthorizationProof {
@@ -20,6 +30,7 @@ export interface TaskRootedAuthorizationProof {
   readonly rootEvidenceId: string;
   readonly edgeEvidenceIds: readonly string[];
   readonly repositoryRevision: string;
+  readonly constructiveRelation?: ConstructiveCandidateRelation;
 }
 
 /**
@@ -335,7 +346,8 @@ export class TaskRootedAuthorizationVerifier {
     candidate: string,
     anchorFilePath: string,
     _repositoryFiles: readonly string[] = [],
-    intent?: TaskIntentSpec
+    intent: TaskIntentSpec,
+    verifiedRelation?: ConstructiveCandidateRelation,
   ): boolean {
     const normCandidate = normalizeRepoPath(candidate);
 
@@ -356,25 +368,30 @@ export class TaskRootedAuthorizationVerifier {
       return false;
     }
 
-    // 3. Must reside within bounded UI / component / feature directory derived from repository topology and anchor
-    const isComponentScope =
-      /^(?:(?:apps\/[^\/]+\/)?(?:src\/)?(?:components|ui|features|widgets)\/|(?:app\/components\/|src\/app\/components\/))/i.test(
-        normCandidate
-      );
-
-    const anchorDir = path.dirname(anchorFilePath).replace(/\\/g, "/");
-    const isAnchorSubScope =
-      normCandidate.startsWith(`${anchorDir}/components/`) ||
-      normCandidate.startsWith(`${anchorDir}/features/`) ||
-      normCandidate.startsWith(`${anchorDir}/ui/`);
-
-    if (!isComponentScope && !isAnchorSubScope) {
-      return false;
+    // 3. A backend-derived typed relation replaces repository-shape allowlists.
+    // This public eligibility helper is authority-zero; exact proof derivation
+    // reconstructs a revision/workspace-bound envelope below.
+    if (!intent) return false;
+    const clause = authenticatedConstructiveClause(intent);
+    const stageId = trustedStageAuthorizationId(intent);
+    if (!clause || !stageId) return false;
+    let relation = verifiedRelation;
+    if (!relation) {
+      const architecture = detectRepositoryArchitecture([..._repositoryFiles]);
+      if (!architecture.constructiveFacts) return false;
+      const eligibilityEnvelope: ConstructiveCapabilityEnvelope = {
+        directWriteAuthority: 0,
+        stageId,
+        repositoryRevision: "ELIGIBILITY_ONLY",
+        userClauseId: clause.id,
+        workspaceRoot: path.resolve("."),
+        framework: architecture.framework,
+        facts: architecture.constructiveFacts,
+      };
+      relation = deriveConstructiveCandidateRelation(eligibilityEnvelope, normCandidate) ?? undefined;
     }
-
-    // Bounded depth: max 5 path segments total (e.g. apps/web/src/components/MyWidget.tsx)
-    const segments = normCandidate.split("/");
-    if (segments.length > 5) return false;
+    if (!relation || relation.integrationSurface !== normalizeRepoPath(anchorFilePath)) return false;
+    return candidateFitsAuthenticatedClause(intent, relation);
 
     // 4. Deterministic Task-to-Candidate Relationship
     // If candidate was an explicit user path in intent, authority is grounded by explicit request
@@ -387,7 +404,7 @@ export class TaskRootedAuthorizationVerifier {
       }
 
       // --- PART 1 & 2: ORIGINAL USER REQUEST IS THE AUTHORITY CEILING ---
-      const authenticUserReq = trustedUserRequest(intent);
+      const authenticUserReq = trustedUserRequest(intent) ?? "";
       if (!authenticUserReq || typeof authenticUserReq !== "string" || !authenticUserReq.trim()) {
         // Model stage goal by itself has 0 authority
         return false;
@@ -421,9 +438,7 @@ export class TaskRootedAuthorizationVerifier {
         return false;
       }
 
-      const boundClauseTokens: Set<string> = boundClause
-        ? new Set(boundClause.entityTokens)
-        : new Set(userClauses[0]?.entityTokens ?? []);
+      const boundClauseTokens: Set<string> = new Set(boundClause?.entityTokens ?? userClauses[0]?.entityTokens ?? []);
 
       if (boundClauseTokens.size === 0) {
         return false;
@@ -477,7 +492,7 @@ export class TaskRootedAuthorizationVerifier {
 
       const resolvedTokens: string[] = [];
       if (intent.resolvedTarget?.featureName || intent.resolvedTarget?.logicalTargetId) {
-        const targetName = (intent.resolvedTarget.featureName || intent.resolvedTarget.logicalTargetId).trim();
+        const targetName = (intent.resolvedTarget?.featureName || intent.resolvedTarget?.logicalTargetId || "").trim();
         resolvedTokens.push(
           ...TargetPathExtractor.tokenizeEntity(targetName)
             .map(singularize)
@@ -537,32 +552,7 @@ export class TaskRootedAuthorizationVerifier {
 
       if (allAuthorizedDomainTokens.size === 0) return false;
 
-      const baseName = path.basename(normCandidate);
-      const stem = baseName.replace(/\.[^.]+$/, "");
-      const stemTokens = TargetPathExtractor.tokenizeEntity(stem).map(singularize);
-
-      const dirSegments = path
-        .dirname(normCandidate)
-        .split("/")
-        .filter(
-          (s) =>
-            s &&
-            ![
-              "src",
-              "apps",
-              "app",
-              "components",
-              "ui",
-              "features",
-              "widgets",
-              ".",
-            ].includes(s)
-        );
-      const dirTokens = dirSegments.flatMap((s) =>
-        TargetPathExtractor.tokenizeEntity(s).map(singularize)
-      );
-
-      const allCandidateTokens = [...dirTokens, ...stemTokens];
+      const allCandidateTokens = [...relation!.semanticTokens];
       if (allCandidateTokens.length === 0) return false;
 
       // Check A: No foreign domain tokens (every candidate token must be in UI_WRAPPER_TOKENS or in allAuthorizedDomainTokens & boundClauseTokens)
@@ -612,10 +602,35 @@ export class TaskRootedAuthorizationVerifier {
         if (!matchesEntity) return false;
       }
 
-      return true;
+      return candidateFitsAuthenticatedClause(intent, relation!);
     }
 
     return false;
+  }
+
+  private static buildConstructiveEnvelope(
+    intent: TaskIntentSpec,
+    workspace: string,
+    repositoryRevision: string,
+    repositoryFiles: readonly string[],
+    encodedFiles: ReadonlyMap<string, string>,
+  ): ConstructiveCapabilityEnvelope | null {
+    const packageEntry = [...encodedFiles.entries()].find(([filePath]) => /(?:^|\/)package\.json$/i.test(filePath));
+    let packageJsonContent: string | undefined;
+    if (packageEntry) {
+      try {
+        packageJsonContent = Buffer.from(packageEntry[1], "base64").toString("utf8");
+      } catch {
+        return null;
+      }
+    }
+    const architecture = detectRepositoryArchitecture([...repositoryFiles], packageJsonContent);
+    return ConstructiveCapabilityEnvelopeBuilder.build({
+      intentSpec: intent,
+      workspaceRoot: workspace,
+      repositoryRevision,
+      architecture,
+    });
   }
 
   public static roots(store: RepositoryEvidenceStore, intent: TaskIntentSpec): RepositoryEvidence[] {
@@ -737,10 +752,14 @@ export class TaskRootedAuthorizationVerifier {
     const isUiRefinement = isExistingPrimaryUIRefinement(request);
 
     if (action === "create" && !isDestructiveTask && !isUiRefinement && isConstructiveFeatureRequest(intent)) {
+      const envelope = this.buildConstructiveEnvelope(intent, workspace, snapshot.revision, [...snapshot.files.keys()], snapshot.files);
+      const relation = envelope ? deriveConstructiveCandidateRelation(envelope, candidate) : null;
+      if (!envelope || !relation || !candidateFitsAuthenticatedClause(intent, relation)) return null;
       for (const root of roots) {
         if (
           root.kind === "ENTRY_POINT" &&
-          this.isEligibleConstructiveCreateScope(candidate, root.filePath, [...snapshot.files.keys()], intent)
+          relation.integrationSurface === root.filePath &&
+          this.isEligibleConstructiveCreateScope(candidate, root.filePath, [...snapshot.files.keys()], intent, relation)
         ) {
           const prospectiveReceipt = RepositoryObservationTools.observeProspectiveFile(
             store.getRepositoryId(),
@@ -756,6 +775,7 @@ export class TaskRootedAuthorizationVerifier {
             rootEvidenceId: root.id,
             edgeEvidenceIds: Object.freeze([]),
             repositoryRevision: snapshot.revision,
+            constructiveRelation: relation,
           });
         }
       }

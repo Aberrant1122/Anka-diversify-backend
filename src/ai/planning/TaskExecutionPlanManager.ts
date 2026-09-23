@@ -1,4 +1,4 @@
-import { bindUserRequest, bindStageAuthorizationContext, bindStageAuthorizationClause } from "../repository/TrustedTaskContext";
+import { bindUserRequest, bindStageAuthorizationContext, bindStageAuthorizationClause, bindStageAuthorizationId } from "../repository/TrustedTaskContext";
 import { UserClauseExtractor } from "../contracts/UserClauseAuthority";
 import {
   TaskExecutionPlan,
@@ -110,6 +110,8 @@ export class TaskExecutionPlanManager {
         bindStageAuthorizationContext(stageIntent, binding.clause.sourceText);
         stageIntent.stageAuthorizationContext = binding.clause.sourceText;
       }
+
+      bindStageAuthorizationId(stageIntent, s.id || `stage-${idx + 1}`);
 
       return {
         id: s.id || `stage-${idx + 1}`,

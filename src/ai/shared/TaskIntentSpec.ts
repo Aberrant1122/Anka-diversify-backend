@@ -1,4 +1,4 @@
-import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { bindStageAuthorizationId, bindUserRequest } from "../repository/TrustedTaskContext";
 import { TaskClassificationResult, TaskType, TaskRisk, TaskComplexity } from "../classification/TaskTypes";
 import { TaskSuccessCondition } from "../../types";
 import { ResolvedTaskTarget } from "./TaskExecutionPlan";
@@ -119,5 +119,6 @@ export function createTaskIntentSpec(
     options: classification.options,
   };
   bindUserRequest(intent, message);
+  bindStageAuthorizationId(intent, "stage-1");
   return intent;
 }

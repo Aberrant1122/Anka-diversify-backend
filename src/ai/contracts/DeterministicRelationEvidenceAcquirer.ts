@@ -6,6 +6,7 @@ import { RepositoryObservationTools } from "../repository/RepositoryObservation"
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { resolveLocalImportEdges } from "../repository/DeterministicImportResolver";
 import { TaskAnchorResolver } from "../repository/TaskAnchorResolver";
+import { ConstructiveCapabilityEnvelope, deriveConstructiveCandidateRelation } from "./ConstructiveCapabilityEnvelope";
 
 const MAX_STRUCTURAL_DEPTH = 3;
 
@@ -21,6 +22,7 @@ export class DeterministicRelationEvidenceAcquirer {
     readonly repositoryId: string;
     readonly workspaceRoot?: string;
     readonly existingFiles: readonly string[];
+    readonly constructiveEnvelope?: ConstructiveCapabilityEnvelope | null;
   }): ReadonlyMap<string, readonly string[]> {
     if (!input.workspaceRoot) return new Map();
     return withAuthoritySnapshot(input.workspaceRoot, () => this.acquireBatch(input));
@@ -48,12 +50,17 @@ export class DeterministicRelationEvidenceAcquirer {
       if (fileReceipt) {
         input.evidenceStore.recordObservation(fileReceipt);
       } else if (!knownFiles.has(candidate)) {
+        const relation = input.constructiveEnvelope &&
+          input.constructiveEnvelope.repositoryRevision === authoritySnapshot(input.workspaceRoot).revision
+          ? deriveConstructiveCandidateRelation(input.constructiveEnvelope, candidate)
+          : undefined;
         const isEligibleCreate = [...anchors].some((anchor) =>
           TaskRootedAuthorizationVerifier.isEligibleConstructiveCreateScope(
             candidate,
             anchor,
             input.existingFiles,
-            input.intentSpec
+            input.intentSpec,
+            relation ?? undefined,
           )
         );
         if (isEligibleCreate) {

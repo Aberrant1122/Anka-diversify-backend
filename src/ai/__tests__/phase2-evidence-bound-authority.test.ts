@@ -1,6 +1,6 @@
 import fs from "fs";
 import os from "os";
-import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { bindStageAuthorizationId, bindUserRequest } from "../repository/TrustedTaskContext";
 import { productionIsAuthorityEligible } from "./helpers/capability-test-harness";
 import path from "path";
 import { EvidenceBoundWriteSetResolver, PlannedChange } from "../contracts/EvidenceBoundWriteSetResolver";
@@ -45,6 +45,7 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
   function task(request: string): TaskIntentSpec {
     const result = { ...defaultIntent };
     bindUserRequest(result, request);
+    bindStageAuthorizationId(result, "stage-1");
     return result;
   }
   const defaultPolicy: PolicyContract = {
@@ -467,7 +468,10 @@ describe("Phase 2 — Evidence-Bound Repository Investigation & Write Authority 
       existingFiles: ["src/App.tsx"],
     });
 
-    expect(res.approvedPaths).toContain("src/theme.css");
+    // Checkpoint C intentionally defers STYLE relations; dependency metadata
+    // cannot authorize a stylesheet CREATE without a typed backend relation.
+    expect(res.approvedPaths).not.toContain("src/theme.css");
+    expect(res.rejectedPaths.map((rejection) => rejection.path)).toContain("src/theme.css");
   });
 
   // 13. Unrelated candidate rejection

@@ -1,4 +1,5 @@
 import path from "path";
+import type { ConstructiveArchitectureFacts, ConstructiveRegionFact } from "../contracts/ConstructiveCapabilityEnvelope";
 
 export type FrameworkType = "NEXT_JS" | "VITE_REACT" | "EXPRESS" | "NODE_JS" | "UNKNOWN";
 export type RouterType = "APP_ROUTER" | "PAGES_ROUTER" | "HYBRID" | "NONE";
@@ -113,6 +114,96 @@ export interface RepositoryArchitectureSummary {
   guidelines: string[];
   installedPackages: string[];
   packageVersions: Record<string, string>;
+  constructiveFacts?: ConstructiveArchitectureFacts;
+}
+
+function parentSourceRoot(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  const marker = normalized.match(/^(.*?)(?:src\/)?(?:app|pages)\//i);
+  if (marker) return `${marker[1]}${normalized.slice(marker[1].length).startsWith("src/") ? "src" : ""}`.replace(/\/$/, "");
+  const directory = path.posix.dirname(normalized);
+  return directory === "." ? "" : directory;
+}
+
+function joinRepoPath(...parts: string[]): string {
+  return parts.filter(Boolean).join("/").replace(/\/+/g, "/");
+}
+
+function buildConstructiveArchitectureFacts(input: {
+  framework: FrameworkType;
+  router: RouterType;
+  files: readonly string[];
+  entryPoints: readonly string[];
+  primaryEntryPoint: string | null;
+}): ConstructiveArchitectureFacts {
+  const files = input.files.map((file) => file.replace(/\\/g, "/").replace(/^\.\//, ""));
+  const integrationSurfaces = [...new Set(input.entryPoints.map((file) => file.replace(/\\/g, "/")))];
+  const sourceRoots = new Set<string>();
+  const routeConventions: ConstructiveRegionFact[] = [];
+  const componentRegions: ConstructiveRegionFact[] = [];
+  const moduleRegions: ConstructiveRegionFact[] = [];
+  const primary = input.primaryEntryPoint?.replace(/\\/g, "/") ?? integrationSurfaces[0];
+
+  for (const entryPoint of integrationSurfaces) sourceRoots.add(parentSourceRoot(entryPoint));
+
+  if (input.framework === "NEXT_JS") {
+    const appRoots = new Set<string>();
+    const pagesRoots = new Set<string>();
+    for (const file of files) {
+      const appMatch = file.match(/^((?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?app)\/(?:.*\/)?(?:page|layout|route)\.[cm]?[jt]sx?$/i);
+      if (appMatch) appRoots.add(appMatch[1]);
+      const pagesMatch = file.match(/^((?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?pages)\/.*\.[cm]?[jt]sx?$/i);
+      if (pagesMatch) pagesRoots.add(pagesMatch[1]);
+    }
+    for (const root of appRoots) {
+      const integrationSurface = primary?.startsWith(`${root}/`)
+        ? primary
+        : integrationSurfaces.find((surface) => surface.startsWith(`${root}/`));
+      if (!integrationSurface) continue;
+      sourceRoots.add(path.posix.dirname(root) === "." ? "" : path.posix.dirname(root));
+      routeConventions.push({ role: "ROUTE", root, integrationSurface, allowedExtensions: [".tsx", ".jsx", ".ts", ".js"], terminalNames: ["page", "route"], maxRelativeDepth: 8 });
+      componentRegions.push({ role: "COMPONENT", root: joinRepoPath(root, "components"), integrationSurface, allowedExtensions: [".tsx", ".jsx"], maxRelativeDepth: 5 });
+      const sourceRoot = path.posix.dirname(root) === "." ? "" : path.posix.dirname(root);
+      componentRegions.push({ role: "COMPONENT", root: joinRepoPath(sourceRoot, "components"), integrationSurface, allowedExtensions: [".tsx", ".jsx"], maxRelativeDepth: 5 });
+    }
+    for (const root of pagesRoots) {
+      const integrationSurface = primary?.startsWith(`${root}/`)
+        ? primary
+        : integrationSurfaces.find((surface) => surface.startsWith(`${root}/`));
+      if (!integrationSurface) continue;
+      routeConventions.push({ role: "ROUTE", root, integrationSurface, allowedExtensions: [".tsx", ".jsx", ".ts", ".js"], maxRelativeDepth: 8 });
+    }
+  }
+
+  const hasVerifiedReactCompositionRoot = Boolean(primary && /(?:^|\/)(?:src\/)?app\.(?:tsx|jsx)$/i.test(primary));
+  if ((input.framework === "VITE_REACT" || hasVerifiedReactCompositionRoot) && primary) {
+    const sourceRoot = parentSourceRoot(primary);
+    sourceRoots.add(sourceRoot);
+    componentRegions.push({ role: "COMPONENT", root: joinRepoPath(sourceRoot, "components"), integrationSurface: primary, allowedExtensions: [".tsx", ".jsx"], maxRelativeDepth: 5 });
+  }
+
+  if (input.framework === "EXPRESS") {
+    const observedRouteDirectories = new Set(
+      files
+        .filter((file) => /(?:^|\/)routes\/[^/]+\.[cm]?[jt]s$/i.test(file))
+        .map((file) => path.posix.dirname(file)),
+    );
+    for (const root of observedRouteDirectories) {
+      const integrationSurface = integrationSurfaces.find((surface) => parentSourceRoot(surface) === parentSourceRoot(root)) ?? primary;
+      if (!integrationSurface) continue;
+      sourceRoots.add(parentSourceRoot(root));
+      moduleRegions.push({ role: "MODULE", root, integrationSurface, allowedExtensions: [".ts", ".js", ".mts", ".mjs", ".cts", ".cjs"], maxRelativeDepth: 4 });
+    }
+  }
+
+  return Object.freeze({
+    sourceRoots: Object.freeze([...sourceRoots]),
+    integrationSurfaces: Object.freeze(integrationSurfaces),
+    routeConventions: Object.freeze(routeConventions),
+    componentRegions: Object.freeze(componentRegions),
+    moduleRegions: Object.freeze(moduleRegions),
+    forbiddenRegions: Object.freeze([".github", ".vscode", "scripts", "docker", "ci", "config", "migrations"]),
+  });
 }
 
 import { MonorepoDescriptor } from "../workspace/MonorepoDetector";
@@ -513,6 +604,13 @@ export function detectRepositoryArchitecture(
     existingEntryPoints,
   };
   const primaryActiveEntryPoint = detectPrimaryActiveEntryPoint(existingFiles, partialArch);
+  const constructiveFacts = buildConstructiveArchitectureFacts({
+    framework,
+    router,
+    files: existingFiles,
+    entryPoints: existingEntryPoints,
+    primaryEntryPoint: primaryActiveEntryPoint,
+  });
 
   return {
     framework,
@@ -528,6 +626,7 @@ export function detectRepositoryArchitecture(
     guidelines,
     installedPackages,
     packageVersions,
+    constructiveFacts,
   };
 }
 
