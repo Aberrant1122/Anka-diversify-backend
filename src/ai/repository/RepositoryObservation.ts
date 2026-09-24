@@ -12,6 +12,7 @@ import { fileDefinesSymbol, resolveLocalImportEdges } from "./DeterministicImpor
 import { describeFrameworkRoute, frameworkRouteMatches } from "./FrameworkRouteMatcher";
 import { discoverStaticApiRegistrations, testExercisesRoute } from "./StaticApiArchitecture";
 import { detectPrimaryActiveEntryPoint, detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
+import type { GraphRootedCandidateRelationReceipt } from "../../types";
 
 export interface RepositoryObservationReceipt {
   readonly repositoryId: string;
@@ -314,6 +315,30 @@ export class RepositoryObservationTools {
     return FileSystemObservationReceipt.create(repositoryId, path.resolve(workspaceRoot), {
       repositoryRevision: observed.revision, kind: "DIAGNOSTIC", filePath: observed.normalizedPath,
       provenance: "BUILD_DIAGNOSTIC", metadata,
+    });
+  }
+
+  public static observeGraphRootedRelation(
+    repositoryId: string,
+    workspaceRoot: string,
+    receipt: GraphRootedCandidateRelationReceipt,
+  ): RepositoryObservationReceipt | null {
+    return withAuthoritySnapshot(workspaceRoot, () => {
+      const snapshot = authoritySnapshot(workspaceRoot);
+      if (receipt.repositoryRevision !== snapshot.revision) return null;
+      if (receipt.authority !== 0) return null;
+      if (path.resolve(workspaceRoot) !== path.resolve(receipt.workspaceRoot)) return null;
+      return FileSystemObservationReceipt.create(repositoryId, path.resolve(workspaceRoot), {
+        repositoryRevision: snapshot.revision,
+        kind: "REFERENCE",
+        filePath: normalizeRepoPath(receipt.candidatePath),
+        sourceFile: normalizeRepoPath(receipt.featureRootPath),
+        provenance: "ARCHITECTURE_DETECTOR",
+        metadata: {
+          prospective: true,
+          graphReceipt: receipt,
+        },
+      });
     });
   }
 

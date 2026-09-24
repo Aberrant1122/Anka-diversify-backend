@@ -806,6 +806,28 @@ export interface VerifiedProspectiveFeatureGraph {
   fingerprint: string;
 }
 
+export interface GraphRootedCandidateRelationReceipt {
+  readonly authority: 0;
+  readonly stageId: string;
+  readonly userClauseId: string;
+  readonly workspaceRoot: string;
+  readonly repositoryRevision: string;
+  readonly graphFingerprint: string;
+  readonly featureRootNodeId: string;
+  readonly featureRootPath: string;
+  readonly candidateNodeId: string;
+  readonly candidatePath: string;
+  readonly candidateAction: "create";
+  readonly candidateRole: ProspectiveNodeRole;
+  readonly relationChain: readonly {
+    readonly sourceNodeId: string;
+    readonly targetNodeId: string;
+    readonly relation: ProspectiveEdgeRelation;
+  }[];
+  readonly prospectiveAbsenceEvidenceId: string;
+  readonly rootEvidenceId: string;
+}
+
 export interface FileManifest {
   /** Array of file declarations */
   files: FileDeclaration[];

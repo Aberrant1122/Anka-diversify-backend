@@ -84,7 +84,7 @@ function canonicalNodeId(input: {
   ].join("\0")).digest("hex")}`;
 }
 
-function isRoleCompatible(
+export function isRoleCompatible(
   role: ProspectiveNodeRole,
   filePath: string,
   architecture: RepositoryArchitectureSummary,

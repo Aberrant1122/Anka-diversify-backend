@@ -1102,6 +1102,7 @@ export class AgentPlanner {
           workspaceRoot: effectiveLocalPath || undefined,
           existingFiles: canonicalExistingFiles,
           constructiveEnvelope,
+          verifiedTopology: preAuthorizationTopology,
         });
         const currentPlanningRevision = planningRevision;
         const evidenceGroundedPlannedChanges = bindBackendManifestEvidence({

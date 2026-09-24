@@ -23,6 +23,12 @@ import {
 } from "./ConstructiveCapabilityEnvelope";
 import { trustedStageAuthorizationId } from "../repository/TrustedTaskContext";
 import path from "path";
+import type { GraphRootedCandidateRelationReceipt } from "../../types";
+import { isRoleCompatible } from "../planning/ProspectiveFeatureGraph";
+
+export type AuthorizationRelationMode =
+  | "DIRECT_CONSTRUCTIVE_RELATION"
+  | "GRAPH_ROOTED_SUPPORT_RELATION";
 
 export interface TaskRootedAuthorizationProof {
   readonly action: "create" | "modify" | "delete";
@@ -31,6 +37,8 @@ export interface TaskRootedAuthorizationProof {
   readonly edgeEvidenceIds: readonly string[];
   readonly repositoryRevision: string;
   readonly constructiveRelation?: ConstructiveCandidateRelation;
+  readonly graphReceipt?: GraphRootedCandidateRelationReceipt;
+  readonly relationMode?: AuthorizationRelationMode;
 }
 
 /**
@@ -754,7 +762,7 @@ export class TaskRootedAuthorizationVerifier {
     if (action === "create" && !isDestructiveTask && !isUiRefinement && isConstructiveFeatureRequest(intent)) {
       const envelope = this.buildConstructiveEnvelope(intent, workspace, snapshot.revision, [...snapshot.files.keys()], snapshot.files);
       const relation = envelope ? deriveConstructiveCandidateRelation(envelope, candidate) : null;
-      if (!envelope || !relation || !candidateFitsAuthenticatedClause(intent, relation)) return null;
+      if (envelope && relation && candidateFitsAuthenticatedClause(intent, relation)) {
       for (const root of roots) {
         if (
           root.kind === "ENTRY_POINT" &&
@@ -776,9 +784,105 @@ export class TaskRootedAuthorizationVerifier {
             edgeEvidenceIds: Object.freeze([]),
             repositoryRevision: snapshot.revision,
             constructiveRelation: relation,
+            relationMode: "DIRECT_CONSTRUCTIVE_RELATION",
           });
         }
       }
+      }
+
+      const stageId = trustedStageAuthorizationId(intent);
+      const clause = authenticatedConstructiveClause(intent);
+      if (envelope && stageId && clause) {
+        const candidateEvidences = store.getAllEvidence().filter(
+          (e) =>
+            store.isAuthorityEligible(e) &&
+            e.repositoryRevision === snapshot.revision &&
+            normalizeRepoPath(e.filePath) === candidate &&
+            e.kind === "REFERENCE" &&
+            e.metadata?.graphReceipt
+        );
+
+        for (const ev of candidateEvidences) {
+          const receipt: GraphRootedCandidateRelationReceipt | undefined = ev.metadata?.graphReceipt;
+          if (!receipt) continue;
+          if (receipt.authority !== 0) continue;
+          if (receipt.candidateAction !== "create") continue;
+          if (normalizeRepoPath(receipt.candidatePath) !== candidate) continue;
+          if (receipt.stageId !== stageId) continue;
+          if (receipt.userClauseId !== clause.id) continue;
+          if (path.resolve(receipt.workspaceRoot) !== path.resolve(workspace)) continue;
+          if (receipt.repositoryRevision !== snapshot.revision) continue;
+          if (snapshot.files.has(candidate)) continue;
+
+          if (!repositoryPath(workspace, candidate, true)) continue;
+          const SENSITIVE_PATTERN = /(?:^|\/|_|-|\.)(?:security|auth|permissions?|credentials?|secrets?|admin|billing|payments?|fraud|bypass|privilege|tokens?)(?:\/|_|-|\.|$)/i;
+          if (SENSITIVE_PATTERN.test(candidate)) continue;
+          if (/(?:^|\/)(?:\.github|\.vscode|scripts|docker|ci|config|migrations)(?:\/|$)/i.test(candidate)) continue;
+          if (!/\.(?:tsx|jsx|ts|js|vue|svelte|css|scss|module\.css)$/i.test(candidate)) continue;
+
+          const packageEntry = [...snapshot.files.entries()].find(([filePath]) => /(?:^|\/)package\.json$/i.test(filePath));
+          let packageJsonContent: string | undefined;
+          if (packageEntry) {
+            try { packageJsonContent = Buffer.from(packageEntry[1], "base64").toString("utf8"); } catch {}
+          }
+          const architecture = detectRepositoryArchitecture([...snapshot.files.keys()], packageJsonContent);
+          if (!isRoleCompatible(receipt.candidateRole, candidate, architecture)) continue;
+
+          const rootRelation = deriveConstructiveCandidateRelation(envelope, receipt.featureRootPath);
+          if (!rootRelation) continue;
+          if (!candidateFitsAuthenticatedClause(intent, rootRelation)) continue;
+
+          const rootAnchor = roots.find(
+            (r) =>
+              r.kind === "ENTRY_POINT" &&
+              r.id === receipt.rootEvidenceId &&
+              r.filePath === rootRelation.integrationSurface
+          );
+          if (!rootAnchor) continue;
+
+          if (!this.isEligibleConstructiveCreateScope(receipt.featureRootPath, rootAnchor.filePath, [...snapshot.files.keys()], intent, rootRelation)) {
+            continue;
+          }
+
+          const absenceEv = store.getEvidence(receipt.prospectiveAbsenceEvidenceId);
+          if (!absenceEv || !store.isAuthorityEligible(absenceEv)) continue;
+          if (absenceEv.repositoryRevision !== snapshot.revision) continue;
+          if (normalizeRepoPath(absenceEv.filePath) !== candidate) continue;
+          if (!absenceEv.metadata?.prospective) continue;
+
+          if (!Array.isArray(receipt.relationChain) || receipt.relationChain.length === 0) continue;
+          const firstEdge = receipt.relationChain[0];
+          const lastEdge = receipt.relationChain[receipt.relationChain.length - 1];
+          if (firstEdge.sourceNodeId !== receipt.featureRootNodeId) continue;
+          if (lastEdge.targetNodeId !== receipt.candidateNodeId) continue;
+
+          const ALLOWED_RELATIONS = new Set(["RENDERS", "IMPORTS", "DEPENDS_ON", "REGISTERS"]);
+          let chainValid = true;
+          for (let i = 0; i < receipt.relationChain.length; i++) {
+            const edge = receipt.relationChain[i];
+            if (!ALLOWED_RELATIONS.has(edge.relation)) {
+              chainValid = false;
+              break;
+            }
+            if (i > 0 && edge.sourceNodeId !== receipt.relationChain[i - 1].targetNodeId) {
+              chainValid = false;
+              break;
+            }
+          }
+          if (!chainValid) continue;
+
+          return Object.freeze({
+            action: "create",
+            candidatePath: candidate,
+            rootEvidenceId: receipt.rootEvidenceId,
+            edgeEvidenceIds: Object.freeze([]),
+            repositoryRevision: snapshot.revision,
+            relationMode: "GRAPH_ROOTED_SUPPORT_RELATION",
+            graphReceipt: receipt,
+          });
+        }
+      }
+      return null;
     }
 
     for (const root of roots) {
