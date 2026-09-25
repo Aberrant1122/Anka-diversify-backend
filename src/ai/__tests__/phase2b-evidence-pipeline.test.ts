@@ -93,12 +93,23 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
       reasoning: "Task without hardcoded target",
     } as any);
 
-    jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (initialChanges: any) => ({
-      success: true,
-      attempts: 1,
-      finalChanges: initialChanges || [],
-      errorLog: "",
-    } as any));
+    jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (
+      initialChanges: any,
+      localPath: any,
+      _validationCommands: any,
+      _systemPrompt: any,
+      _requestMessage: any,
+      fsManager?: FileSystemStateManager,
+    ) => {
+      if (!fsManager) throw new Error("fixture requires the guarded filesystem manager");
+      await fsManager.apply(initialChanges || [], localPath);
+      return {
+        success: true,
+        attempts: 1,
+        finalChanges: initialChanges || [],
+        errorLog: "",
+      } as any;
+    });
 
     jest.spyOn(SecurityAuditor, "runReflectionAndSecurityAudit").mockResolvedValue({
       securityPass: true,
@@ -338,8 +349,6 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
       validationCommands: [],
     });
 
-    jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
-
     const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", { ...chatReq, message: "Update the button rendered by src/App.tsx" }, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Resolver approves Button.tsx -> ManifestValidator succeeds -> CodeGenerator called
@@ -433,8 +442,6 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
       commitMessage: "feat: add header",
       validationCommands: [],
     });
-
-    jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
 
     const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", { ...chatReq, message: "Create src/components/Header.tsx and integrate it in src/App.tsx" }, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 

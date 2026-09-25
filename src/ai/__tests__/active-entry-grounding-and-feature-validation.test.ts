@@ -304,7 +304,7 @@ describe("Active Entry-Point Grounding & Feature Validation Truthfulness", () =>
         true
       );
 
-      const featureFunctionalItem = items.find((i) => i.label === "Feature functional & working");
+      const featureFunctionalItem = items.find((i) => i.label === "Deterministic feature validation passed");
       expect(featureFunctionalItem?.checked).toBe(false);
     });
 
@@ -349,7 +349,7 @@ describe("Active Entry-Point Grounding & Feature Validation Truthfulness", () =>
         true
       );
 
-      const featureFunctionalItem = items.find((i) => i.label === "Feature functional & working");
+      const featureFunctionalItem = items.find((i) => i.label === "Deterministic feature validation passed");
       expect(featureFunctionalItem?.checked).toBe(true);
     });
   });

@@ -199,12 +199,23 @@ describe("Pipeline Stale Source Protection Integration Tests (Step 8B3)", () => 
       },
     });
 
-    jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockResolvedValue({
-      success: true,
-      attempts: 1,
-      finalChanges: [{ path: "src/config.ts", content: resolvedContent, description: "Increase timeout", action: "modify" }],
-      errorLog: "",
-    } as any);
+    jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (
+      initialChanges: any,
+      localPath: any,
+      _validationCommands: any,
+      _systemPrompt: any,
+      _requestMessage: any,
+      fsManager?: FileSystemStateManager,
+    ) => {
+      if (!fsManager) throw new Error("fixture requires the guarded filesystem manager");
+      await fsManager.apply(initialChanges, localPath);
+      return {
+        success: true,
+        attempts: 1,
+        finalChanges: [{ path: "src/config.ts", content: resolvedContent, description: "Increase timeout", action: "modify" }],
+        errorLog: "",
+      } as any;
+    });
 
     // Disk still contains VERSION_A_CONTENT matching expected hash
     expect(fs.readFileSync(targetFilePath, "utf8")).toBe(VERSION_A_CONTENT);

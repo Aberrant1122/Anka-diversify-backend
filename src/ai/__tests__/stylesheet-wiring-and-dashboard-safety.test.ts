@@ -89,7 +89,7 @@ describe("UI Feature Integration Quality: Stylesheet Wiring & Full-Page Dashboar
       );
       const styleItem = items.find((i) => i.label === "Stylesheets integrated");
       expect(styleItem?.checked).toBe(false);
-      const featureFunctional = items.find((i) => i.label === "Feature functional & working");
+      const featureFunctional = items.find((i) => i.label === "Deterministic feature validation passed");
       expect(featureFunctional?.checked).toBe(false);
     });
 
@@ -147,7 +147,7 @@ describe("UI Feature Integration Quality: Stylesheet Wiring & Full-Page Dashboar
       );
       const styleItem = items.find((i) => i.label === "Stylesheets integrated");
       expect(styleItem?.checked).toBe(true);
-      const featureFunctional = items.find((i) => i.label === "Feature functional & working");
+      const featureFunctional = items.find((i) => i.label === "Deterministic feature validation passed");
       expect(featureFunctional?.checked).toBe(true);
     });
 

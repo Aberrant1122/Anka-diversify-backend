@@ -78,6 +78,10 @@ describe("Checkpoint 6 ActionGroups and verified checkpoint journal", () => {
     expect(fs.readFileSync(path.join(workspace, "src/b.ts"), "utf8")).toBe("b1");
     expect(result.group.lifecycle).toBe("VERIFIED");
     expect(result.journalEntry).toMatchObject({ status: "VERIFIED", sequence: 1, validation: { passed: true } });
+    expect(result.journalEntry.verifiedChanges).toEqual([
+      expect.objectContaining({ path: "src/a.ts", action: "modify", content: "a1" }),
+      expect.objectContaining({ path: "src/b.ts", action: "create", content: "b1" }),
+    ]);
   });
 
   test("2. a second action failure rolls back the first action", async () => {
@@ -123,6 +127,7 @@ describe("Checkpoint 6 ActionGroups and verified checkpoint journal", () => {
     expect(fs.readFileSync(path.join(workspace, "src/a.ts"), "utf8")).toBe("a0");
     expect(fs.existsSync(path.join(workspace, "src/b.ts"))).toBe(false);
     expect(result.journalEntry).toMatchObject({ status: "ROLLED_BACK", failureCode: "VALIDATION_FAILED" });
+    expect(result.journalEntry.verifiedChanges).toEqual([]);
     expect(journal.verifiedCheckpoints()).toHaveLength(0);
   });
 

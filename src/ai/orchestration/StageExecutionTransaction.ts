@@ -85,6 +85,14 @@ export class StageExecutionTransaction {
     return this.checkpoint.fsManager;
   }
 
+  public get repositoryRevisionBefore(): string | undefined {
+    return this.checkpoint.fsManager.mutationTransaction?.baseRevision;
+  }
+
+  public get repositoryRevisionAfter(): string | undefined {
+    return this.checkpoint.fsManager.mutationTransaction?.currentRevision;
+  }
+
   public getExecutedMutations(): readonly ExecutedFileMutation[] {
     return this.checkpoint.fsManager.getExecutedMutations();
   }

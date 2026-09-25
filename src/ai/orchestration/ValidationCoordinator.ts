@@ -290,6 +290,7 @@ export class ValidationCoordinator {
         value.overallGatePassed,
         value.overallGatePassed ? [] : value.gateReasons,
       ),
+      verifiedChanges: (value) => value.repairResult.finalChanges,
     });
 
     const gateSuccess = execution.journalEntry.status === "VERIFIED";

@@ -506,6 +506,7 @@ export interface ExecutionContract {
 export interface AgentResponse {
   explanation: string;
   changes: AgentFileChange[];
+  modifiedFilesCount?: number;
   commitMessage: string;
   sessionId: string;
   needsClarification?: boolean;

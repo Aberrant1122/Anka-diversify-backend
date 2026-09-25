@@ -3,6 +3,7 @@ import {
   isAuthenticActionGroupValidationReceipt,
 } from "../orchestration/ValidationCoordinator";
 import type { ActionGroupSnapshot } from "../orchestration/ActionGroup";
+import type { AgentFileChange } from "../shared/types";
 
 export type ActionGroupJournalFailureCode =
   | "AUTHORIZATION_FAILED"
@@ -22,6 +23,10 @@ export interface ActionGroupJournalEntry {
   readonly beforeFingerprints: Readonly<Record<string, string>>;
   readonly attemptedAfterFingerprints: Readonly<Record<string, string>>;
   readonly finalFingerprints: Readonly<Record<string, string>>;
+  /** Exact backend-observed payload for the mutations that passed validation. */
+  readonly verifiedChanges: readonly AgentFileChange[];
+  readonly repositoryRevisionBefore?: string;
+  readonly repositoryRevisionAfter?: string;
   readonly validation: {
     readonly source: "VALIDATION_COORDINATOR" | "NOT_COMPLETED";
     readonly passed: boolean;
@@ -37,6 +42,7 @@ function freezeFingerprints(value: Readonly<Record<string, string>>): Readonly<R
 
 function freezeEntry(entry: ActionGroupJournalEntry): ActionGroupJournalEntry {
   Object.freeze(entry.attemptedActions);
+  Object.freeze(entry.verifiedChanges);
   Object.freeze(entry.validation.reasons);
   Object.freeze(entry.validation);
   return Object.freeze(entry);
@@ -54,16 +60,18 @@ export class VerifiedCheckpointJournal {
     before: Readonly<Record<string, string>>,
     attemptedAfter: Readonly<Record<string, string>>,
     finalEvidence: Readonly<Record<string, string>>,
+    verifiedChanges: readonly AgentFileChange[],
     receipt: ActionGroupValidationReceipt,
+    repositoryRevisions?: { before?: string; after?: string },
   ): ActionGroupJournalEntry {
     if (group.lifecycle !== "VERIFIED" || !isAuthenticActionGroupValidationReceipt(receipt) || !receipt.passed) {
       throw new Error("Only deterministically validated ActionGroups can become VERIFIED checkpoints");
     }
-    return this.append(group, attemptedActions, before, attemptedAfter, finalEvidence, {
+    return this.append(group, attemptedActions, before, attemptedAfter, finalEvidence, verifiedChanges, {
       source: receipt.source,
       passed: true,
       reasons: receipt.reasons,
-    }, "VERIFIED");
+    }, "VERIFIED", undefined, repositoryRevisions);
   }
 
   public appendRolledBack(
@@ -76,7 +84,7 @@ export class VerifiedCheckpointJournal {
     receipt?: ActionGroupValidationReceipt,
   ): ActionGroupJournalEntry {
     if (group.lifecycle !== "ROLLED_BACK") throw new Error("Rolled-back journal facts require a rolled-back ActionGroup");
-    return this.append(group, attemptedActions, before, attemptedAfter, finalEvidence, receipt
+    return this.append(group, attemptedActions, before, attemptedAfter, finalEvidence, [], receipt
       ? { source: receipt.source, passed: false, reasons: receipt.reasons }
       : { source: "NOT_COMPLETED", passed: false, reasons: Object.freeze([failureCode]) }, "ROLLED_BACK", failureCode);
   }
@@ -95,9 +103,11 @@ export class VerifiedCheckpointJournal {
     before: Readonly<Record<string, string>>,
     attemptedAfter: Readonly<Record<string, string>>,
     finalEvidence: Readonly<Record<string, string>>,
+    verifiedChanges: readonly AgentFileChange[],
     validation: ActionGroupJournalEntry["validation"],
     status: ActionGroupJournalEntry["status"],
     failureCode?: ActionGroupJournalFailureCode,
+    repositoryRevisions?: { before?: string; after?: string },
   ): ActionGroupJournalEntry {
     const sequence = this.entries.length + 1;
     const recordedAt = this.now();
@@ -114,9 +124,12 @@ export class VerifiedCheckpointJournal {
       beforeFingerprints: freezeFingerprints(before),
       attemptedAfterFingerprints: freezeFingerprints(attemptedAfter),
       finalFingerprints: freezeFingerprints(finalEvidence),
+      verifiedChanges: Object.freeze(verifiedChanges.map((change) => Object.freeze({ ...change }))),
       validation: Object.freeze({ ...validation, reasons: Object.freeze([...validation.reasons]) }),
       status,
       ...(failureCode ? { failureCode } : {}),
+      ...(repositoryRevisions?.before ? { repositoryRevisionBefore: repositoryRevisions.before } : {}),
+      ...(repositoryRevisions?.after ? { repositoryRevisionAfter: repositoryRevisions.after } : {}),
     });
     this.entries.push(entry);
     return entry;

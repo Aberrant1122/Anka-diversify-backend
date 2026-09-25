@@ -3,8 +3,9 @@ import { AgentWorkspaceState, WorkspaceValidationFact } from "../runtime/AgentWo
 import { TaskRuntime } from "../runtime/TaskRuntime";
 import { WorkingPlan } from "../runtime/WorkingPlan";
 import type { DiagnosticBaselineComparison } from "../runtime/BaselineDiagnosticVerifier";
-import type { ActionGroupJournalEntry } from "../runtime/VerifiedCheckpointJournal";
-import type { AgentResponse } from "../shared/types";
+import { VerifiedCheckpointJournal, type ActionGroupJournalEntry } from "../runtime/VerifiedCheckpointJournal";
+import type { AgentFileChange, AgentResponse } from "../shared/types";
+import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import {
   canonicalWorkspaceIdentity,
   createCanonicalPlanRecoveryEvent,
@@ -123,6 +124,91 @@ const REINVESTIGATION_OUTCOMES = new Set([
   "WORKSPACE_BINDING_INVALID", "TRANSACTION_INVALIDATED", "CAPABILITY_MANIFEST_MISMATCH", "TRANSACTION_CONFLICT",
 ]);
 
+function normalizedAction(change: AgentFileChange): "create" | "modify" | "delete" {
+  return change.action === "delete" || change.isDeleted ? "delete" : change.action ?? "modify";
+}
+
+function verifiedCheckpointLineage(
+  checkpoints: readonly ActionGroupJournalEntry[],
+): ActionGroupJournalEntry[] {
+  const ordered = [...checkpoints]
+    .filter((entry) => entry.status === "VERIFIED" && entry.validation.passed)
+    .sort((left, right) => left.sequence - right.sequence);
+  const lineage: ActionGroupJournalEntry[] = [];
+  let previousSequence = 0;
+  let previousRevision: string | undefined;
+  for (const checkpoint of ordered) {
+    const revisionBound = Boolean(checkpoint.repositoryRevisionBefore && checkpoint.repositoryRevisionAfter);
+    if (ordered.length > 1 && !revisionBound) break;
+    if (checkpoint.sequence <= previousSequence) break;
+    if (previousRevision && checkpoint.repositoryRevisionBefore !== previousRevision) break;
+    lineage.push(checkpoint);
+    previousSequence = checkpoint.sequence;
+    previousRevision = checkpoint.repositoryRevisionAfter;
+  }
+  return lineage;
+}
+
+/** Projects only deterministically VERIFIED journal payloads in checkpoint order. */
+export function projectVerifiedTaskChanges(
+  checkpoints: readonly ActionGroupJournalEntry[],
+): AgentFileChange[] {
+  const finalByPath = new Map<string, AgentFileChange>();
+  for (const checkpoint of verifiedCheckpointLineage(checkpoints)) {
+    for (const change of checkpoint.verifiedChanges ?? []) {
+      const normalizedPath = normalizeRepoPath(change.path);
+      if (!normalizedPath) continue;
+      finalByPath.delete(normalizedPath);
+      finalByPath.set(normalizedPath, { ...change, path: normalizedPath });
+    }
+  }
+  return [...finalByPath.values()];
+}
+
+function sameProjectedChanges(left: readonly AgentFileChange[], right: readonly AgentFileChange[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((change, index) => {
+    const projected = right[index];
+    return normalizeRepoPath(change.path) === normalizeRepoPath(projected.path)
+      && normalizedAction(change) === normalizedAction(projected)
+      && change.content === projected.content
+      && change.description === projected.description;
+  });
+}
+
+function withFileCount(text: string | undefined, count: number): string | undefined {
+  return text?.replace(/Files modified: \d+/g, `Files modified: ${count}`);
+}
+
+/** Builds the task-level response without consulting planned or merely authorized candidates. */
+export function buildVerifiedTaskResult(
+  response: AgentResponse,
+  checkpoints: readonly ActionGroupJournalEntry[],
+): AgentResponse {
+  const verified = verifiedCheckpointLineage(checkpoints);
+  if (verified.length === 0) return { ...response, changes: [] };
+
+  const changes = projectVerifiedTaskChanges(verified);
+  const isCompound = verified.length > 1 || (response.taskExecutionPlan?.stages.length ?? 0) > 1;
+  if (!isCompound && sameProjectedChanges(response.changes, changes)) return response;
+
+  const stagesById = new Map(response.taskExecutionPlan?.stages.map((stage) => [stage.id, stage.name]) ?? []);
+  const stageIds = [...new Set(verified.map((entry) => entry.stageId))];
+  const verifiedStageSummary = stageIds
+    .map((stageId, index) => `- Stage ${index + 1}: ${stagesById.get(stageId) ?? stageId}`)
+    .join("\n");
+  const explanation = verifiedStageSummary
+    ? `Verified compound stages:\n${verifiedStageSummary}\n\n${response.explanation}`
+    : response.explanation;
+  return {
+    ...response,
+    explanation: withFileCount(explanation, changes.length) ?? explanation,
+    changes,
+    modifiedFilesCount: changes.length,
+    pipelineMeasurementText: withFileCount(response.pipelineMeasurementText, changes.length),
+  };
+}
+
 /**
  * Finite CP7 coordinator. Observation and planning are separate callbacks so the
  * planner can revise after deterministic facts; mutation remains delegated to
@@ -139,6 +225,7 @@ export class AgentLoopCoordinator {
       response: AgentResponse;
       journalEntry?: ActionGroupJournalEntry;
     }>;
+    checkpointJournal?: VerifiedCheckpointJournal;
     onRevisionRequired?: (
       response: AgentResponse,
       journalEntry: ActionGroupJournalEntry,
@@ -154,6 +241,11 @@ export class AgentLoopCoordinator {
     let workingPlan = input.workingPlan;
     let lastResponse: AgentResponse | undefined;
     const verifiedCheckpointIds: string[] = [];
+    const verifiedCheckpoints: ActionGroupJournalEntry[] = [];
+    const finalize = (response: AgentResponse): AgentResponse => buildVerifiedTaskResult(
+      response,
+      input.checkpointJournal?.snapshot() ?? verifiedCheckpoints,
+    );
     const failedActionFingerprints = new Set<string>();
     const stagePlanningAttempts = new Map<string, StagePlanningRecoveryRecord[]>();
 
@@ -175,7 +267,7 @@ export class AgentLoopCoordinator {
             reason: executed.response.reason ?? "The task cannot proceed deterministically without clarification.",
           });
           return {
-            response: executed.response,
+            response: finalize(executed.response),
             loop: { outcome: "CLARIFICATION_REQUIRED", iterations: iteration, workingPlan, verifiedCheckpointIds },
           };
         }
@@ -186,7 +278,7 @@ export class AgentLoopCoordinator {
           if (code) {
             if (code === "PLANNING_IDENTICAL_FAILED_ACTION" && previousResponse) {
               return {
-                response: previousResponse,
+                response: finalize(previousResponse),
                 loop: {
                   outcome: "VALIDATION_FAILURE",
                   iterations: iteration,
@@ -215,7 +307,7 @@ export class AgentLoopCoordinator {
                 const failureCode = "INTERNAL_RECOVERY_CONTRACT_ERROR";
                 workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
                 return {
-                  response: recoveryContractFailure(executed.response, message),
+                  response: finalize(recoveryContractFailure(executed.response, message)),
                   loop: {
                     outcome: "VALIDATION_FAILURE",
                     iterations: iteration,
@@ -268,13 +360,13 @@ export class AgentLoopCoordinator {
                   status: workingPlan.snapshot().status,
                 }));
                 return {
-                  response: {
+                  response: finalize({
                     ...executed.response,
                     errorCode: failureCode,
                     explanation: isScopeRecovery
                       ? "[Duplicate Recovery Plan] The active stage repeated a previously rejected planning topology without materially new repository facts."
                       : "[Duplicate Recovery Plan] The active stage repeated a previously failed canonical plan at the same repository revision.",
-                  },
+                  }),
                   loop: {
                     outcome: "VALIDATION_FAILURE",
                     iterations: iteration,
@@ -301,13 +393,13 @@ export class AgentLoopCoordinator {
                 );
                 workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
                 return {
-                  response: {
+                  response: finalize({
                     ...executed.response,
                     errorCode: failureCode,
                     explanation: recoveryEvent.phase === "INVESTIGATION"
                       ? "[Investigation Stalled] Deterministic repository investigation repeated without new materialized facts or reduced missing evidence."
                       : "[Pre-Canonical Recovery Stalled] The same pre-canonical blocker repeated without deterministic progress.",
-                  },
+                  }),
                   loop: {
                     outcome: "VALIDATION_FAILURE",
                     iterations: iteration,
@@ -342,13 +434,13 @@ export class AgentLoopCoordinator {
                   status: workingPlan.snapshot().status,
                 }));
                 return {
-                  response: {
+                  response: finalize({
                     ...executed.response,
                     errorCode: failureCode,
                     explanation: isScopeRecovery
                       ? `[Planning Recovery Exhausted] Active stage ${activeStageId} exhausted its ${MAX_STAGE_PLANNING_ATTEMPTS}-attempt planning budget without finding a safe authorized topology.`
                       : `[Planning Recovery Exhausted] Active stage ${activeStageId} exceeded planning recovery budget (${MAX_STAGE_PLANNING_ATTEMPTS} attempts). Final validation errors:\n${executed.response.explanation}`,
-                  },
+                  }),
                   loop: {
                     outcome: "VALIDATION_FAILURE",
                     iterations: iteration,
@@ -449,7 +541,7 @@ export class AgentLoopCoordinator {
               });
             }
             return {
-              response: executed.response,
+              response: finalize(executed.response),
               loop: {
                 outcome: category === "AUTHORIZATION_DENIAL"
                   ? "AUTHORIZATION_DENIED"
@@ -470,7 +562,7 @@ export class AgentLoopCoordinator {
             status: workingPlan.snapshot().status,
           }));
           return {
-            response: executed.response,
+            response: finalize(executed.response),
             loop: { outcome: "AWAITING_COMPLETION_EVALUATION", iterations: iteration, workingPlan, verifiedCheckpointIds },
           };
         }
@@ -514,7 +606,7 @@ export class AgentLoopCoordinator {
             continue;
           }
           return {
-            response: executed.response,
+            response: finalize(executed.response),
             loop: {
               outcome: category === "AUTHORIZATION_DENIAL" ? "AUTHORIZATION_DENIED" : "VALIDATION_FAILURE",
               iterations: iteration,
@@ -526,6 +618,7 @@ export class AgentLoopCoordinator {
         }
 
         verifiedCheckpointIds.push(entry.journalId);
+        verifiedCheckpoints.push(entry);
         const currentStageId = executed.response.taskExecutionPlan?.stages[
           executed.response.taskExecutionPlan.currentStageIndex
         ]?.id || "stage-default";
@@ -567,7 +660,7 @@ export class AgentLoopCoordinator {
           status: workingPlan.snapshot().status,
         }));
         return {
-          response: executed.response,
+          response: finalize(executed.response),
           loop: { outcome: "AWAITING_COMPLETION_EVALUATION", iterations: iteration, workingPlan, verifiedCheckpointIds },
         };
       } catch (error) {
@@ -594,7 +687,7 @@ export class AgentLoopCoordinator {
         });
         if (!lastResponse) throw error;
         return {
-          response: lastResponse,
+          response: finalize(lastResponse),
           loop: {
             outcome: budget ? "BUDGET_EXHAUSTED" : authorization ? "AUTHORIZATION_DENIED" : "TECHNICAL_FAILURE",
             iterations: iteration,
@@ -608,7 +701,7 @@ export class AgentLoopCoordinator {
 
     if (!lastResponse) throw new Error("Agent loop reached its bound before producing an iteration result");
     return {
-      response: lastResponse,
+      response: finalize(lastResponse),
       loop: {
         outcome: "MAX_ITERATIONS_REACHED",
         iterations: input.maxIterations,

@@ -41,7 +41,7 @@ export class PipelineResultBuilder {
         { label: "JS Interactivity & Events", checked: isExplicitlyPassed("js_interactivity"), category: "Feature" },
         { label: "Standalone Asset Completeness", checked: isExplicitlyPassed("standalone_completeness"), category: "Feature" },
         { label: isClean ? "Zero Syntax Errors" : "Syntax Errors / Build Failed", checked: isClean, category: "Build" },
-        { label: "Standalone App Working", checked: featureValidation.overallPassed, category: "Validation" },
+        { label: "Standalone app validation passed", checked: featureValidation.overallPassed, category: "Validation" },
       ];
     }
 
@@ -62,11 +62,11 @@ export class PipelineResultBuilder {
       items.push({ label: "Requested issue resolved & task verified", checked: true, category: "Build" });
       items.push({ label: "No TS / Compiler Errors", checked: false, category: "Build" });
       items.push({ label: "Full repository build clean", checked: false, category: "Build" });
-      items.push({ label: "Feature functional & working", checked: featureValidation.overallPassed, category: "Validation" });
+      items.push({ label: "Deterministic feature validation passed", checked: featureValidation.overallPassed, category: "Validation" });
     } else {
       items.push({ label: isClean ? "No TS / Compiler Errors" : "TypeScript / Build Compilation Failed", checked: isClean, category: "Build" });
       items.push({ label: isClean ? "Build passes" : "Build Failed / Flagged", checked: isClean, category: "Build" });
-      items.push({ label: "Feature functional & working", checked: isClean && featureValidation.overallPassed, category: "Validation" });
+      items.push({ label: "Deterministic feature validation passed", checked: isClean && featureValidation.overallPassed, category: "Validation" });
     }
 
     return items;

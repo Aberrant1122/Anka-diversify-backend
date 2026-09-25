@@ -181,6 +181,7 @@ export class AgentPipeline {
       runtime,
       workingPlan,
       maxIterations,
+      checkpointJournal: journal,
       observe: async (iteration) => {
         const facts = await RepositoryObserver.loadProjectFacts(projectId);
         const observation = await RepositoryObserver.observe(projectId, iterationRequest, facts, options);
@@ -321,12 +322,25 @@ export class AgentPipeline {
     }
     const runtimeCompleted = runtime.snapshot().status === "COMPLETED"
       && completionEvaluation?.outcome === "COMPLETE";
+    const runtimeFailed = runtime.snapshot().status === "FAILED";
+    const completionUnfinished = completionEvaluation !== undefined && completionEvaluation.outcome !== "COMPLETE";
+    const loopFailed = result.loop.outcome === "TECHNICAL_FAILURE"
+      || result.loop.outcome === "AUTHORIZATION_DENIED"
+      || result.loop.outcome === "VALIDATION_FAILURE"
+      || result.loop.outcome === "BUDGET_EXHAUSTED"
+      || result.loop.outcome === "MAX_ITERATIONS_REACHED";
     const authoritySafeResponse: AgentResponse = runtimeCompleted
       ? { ...result.response, lifecycleStage: "Done", compoundTaskStatus: "COMPLETED" }
       : {
           ...result.response,
           ...(result.response.lifecycleStage === "Done" ? { lifecycleStage: "Determine Completion" as const } : {}),
-          ...(result.response.compoundTaskStatus === "COMPLETED" ? { compoundTaskStatus: "VERIFIED" as const } : {}),
+          ...(loopFailed || runtimeFailed
+            ? { compoundTaskStatus: "FAILED" as const }
+            : completionUnfinished
+              ? { compoundTaskStatus: "RUNNING" as const }
+            : result.response.compoundTaskStatus === "COMPLETED"
+              ? { compoundTaskStatus: "VERIFIED" as const }
+              : {}),
         };
     await MemoryPersistence.saveMessage(persistenceSession.id, "assistant", authoritySafeResponse.explanation);
     const reachedUserFacingSuccess = runtimeCompleted
