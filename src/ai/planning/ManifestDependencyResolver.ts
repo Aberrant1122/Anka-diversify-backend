@@ -139,25 +139,61 @@ function substituteAliasTarget(target: string, wildcard: string): string {
   return target.includes("*") ? target.replace("*", wildcard) : target;
 }
 
+/**
+ * Terminal extensions that JS/TS module resolution appends implicitly. Only
+ * these may be omitted from a canonical specifier or inferred while matching;
+ * stylesheets, JSON, and other assets keep their exact terminal extension.
+ */
+const CODE_MODULE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
+
 function extensionless(value: string): string {
   const slash = value.lastIndexOf("/");
   const dot = value.lastIndexOf(".");
   return dot > slash ? value.slice(0, dot) : value;
 }
 
-function matchesRepositoryFile(candidate: string, file: string): boolean {
-  if (candidate === file) return true;
-  if (candidate.endsWith("/")) return false;
-  const candidateNoExtension = extensionless(candidate);
-  const fileNoExtension = extensionless(file);
-  if (candidateNoExtension === candidate && candidate === fileNoExtension) return true;
-  return fileNoExtension === `${candidate}/index`;
+/** Strips exactly one terminal code-module extension; null for non-code targets. */
+function codeModuleIdentity(value: string): string | null {
+  const slash = value.lastIndexOf("/");
+  const dot = value.lastIndexOf(".");
+  if (dot <= slash + 1) return null;
+  return CODE_MODULE_EXTENSIONS.has(value.slice(dot).toLowerCase()) ? value.slice(0, dot) : null;
 }
 
+/** Projects a repository-relative target path onto its import specifier path. */
+function moduleSpecifierPath(value: string): string {
+  const identity = codeModuleIdentity(value);
+  return identity === null ? value : identity.replace(/\/index$/, "");
+}
+
+function uniqueRepositoryMatch(matches: string[]): string | null {
+  const identities = new Set(matches.map((file) => file.toLowerCase()));
+  return identities.size === 1 ? matches[0] : null;
+}
+
+/**
+ * Exact identity wins. Otherwise a candidate may only omit one code-module
+ * extension (or a code-module /index). The legacy extensionless rule remains a
+ * last-resort fallback for dotless candidates. Inferred matches must be unique.
+ */
 function findRepositoryMatch(candidate: string, files: string[]): string | null {
   const normalized = normalizeRepoPath(candidate).toLowerCase();
-  const match = files.find((file) => matchesRepositoryFile(normalized, file.toLowerCase()));
-  return match || null;
+  const exact = files.find((file) => file.toLowerCase() === normalized);
+  if (exact) return exact;
+  if (normalized.endsWith("/")) return null;
+
+  const moduleMatches = files.filter((file) => {
+    const identity = codeModuleIdentity(file.toLowerCase());
+    return identity !== null && (identity === normalized || identity === `${normalized}/index`);
+  });
+  if (moduleMatches.length > 0) return uniqueRepositoryMatch(moduleMatches);
+
+  const dotless = extensionless(normalized) === normalized;
+  const legacyMatches = files.filter((file) => {
+    const fileNoExtension = extensionless(file.toLowerCase());
+    return (dotless && fileNoExtension === normalized) || fileNoExtension === `${normalized}/index`;
+  });
+  return legacyMatches.length > 0 ? uniqueRepositoryMatch(legacyMatches) : null;
 }
 
 function hasRepositoryDirectoryPrefix(value: string, files: string[]): boolean {
@@ -280,7 +316,7 @@ export class ManifestDependencyResolver {
       if (!ownerWorkspace || !targetWorkspace || !ownerWorkspace.dependencies.has(targetWorkspace.name)) return null;
       let subpath = target.slice(targetWorkspace.relativePath.length).replace(/^\/+/, "");
       subpath = subpath.replace(/^src\//, "");
-      subpath = extensionless(subpath).replace(/\/index$/, "");
+      subpath = moduleSpecifierPath(subpath);
       const workspaceSpecifier = subpath ? `${targetWorkspace.name}/${subpath}` : targetWorkspace.name;
       const resolved = this.resolve(owner, { value: workspaceSpecifier, intent: "REPOSITORY" });
       return resolved.classification === "REPOSITORY" && resolved.resolvedPath.toLowerCase() === target.toLowerCase()
@@ -289,7 +325,7 @@ export class ManifestDependencyResolver {
     }
 
     let relative = normalizeSlashes(path.posix.relative(path.posix.dirname(owner), target));
-    relative = extensionless(relative).replace(/\/index$/, "");
+    relative = moduleSpecifierPath(relative);
     if (!relative.startsWith(".")) relative = `./${relative}`;
     const resolved = this.resolve(owner, { value: relative, intent: "REPOSITORY" });
     return resolved.classification === "REPOSITORY" && resolved.resolvedPath.toLowerCase() === target.toLowerCase()
