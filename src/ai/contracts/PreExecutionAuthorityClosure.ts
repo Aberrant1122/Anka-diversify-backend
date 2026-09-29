@@ -9,6 +9,8 @@ import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 import { MonorepoDescriptor } from "../workspace/MonorepoDetector";
 import { resolveEffectiveAction } from "./ExecutionScopeEnforcer";
 import { DeterministicRelationEvidenceAcquirer } from "./DeterministicRelationEvidenceAcquirer";
+import { ConstructiveCapabilityEnvelope, ConstructiveCapabilityEnvelopeBuilder } from "./ConstructiveCapabilityEnvelope";
+import { detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
 
 export interface PreExecutionAuthorityClosureInput {
   changes: readonly AgentFileChange[];
@@ -54,6 +56,25 @@ export class PreExecutionAuthorityClosure {
     // Late generated candidates trigger a bounded, read-only search from
     // independently task-grounded anchors.  The candidate and manifest are
     // never used as anchors or evidence.
+    const snapshot = input.workspaceRoot ? authoritySnapshot(input.workspaceRoot) : undefined;
+    let constructiveEnvelope: ConstructiveCapabilityEnvelope | null = null;
+    if (input.workspaceRoot && snapshot) {
+      const packageEntry = [...snapshot.files.entries()].find(([filePath]) => /(?:^|\/)package\.json$/i.test(filePath));
+      let packageJsonContent: string | undefined;
+      if (packageEntry) {
+        try {
+          packageJsonContent = Buffer.from(packageEntry[1], "base64").toString("utf8");
+        } catch {}
+      }
+      const architecture = detectRepositoryArchitecture([...snapshot.files.keys()], packageJsonContent);
+      constructiveEnvelope = ConstructiveCapabilityEnvelopeBuilder.build({
+        intentSpec: input.intentSpec,
+        workspaceRoot: input.workspaceRoot,
+        repositoryRevision: snapshot.revision,
+        architecture,
+      });
+    }
+
     DeterministicRelationEvidenceAcquirer.acquire({
       candidatePaths: normalizedChanges.map((entry) => entry.path),
       intentSpec: input.intentSpec,
@@ -61,6 +82,8 @@ export class PreExecutionAuthorityClosure {
       repositoryId: input.repositoryId,
       workspaceRoot: input.workspaceRoot,
       existingFiles: input.existingFiles,
+      constructiveEnvelope,
+      verifiedTopology: input.manifest?.verifiedTopology,
     });
     const proposedChanges: PlannedChange[] = normalizedChanges.map(({ change, path, action }) => {
       const manifestEntry = input.manifest?.files.find((entry) => normalizeRepoPath(entry.path) === path);

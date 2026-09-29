@@ -221,70 +221,169 @@ model ProjectDecision {
 
 // ── Phased workflow (Documentation → Architecture → Implementation → Testing) ──
 
-model ProjectPhaseState {
-  id           String    @id @default(cuid())
-  projectId    String
-  phase        String // 'requirements' | 'documentation' | 'architecture' | 'implementation' | 'testing' | 'review'
-  status       String    @default("not_started") // 'not_started' | 'in_progress' | 'awaiting_approval' | 'approved' | 'completed'
-  startedAt    DateTime?
-  completedAt  DateTime?
-  approvedById String?
-  approvedAt   DateTime?
-  notes        String?
+enum ArtifactChangeKind {
+  INITIAL_GENERATION
+  MANUAL_EDIT
+  AI_DOCUMENT_REVISION
+  AI_SECTION_REVISION
+  AI_SECTION_REGENERATION
+  FEEDBACK_APPLICATION
+  IMPORT
+}
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+enum ArtifactActorType {
+  HUMAN
+  AI
+  SYSTEM
+}
+
+enum ArtifactLifecycleStatus {
+  DRAFT
+  AWAITING_APPROVAL
+  APPROVED
+}
+
+enum WorkflowOperation {
+  INITIAL_GENERATION
+  DOCUMENT_REVISION
+  SECTION_REVISION
+  SECTION_REGENERATION
+  FEEDBACK_APPLICATION
+  CHANGE_SUMMARIZATION
+  APPROVAL_PREPARATION
+  NEXT_PHASE_GENERATION
+  LEGACY_PHASE_RUN
+}
+
+model ProjectPhaseState {
+  id                          String    @id @default(cuid())
+  projectId                   String
+  phase                       String // 'requirements' | 'documentation' | 'architecture' | 'implementation' | 'testing' | 'review'
+  status                      String    @default("not_started") // legacy-compatible until transition enforcement lands
+  startedAt                   DateTime?
+  completedAt                 DateTime?
+  approvedById                String?
+  approvedAt                  DateTime?
+  notes                       String?
+  currentArtifactId           String?
+  approvalCandidateArtifactId String?
+  currentApprovedArtifactId   String?
+  activeRunId                 String?
+  stateVersion                Int       @default(0)
+
+  project                   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  currentArtifact           PhaseArtifact? @relation("PhaseStateCurrentArtifact", fields: [currentArtifactId], references: [id], onDelete: SetNull)
+  approvalCandidateArtifact PhaseArtifact? @relation("PhaseStateApprovalCandidate", fields: [approvalCandidateArtifactId], references: [id], onDelete: SetNull)
+  currentApprovedArtifact   PhaseArtifact? @relation("PhaseStateCurrentApproved", fields: [currentApprovedArtifactId], references: [id], onDelete: SetNull)
+  activeRun                 WorkflowRun?   @relation("PhaseStateActiveRun", fields: [activeRunId], references: [id], onDelete: SetNull)
 
   @@unique([projectId, phase])
+  @@index([projectId, status])
+  @@index([currentArtifactId])
+  @@index([approvalCandidateArtifactId])
+  @@index([currentApprovedArtifactId])
+  @@index([activeRunId])
   @@map("project_phase_states")
 }
 
 model PhaseArtifact {
-  id        String   @id @default(cuid())
-  projectId String
-  phase     String
-  type      String // 'requirements_doc' | 'architecture_doc' | 'decision_log' | 'diagram' | ...
-  title     String
-  content   String   @db.Text
-  version   Int      @default(1)
-  createdBy String
-  createdAt DateTime @default(now())
-  approved  Boolean  @default(false)
+  id                String                  @id @default(cuid())
+  projectId         String
+  phase             String
+  type              String // legacy-compatible artifact type string
+  title             String
+  content           String                  @db.Text
+  structuredContent Json?
+  schemaVersion     Int                     @default(1)
+  contentHash       String?
+  version           Int                     @default(1)
+  previousVersionId String?
+  basedOnArtifactId String?
+  changeKind        ArtifactChangeKind?
+  createdBy         String
+  createdByType     ArtifactActorType?
+  createdAt         DateTime                @default(now())
+  lifecycleStatus   ArtifactLifecycleStatus @default(DRAFT)
+  approved          Boolean                 @default(false) // compatibility projection; remove after callers migrate
+  approvedAt        DateTime?
+  supersededAt      DateTime?
 
-  project   Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  decisions ProjectDecision[]
+  project                         Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  decisions                       ProjectDecision[]
+  previousVersion                 PhaseArtifact?      @relation("PhaseArtifactPreviousVersion", fields: [previousVersionId], references: [id], onDelete: SetNull)
+  nextVersions                    PhaseArtifact[]     @relation("PhaseArtifactPreviousVersion")
+  basedOnArtifact                 PhaseArtifact?      @relation("PhaseArtifactBasedOn", fields: [basedOnArtifactId], references: [id], onDelete: SetNull)
+  derivedArtifacts                PhaseArtifact[]     @relation("PhaseArtifactBasedOn")
+  approvals                       PhaseApproval[]
+  currentForPhaseStates           ProjectPhaseState[] @relation("PhaseStateCurrentArtifact")
+  approvalCandidateForPhaseStates ProjectPhaseState[] @relation("PhaseStateApprovalCandidate")
+  currentApprovedForPhaseStates   ProjectPhaseState[] @relation("PhaseStateCurrentApproved")
+  baseForWorkflowRuns             WorkflowRun[]       @relation("WorkflowRunBaseArtifact")
+  inputForWorkflowRuns            WorkflowRun[]       @relation("WorkflowRunInputArtifact")
+  outputForWorkflowRuns           WorkflowRun[]       @relation("WorkflowRunOutputArtifact")
 
-  @@index([projectId, phase])
+  @@unique([projectId, phase, type, version])
+  @@index([projectId, phase, type, createdAt])
+  @@index([previousVersionId])
+  @@index([basedOnArtifactId])
   @@map("phase_artifacts")
 }
 
 model PhaseApproval {
-  id           String   @id @default(cuid())
-  projectId    String
-  phase        String
-  approvedById String
-  approvedAt   DateTime @default(now())
-  decision     String // 'approved' | 'changes_requested' | 'rejected'
-  comments     String?
+  id                  String   @id @default(cuid())
+  projectId           String
+  phase               String
+  artifactId          String?
+  artifactVersion     Int?
+  artifactContentHash String?
+  legacyUnverified    Boolean  @default(false)
+  approvedById        String
+  approvedAt          DateTime @default(now())
+  decision            String // 'approved' | 'changes_requested' | 'rejected'
+  comments            String?
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project  Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  artifact PhaseArtifact? @relation(fields: [artifactId], references: [id], onDelete: Restrict)
 
   @@index([projectId, phase])
+  @@index([artifactId, approvedAt])
   @@map("phase_approvals")
 }
 
 model WorkflowRun {
-  id           String    @id @default(cuid())
-  projectId    String
-  triggerType  String // 'manual' | 'auto_advance' | 'retry'
-  currentPhase String
-  status       String    @default("running") // 'running' | 'completed' | 'failed' | 'cancelled'
-  startedAt    DateTime  @default(now())
-  completedAt  DateTime?
-  modelUsage   Json?
-  costUSD      Float?
+  id               String             @id @default(cuid())
+  projectId        String
+  triggerType      String // 'manual' | 'auto_advance' | 'retry'
+  currentPhase     String
+  status           String             @default("running") // 'running' | 'completed' | 'failed' | 'cancelled'
+  operation        WorkflowOperation?
+  baseArtifactId   String?
+  inputArtifactId  String?
+  outputArtifactId String?
+  contextManifest  Json?
+  contextHash      String?
+  targetSectionKey String?
+  initiatedById    String?
+  initiatedByType  ArtifactActorType?
+  idempotencyKey   String?
+  errorCode        String?
+  errorMessage     String?            @db.Text
+  startedAt        DateTime           @default(now())
+  completedAt      DateTime?
+  modelUsage       Json?
+  costUSD          Float?
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project              Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  baseArtifact         PhaseArtifact?      @relation("WorkflowRunBaseArtifact", fields: [baseArtifactId], references: [id], onDelete: SetNull)
+  inputArtifact        PhaseArtifact?      @relation("WorkflowRunInputArtifact", fields: [inputArtifactId], references: [id], onDelete: SetNull)
+  outputArtifact       PhaseArtifact?      @relation("WorkflowRunOutputArtifact", fields: [outputArtifactId], references: [id], onDelete: SetNull)
+  activeForPhaseStates ProjectPhaseState[] @relation("PhaseStateActiveRun")
 
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, currentPhase, startedAt])
+  @@index([baseArtifactId])
+  @@index([inputArtifactId])
+  @@index([outputArtifactId])
   @@map("workflow_runs")
 }
 
@@ -740,4 +839,3 @@ model ClarificationQA {
   @@index([taskId, resolved])
   @@map("clarification_qas")
 }
-

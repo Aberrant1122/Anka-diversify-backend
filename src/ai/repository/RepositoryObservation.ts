@@ -11,7 +11,8 @@ import type {
 import { fileDefinesSymbol, resolveLocalImportEdges } from "./DeterministicImportResolver";
 import { describeFrameworkRoute, frameworkRouteMatches } from "./FrameworkRouteMatcher";
 import { discoverStaticApiRegistrations, testExercisesRoute } from "./StaticApiArchitecture";
-import { detectPrimaryActiveEntryPoint } from "../planning/RepositoryArchitectureDetector";
+import { detectPrimaryActiveEntryPoint, detectRepositoryArchitecture } from "../planning/RepositoryArchitectureDetector";
+import type { GraphRootedCandidateRelationReceipt } from "../../types";
 
 export interface RepositoryObservationReceipt {
   readonly repositoryId: string;
@@ -201,6 +202,38 @@ export class RepositoryObservationTools {
     });
   }
 
+  public static observeArchitectureIntegrationAnchor(
+    repositoryId: string,
+    workspaceRoot: string,
+    entryFile: string,
+  ): RepositoryObservationReceipt | null {
+    return withAuthoritySnapshot(workspaceRoot, () => {
+      const observed = readObservedFile(workspaceRoot, entryFile);
+      if (!observed) return null;
+      const snapshot = authoritySnapshot(workspaceRoot);
+      const packageEntry = [...snapshot.files.entries()].find(([filePath]) => /(?:^|\/)package\.json$/i.test(filePath));
+      let packageJsonContent: string | undefined;
+      if (packageEntry) {
+        try {
+          packageJsonContent = Buffer.from(packageEntry[1], "base64").toString("utf8");
+        } catch {
+          return null;
+        }
+      }
+      const architecture = detectRepositoryArchitecture([...snapshot.files.keys()], packageJsonContent);
+      if (architecture.framework !== "EXPRESS" || !architecture.existingEntryPoints.includes(observed.normalizedPath)) {
+        return null;
+      }
+      return FileSystemObservationReceipt.create(repositoryId, path.resolve(workspaceRoot), {
+        repositoryRevision: observed.revision,
+        kind: "ENTRY_POINT",
+        filePath: observed.normalizedPath,
+        provenance: "ARCHITECTURE_DETECTOR",
+        metadata: { deterministicTaskAnchor: true, anchorKind: "ARCHITECTURE_INTEGRATION_SURFACE" },
+      });
+    });
+  }
+
   public static observeApiRouteAnchor(
     repositoryId: string,
     workspaceRoot: string,
@@ -282,6 +315,30 @@ export class RepositoryObservationTools {
     return FileSystemObservationReceipt.create(repositoryId, path.resolve(workspaceRoot), {
       repositoryRevision: observed.revision, kind: "DIAGNOSTIC", filePath: observed.normalizedPath,
       provenance: "BUILD_DIAGNOSTIC", metadata,
+    });
+  }
+
+  public static observeGraphRootedRelation(
+    repositoryId: string,
+    workspaceRoot: string,
+    receipt: GraphRootedCandidateRelationReceipt,
+  ): RepositoryObservationReceipt | null {
+    return withAuthoritySnapshot(workspaceRoot, () => {
+      const snapshot = authoritySnapshot(workspaceRoot);
+      if (receipt.repositoryRevision !== snapshot.revision) return null;
+      if (receipt.authority !== 0) return null;
+      if (path.resolve(workspaceRoot) !== path.resolve(receipt.workspaceRoot)) return null;
+      return FileSystemObservationReceipt.create(repositoryId, path.resolve(workspaceRoot), {
+        repositoryRevision: snapshot.revision,
+        kind: "REFERENCE",
+        filePath: normalizeRepoPath(receipt.candidatePath),
+        sourceFile: normalizeRepoPath(receipt.featureRootPath),
+        provenance: "ARCHITECTURE_DETECTOR",
+        metadata: {
+          prospective: true,
+          graphReceipt: receipt,
+        },
+      });
     });
   }
 

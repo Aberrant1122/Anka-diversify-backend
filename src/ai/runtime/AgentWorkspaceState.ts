@@ -134,6 +134,19 @@ export class AgentWorkspaceState {
     }));
   }
 
+  /** Rebinds knowledge state to the canonical repository observation; grants no mutation authority. */
+  public withRepositoryObservation(input: { root: string; revision?: string }): AgentWorkspaceState {
+    const root = path.resolve(requireText(input.root, "repository root"));
+    return new AgentWorkspaceState(freezeSnapshot({
+      ...this.value,
+      repository: {
+        ...this.value.repository,
+        root,
+        ...(input.revision ? { revision: requireText(input.revision, "repository revision") } : {}),
+      },
+    }));
+  }
+
   public withEvidence(evidence: WorkspaceEvidence): AgentWorkspaceState {
     const normalized: WorkspaceEvidence = {
       id: requireText(evidence.id, "evidence id"),

@@ -6,6 +6,7 @@ import {
   detectPrimaryActiveEntryPoint,
   detectAllActiveEntryRoots,
   detectRepositoryArchitecture,
+  isExistingPrimaryUIRefinement,
 } from "../planning/RepositoryArchitectureDetector";
 import { normalizeRepoPath } from "../repository/SemanticContextResolver";
 
@@ -210,7 +211,17 @@ export class ValidationDetector {
       let activeTargetDetails = "Intent targets verified";
 
       if (!isBackendOnly && (hasFrontendChanges || isUiTaskFromContract)) {
-        const activeRoots = detectAllActiveEntryRoots(existingFilePaths, arch);
+        const deletedPaths = new Set(changes
+          .filter(isDelete)
+          .map((change) => normalizeRepoPath(change.path).toLowerCase()));
+        const postChangeFilePaths = Array.from(new Set([
+          ...existingFilePaths.filter((file) => !deletedPaths.has(normalizeRepoPath(file).toLowerCase())),
+          ...changes.filter((change) => !isDelete(change)).map((change) => normalizeRepoPath(change.path)),
+        ]));
+        const postChangeRoots = detectAllActiveEntryRoots(postChangeFilePaths, arch);
+        const activeRoots = isExistingPrimaryUIRefinement(originalMessage)
+          ? detectAllActiveEntryRoots(existingFilePaths, arch)
+          : postChangeRoots;
 
         if (activeRoots.length > 0) {
 

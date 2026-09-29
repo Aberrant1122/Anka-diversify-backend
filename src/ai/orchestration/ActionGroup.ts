@@ -83,6 +83,35 @@ function executedAction(
   });
 }
 
+function fileChangeFromExecutedMutation(
+  mutation: { path: string; action: ActionGroupAction["action"]; content: string; description: string },
+): AgentFileChange {
+  return {
+    path: normalizePath(mutation.path),
+    action: mutation.action === "FILE_CREATE" ? "create" : mutation.action === "FILE_DELETE" ? "delete" : "modify",
+    content: mutation.action === "FILE_DELETE" ? "" : mutation.content,
+    description: mutation.description,
+    ...(mutation.action === "FILE_DELETE" ? { isDeleted: true } : {}),
+  };
+}
+
+function verifiedChangesFromExecution(
+  mutations: readonly { path: string; action: ActionGroupAction["action"]; content: string; description: string }[],
+  reported: readonly AgentFileChange[] | undefined,
+): readonly AgentFileChange[] {
+  const reportedByPath = new Map((reported ?? []).map((change) => [normalizePath(change.path), change]));
+  return Object.freeze(mutations.map((mutation) => {
+    const executed = fileChangeFromExecutedMutation(mutation);
+    const candidate = reportedByPath.get(executed.path);
+    const candidateAction = candidate?.action === "delete" || candidate?.isDeleted
+      ? "delete"
+      : candidate?.action ?? "modify";
+    return candidate && candidate.content === executed.content && candidateAction === executed.action
+      ? Object.freeze({ ...candidate, path: executed.path })
+      : Object.freeze(executed);
+  }));
+}
+
 function captureFingerprints(root: string | null, actions: readonly ActionGroupAction[]): Readonly<Record<string, string>> {
   const evidence: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const action of actions) {
@@ -172,6 +201,7 @@ export class ActionGroupExecutor {
     journal: VerifiedCheckpointJournal;
     executeActions: () => Promise<T>;
     validate: (value: T) => Promise<ActionGroupValidationReceipt> | ActionGroupValidationReceipt;
+    verifiedChanges?: (value: T) => readonly AgentFileChange[];
   }): Promise<ActionGroupExecutionResult<T>> {
     const proposed = input.group.snapshot();
     const root = input.transaction.localPath;
@@ -192,7 +222,8 @@ export class ActionGroupExecutor {
       if (!isAuthenticActionGroupValidationReceipt(receipt)) {
         throw new Error("ActionGroup requires an authentic deterministic validation receipt");
       }
-      const attemptedActions = input.group.executedActions(input.transaction.getExecutedMutations());
+      const executedMutations = input.transaction.getExecutedMutations();
+      const attemptedActions = input.group.executedActions(executedMutations);
       const attemptedAfter = captureFingerprints(root, attemptedActions);
       if (!receipt.passed) {
         await input.transaction.rollback();
@@ -201,10 +232,17 @@ export class ActionGroupExecutor {
           captureFingerprints(root, attemptedActions), "VALIDATION_FAILED", receipt);
         return { group: input.group.snapshot(), value, journalEntry: entry };
       }
+      const verifiedChanges = verifiedChangesFromExecution(
+        executedMutations,
+        input.verifiedChanges ? input.verifiedChanges(value) : undefined,
+      );
       await input.transaction.commit();
       input.group.transition("VALIDATING", "VERIFIED");
       const entry = input.journal.appendVerified(input.group.snapshot(), attemptedActions, before, attemptedAfter,
-        captureFingerprints(root, attemptedActions), receipt);
+        captureFingerprints(root, attemptedActions), verifiedChanges, receipt, {
+          before: input.transaction.repositoryRevisionBefore,
+          after: input.transaction.repositoryRevisionAfter,
+        });
       return { group: input.group.snapshot(), value, journalEntry: entry };
     } catch (error) {
       const attemptedActions = input.group.executedActions(input.transaction.getExecutedMutations());

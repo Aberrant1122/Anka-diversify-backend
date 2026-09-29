@@ -3,8 +3,16 @@ import { AgentWorkspaceState, WorkspaceValidationFact } from "../runtime/AgentWo
 import { TaskRuntime } from "../runtime/TaskRuntime";
 import { WorkingPlan } from "../runtime/WorkingPlan";
 import type { DiagnosticBaselineComparison } from "../runtime/BaselineDiagnosticVerifier";
-import type { ActionGroupJournalEntry } from "../runtime/VerifiedCheckpointJournal";
-import type { AgentResponse } from "../shared/types";
+import { VerifiedCheckpointJournal, type ActionGroupJournalEntry } from "../runtime/VerifiedCheckpointJournal";
+import type { AgentFileChange, AgentResponse } from "../shared/types";
+import { normalizeRepoPath } from "../repository/SemanticContextResolver";
+import {
+  canonicalWorkspaceIdentity,
+  createCanonicalPlanRecoveryEvent,
+  StagePlanningRecoveryRecord,
+  StagePlanningRecoveryEvent,
+  MAX_STAGE_PLANNING_ATTEMPTS,
+} from "../planning/PlanningFailureFacts";
 
 export type AgentLoopStopReason =
   | "AWAITING_COMPLETION_EVALUATION"
@@ -51,10 +59,155 @@ function isAuthorizationError(error: unknown): boolean {
   return (code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE") || REINVESTIGATION_OUTCOMES.has(code);
 }
 
+function recoveryContractFailure(
+  response: AgentResponse,
+  message: string,
+): AgentResponse {
+  return {
+    ...response,
+    errorCode: "INTERNAL_RECOVERY_CONTRACT_ERROR",
+    explanation: `[Internal Recovery Contract Error] ${message}`,
+  };
+}
+
+function recoveryEventFromResponse(input: {
+  response: AgentResponse;
+  stageId: string;
+  workspaceRoot: string;
+  observedRevision: string;
+}): StagePlanningRecoveryEvent {
+  const event = input.response.planningRecoveryEvent;
+  if (event) {
+    if (event.stageId !== input.stageId) {
+      throw new Error("recovery event stage does not match the active stage");
+    }
+    if (event.workspaceIdentity !== canonicalWorkspaceIdentity(input.workspaceRoot)) {
+      throw new Error("recovery event workspace does not match the active workspace");
+    }
+    if (!event.repositoryRevision?.trim() || event.failureFacts.length === 0) {
+      throw new Error("recovery event revision and failure facts must be non-empty");
+    }
+    if (event.kind === "PRE_CANONICAL") {
+      if (!event.recoveryIdentity?.trim() || !event.progressMarker?.trim()) {
+        throw new Error("pre-canonical recovery identity and progress marker must be non-empty");
+      }
+    } else if (!event.manifestFingerprint?.trim()) {
+      throw new Error("canonical plan fingerprint must be non-empty");
+    }
+    return event;
+  }
+
+  // Compatibility boundary for older callers. Absence is never coerced to an
+  // empty plan identity: only a complete canonical event may be reconstructed.
+  const legacyFingerprint = input.response.manifestFingerprint;
+  const legacyFailureFacts = input.response.planningFailureFacts;
+  if (!legacyFingerprint?.trim()) {
+    throw new Error("legacy canonical recovery response is missing a non-empty manifest fingerprint");
+  }
+  if (!legacyFailureFacts || legacyFailureFacts.length === 0) {
+    throw new Error("legacy canonical recovery response is missing typed failure facts");
+  }
+  return createCanonicalPlanRecoveryEvent({
+    phase: legacyFailureFacts.some((fact) => fact.kind === "AUTHORITY_REJECTION")
+      ? "AUTHORIZATION"
+      : "MANIFEST_VALIDATION",
+    stageId: input.stageId,
+    workspaceRoot: input.workspaceRoot,
+    repositoryRevision: input.response.repositoryRevision || input.observedRevision,
+    manifestFingerprint: legacyFingerprint,
+    failureFacts: legacyFailureFacts,
+  });
+}
+
 const REINVESTIGATION_OUTCOMES = new Set([
   "REPAIR_SCOPE_EXPANSION_REQUIRED", "REINVESTIGATION_REQUIRED", "TRANSACTION_REVISION_DIVERGED",
   "WORKSPACE_BINDING_INVALID", "TRANSACTION_INVALIDATED", "CAPABILITY_MANIFEST_MISMATCH", "TRANSACTION_CONFLICT",
 ]);
+
+function normalizedAction(change: AgentFileChange): "create" | "modify" | "delete" {
+  return change.action === "delete" || change.isDeleted ? "delete" : change.action ?? "modify";
+}
+
+function verifiedCheckpointLineage(
+  checkpoints: readonly ActionGroupJournalEntry[],
+): ActionGroupJournalEntry[] {
+  const ordered = [...checkpoints]
+    .filter((entry) => entry.status === "VERIFIED" && entry.validation.passed)
+    .sort((left, right) => left.sequence - right.sequence);
+  const lineage: ActionGroupJournalEntry[] = [];
+  let previousSequence = 0;
+  let previousRevision: string | undefined;
+  for (const checkpoint of ordered) {
+    const revisionBound = Boolean(checkpoint.repositoryRevisionBefore && checkpoint.repositoryRevisionAfter);
+    if (ordered.length > 1 && !revisionBound) break;
+    if (checkpoint.sequence <= previousSequence) break;
+    if (previousRevision && checkpoint.repositoryRevisionBefore !== previousRevision) break;
+    lineage.push(checkpoint);
+    previousSequence = checkpoint.sequence;
+    previousRevision = checkpoint.repositoryRevisionAfter;
+  }
+  return lineage;
+}
+
+/** Projects only deterministically VERIFIED journal payloads in checkpoint order. */
+export function projectVerifiedTaskChanges(
+  checkpoints: readonly ActionGroupJournalEntry[],
+): AgentFileChange[] {
+  const finalByPath = new Map<string, AgentFileChange>();
+  for (const checkpoint of verifiedCheckpointLineage(checkpoints)) {
+    for (const change of checkpoint.verifiedChanges ?? []) {
+      const normalizedPath = normalizeRepoPath(change.path);
+      if (!normalizedPath) continue;
+      finalByPath.delete(normalizedPath);
+      finalByPath.set(normalizedPath, { ...change, path: normalizedPath });
+    }
+  }
+  return [...finalByPath.values()];
+}
+
+function sameProjectedChanges(left: readonly AgentFileChange[], right: readonly AgentFileChange[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((change, index) => {
+    const projected = right[index];
+    return normalizeRepoPath(change.path) === normalizeRepoPath(projected.path)
+      && normalizedAction(change) === normalizedAction(projected)
+      && change.content === projected.content
+      && change.description === projected.description;
+  });
+}
+
+function withFileCount(text: string | undefined, count: number): string | undefined {
+  return text?.replace(/Files modified: \d+/g, `Files modified: ${count}`);
+}
+
+/** Builds the task-level response without consulting planned or merely authorized candidates. */
+export function buildVerifiedTaskResult(
+  response: AgentResponse,
+  checkpoints: readonly ActionGroupJournalEntry[],
+): AgentResponse {
+  const verified = verifiedCheckpointLineage(checkpoints);
+  if (verified.length === 0) return { ...response, changes: [] };
+
+  const changes = projectVerifiedTaskChanges(verified);
+  const isCompound = verified.length > 1 || (response.taskExecutionPlan?.stages.length ?? 0) > 1;
+  if (!isCompound && sameProjectedChanges(response.changes, changes)) return response;
+
+  const stagesById = new Map(response.taskExecutionPlan?.stages.map((stage) => [stage.id, stage.name]) ?? []);
+  const stageIds = [...new Set(verified.map((entry) => entry.stageId))];
+  const verifiedStageSummary = stageIds
+    .map((stageId, index) => `- Stage ${index + 1}: ${stagesById.get(stageId) ?? stageId}`)
+    .join("\n");
+  const explanation = verifiedStageSummary
+    ? `Verified compound stages:\n${verifiedStageSummary}\n\n${response.explanation}`
+    : response.explanation;
+  return {
+    ...response,
+    explanation: withFileCount(explanation, changes.length) ?? explanation,
+    changes,
+    modifiedFilesCount: changes.length,
+    pipelineMeasurementText: withFileCount(response.pipelineMeasurementText, changes.length),
+  };
+}
 
 /**
  * Finite CP7 coordinator. Observation and planning are separate callbacks so the
@@ -72,6 +225,7 @@ export class AgentLoopCoordinator {
       response: AgentResponse;
       journalEntry?: ActionGroupJournalEntry;
     }>;
+    checkpointJournal?: VerifiedCheckpointJournal;
     onRevisionRequired?: (
       response: AgentResponse,
       journalEntry: ActionGroupJournalEntry,
@@ -87,7 +241,13 @@ export class AgentLoopCoordinator {
     let workingPlan = input.workingPlan;
     let lastResponse: AgentResponse | undefined;
     const verifiedCheckpointIds: string[] = [];
+    const verifiedCheckpoints: ActionGroupJournalEntry[] = [];
+    const finalize = (response: AgentResponse): AgentResponse => buildVerifiedTaskResult(
+      response,
+      input.checkpointJournal?.snapshot() ?? verifiedCheckpoints,
+    );
     const failedActionFingerprints = new Set<string>();
+    const stagePlanningAttempts = new Map<string, StagePlanningRecoveryRecord[]>();
 
     for (let iteration = 1; iteration <= input.maxIterations; iteration += 1) {
       try {
@@ -107,7 +267,7 @@ export class AgentLoopCoordinator {
             reason: executed.response.reason ?? "The task cannot proceed deterministically without clarification.",
           });
           return {
-            response: executed.response,
+            response: finalize(executed.response),
             loop: { outcome: "CLARIFICATION_REQUIRED", iterations: iteration, workingPlan, verifiedCheckpointIds },
           };
         }
@@ -118,7 +278,7 @@ export class AgentLoopCoordinator {
           if (code) {
             if (code === "PLANNING_IDENTICAL_FAILED_ACTION" && previousResponse) {
               return {
-                response: previousResponse,
+                response: finalize(previousResponse),
                 loop: {
                   outcome: "VALIDATION_FAILURE",
                   iterations: iteration,
@@ -128,6 +288,224 @@ export class AgentLoopCoordinator {
                 },
               };
             }
+
+            if (code === "PLANNING_REINVESTIGATION_REQUIRED") {
+              const activeStageId = executed.response.taskExecutionPlan?.stages[
+                executed.response.taskExecutionPlan.currentStageIndex
+              ]?.id || "stage-default";
+              const history = stagePlanningAttempts.get(activeStageId) || [];
+              let recoveryEvent: StagePlanningRecoveryEvent;
+              try {
+                recoveryEvent = recoveryEventFromResponse({
+                  response: executed.response,
+                  stageId: activeStageId,
+                  workspaceRoot: input.runtime.workspaceState().snapshot().repository.root,
+                  observedRevision: observation.revision,
+                });
+              } catch (contractError) {
+                const message = contractError instanceof Error ? contractError.message : "invalid recovery event";
+                const failureCode = "INTERNAL_RECOVERY_CONTRACT_ERROR";
+                workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
+                return {
+                  response: finalize(recoveryContractFailure(executed.response, message)),
+                  loop: {
+                    outcome: "VALIDATION_FAILURE",
+                    iterations: iteration,
+                    workingPlan,
+                    verifiedCheckpointIds,
+                    failureCode,
+                  },
+                };
+              }
+              const sameKindHistory = history.filter((record) => record.kind === recoveryEvent.kind);
+              const currentAttemptNumber = sameKindHistory.length + 1;
+              const planningFacts = recoveryEvent.failureFacts;
+              const isScopeRecovery = planningFacts.some((fact) => fact.kind === "AUTHORITY_REJECTION");
+              const recoverableCount = planningFacts.filter(
+                (fact) => fact.classification === "RECOVERABLE_CANDIDATE",
+              ).length;
+              const hardCandidateCount = planningFacts.filter(
+                (fact) => fact.classification === "HARD_CANDIDATE",
+              ).length;
+              const terminalCount = planningFacts.filter(
+                (fact) => fact.classification === "TERMINAL_TASK",
+              ).length;
+
+              const canonicalDuplicate = recoveryEvent.kind === "CANONICAL_PLAN" && history.some(
+                (record) => record.kind === "CANONICAL_PLAN"
+                  && record.manifestFingerprint === recoveryEvent.manifestFingerprint
+                  && record.repositoryRevision === recoveryEvent.repositoryRevision
+                  && record.workspaceIdentity === recoveryEvent.workspaceIdentity,
+              );
+              if (canonicalDuplicate && recoveryEvent.kind === "CANONICAL_PLAN") {
+                if (isScopeRecovery) {
+                  console.warn(
+                    `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nfingerprint=${recoveryEvent.manifestFingerprint.slice(0, 32)}\nresult=DUPLICATE`
+                  );
+                }
+                console.warn(
+                  `[RECOVERY] kind=CANONICAL_PLAN stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} fingerprint=${recoveryEvent.manifestFingerprint.slice(0, 32)} result=DUPLICATE`
+                );
+                const failureCode = "DUPLICATE_RECOVERY_PLAN";
+                let workspace = input.runtime.workspaceState().withFailureFact({
+                  id: `pipeline:${iteration}:${failureCode}`,
+                  code: failureCode,
+                  category: "VALIDATION_FAILURE",
+                  source: "DETERMINISTIC_RUNTIME",
+                });
+                workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
+                input.runtime.updateWorkspace(workspace.withWorkingPlan({
+                  id: workingPlan.snapshot().id,
+                  revision: workingPlan.snapshot().revision,
+                  status: workingPlan.snapshot().status,
+                }));
+                return {
+                  response: finalize({
+                    ...executed.response,
+                    errorCode: failureCode,
+                    explanation: isScopeRecovery
+                      ? "[Duplicate Recovery Plan] The active stage repeated a previously rejected planning topology without materially new repository facts."
+                      : "[Duplicate Recovery Plan] The active stage repeated a previously failed canonical plan at the same repository revision.",
+                  }),
+                  loop: {
+                    outcome: "VALIDATION_FAILURE",
+                    iterations: iteration,
+                    workingPlan,
+                    verifiedCheckpointIds,
+                    failureCode,
+                  },
+                };
+              }
+
+              const preCanonicalStall = recoveryEvent.kind === "PRE_CANONICAL" && history.some(
+                (record) => record.kind === "PRE_CANONICAL"
+                  && record.recoveryIdentity === recoveryEvent.recoveryIdentity
+                  && record.progressMarker === recoveryEvent.progressMarker
+                  && record.repositoryRevision === recoveryEvent.repositoryRevision
+                  && record.workspaceIdentity === recoveryEvent.workspaceIdentity,
+              );
+              if (preCanonicalStall && recoveryEvent.kind === "PRE_CANONICAL") {
+                const failureCode = recoveryEvent.phase === "INVESTIGATION"
+                  ? "INVESTIGATION_STALLED"
+                  : "PRE_CANONICAL_RECOVERY_STALLED";
+                console.warn(
+                  `[RECOVERY] kind=PRE_CANONICAL phase=${recoveryEvent.phase} stage=${activeStageId} attempt=${currentAttemptNumber} identity=${recoveryEvent.recoveryIdentity.slice(0, 32)} progress=${recoveryEvent.progressMarker.slice(0, 32)} result=STALLED`,
+                );
+                workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
+                return {
+                  response: finalize({
+                    ...executed.response,
+                    errorCode: failureCode,
+                    explanation: recoveryEvent.phase === "INVESTIGATION"
+                      ? "[Investigation Stalled] Deterministic repository investigation repeated without new materialized facts or reduced missing evidence."
+                      : "[Pre-Canonical Recovery Stalled] The same pre-canonical blocker repeated without deterministic progress.",
+                  }),
+                  loop: {
+                    outcome: "VALIDATION_FAILURE",
+                    iterations: iteration,
+                    workingPlan,
+                    verifiedCheckpointIds,
+                    failureCode,
+                  },
+                };
+              }
+
+              // Recovery budget check (max 3 planning attempts total per stage: 1 initial + 2 recoveries)
+              if (recoveryEvent.kind === "CANONICAL_PLAN" && currentAttemptNumber >= MAX_STAGE_PLANNING_ATTEMPTS) {
+                if (isScopeRecovery) {
+                  console.warn(
+                    `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nresult=EXHAUSTED`
+                  );
+                }
+                console.warn(
+                  `[PLAN_RECOVERY] stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} result=EXHAUSTED`
+                );
+                const failureCode = "PLANNING_RECOVERY_EXHAUSTED";
+                let workspace = input.runtime.workspaceState().withFailureFact({
+                  id: `pipeline:${iteration}:${failureCode}`,
+                  code: failureCode,
+                  category: "VALIDATION_FAILURE",
+                  source: "DETERMINISTIC_RUNTIME",
+                });
+                workingPlan = workingPlan.requireRevision({ code: failureCode, category: "VALIDATION_FAILURE", deterministic: true });
+                input.runtime.updateWorkspace(workspace.withWorkingPlan({
+                  id: workingPlan.snapshot().id,
+                  revision: workingPlan.snapshot().revision,
+                  status: workingPlan.snapshot().status,
+                }));
+                return {
+                  response: finalize({
+                    ...executed.response,
+                    errorCode: failureCode,
+                    explanation: isScopeRecovery
+                      ? `[Planning Recovery Exhausted] Active stage ${activeStageId} exhausted its ${MAX_STAGE_PLANNING_ATTEMPTS}-attempt planning budget without finding a safe authorized topology.`
+                      : `[Planning Recovery Exhausted] Active stage ${activeStageId} exceeded planning recovery budget (${MAX_STAGE_PLANNING_ATTEMPTS} attempts). Final validation errors:\n${executed.response.explanation}`,
+                  }),
+                  loop: {
+                    outcome: "VALIDATION_FAILURE",
+                    iterations: iteration,
+                    workingPlan,
+                    verifiedCheckpointIds,
+                    failureCode,
+                  },
+                };
+              }
+
+              const record: StagePlanningRecoveryRecord = {
+                ...recoveryEvent,
+                attemptNumber: currentAttemptNumber,
+                rejectedPaths: executed.response.rejectedPaths || [],
+                authorizedPaths: executed.response.authorizedPaths || [],
+                validationErrors: executed.response.validationErrors,
+              };
+              history.push(record);
+              stagePlanningAttempts.set(activeStageId, history);
+
+              workingPlan = workingPlan.withPlanningRecovery(record);
+              let workspace = input.runtime.workspaceState().withFailureFact({
+                id: `pipeline:${iteration}:PLANNING_REINVESTIGATION_REQUIRED`,
+                code: "PLANNING_REINVESTIGATION_REQUIRED",
+                category: "VALIDATION_FAILURE",
+                source: "DETERMINISTIC_RUNTIME",
+              });
+              workspace = workspace.withWorkingPlan({
+                id: workingPlan.snapshot().id,
+                revision: workingPlan.snapshot().revision,
+                status: workingPlan.snapshot().status,
+              });
+              input.runtime.updateWorkspace(workspace);
+
+              const failureKinds = Array.from(new Set(record.failureFacts.map((f) => f.kind))).join(",");
+              if (record.kind === "PRE_CANONICAL") {
+                console.log(
+                  `[RECOVERY] kind=PRE_CANONICAL phase=${record.phase} stage=${activeStageId} attempt=${currentAttemptNumber} identity=${record.recoveryIdentity.slice(0, 32)} progress=${record.progressMarker.slice(0, 32)} failureKinds=${failureKinds}`,
+                );
+              } else {
+                console.log(
+                  `[RECOVERY] kind=CANONICAL_PLAN phase=${record.phase} stage=${activeStageId} attempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS} fingerprint=${record.manifestFingerprint.slice(0, 32)} failureKinds=${failureKinds}`,
+                );
+              }
+              console.log(`[PLAN_RECOVERY]\nresult=REINVESTIGATE`);
+              if (isScopeRecovery) {
+                console.log(
+                  `[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nattempt=${currentAttemptNumber}/${MAX_STAGE_PLANNING_ATTEMPTS}\nrejected=${record.rejectedPaths.length}\nrecoverable=${recoverableCount}\nhardCandidates=${hardCandidateCount}\nterminal=${terminalCount}\nresult=REINVESTIGATE`
+                );
+              }
+
+              await input.onRevisionRequired?.(executed.response, undefined as any, iteration);
+              continue;
+            }
+
+            if (
+              code === "PLANNING_SCOPE_REJECTED" &&
+              executed.response.planningFailureFacts?.some((fact) => fact.kind === "AUTHORITY_REJECTION")
+            ) {
+              const activeStageId = executed.response.taskExecutionPlan?.stages[
+                executed.response.taskExecutionPlan.currentStageIndex
+              ]?.id || "stage-default";
+              console.warn(`[PLAN_SCOPE_RECOVERY]\nstage=${activeStageId}\nresult=TERMINAL`);
+            }
+
             const category = REINVESTIGATION_OUTCOMES.has(code) || code === "REPAIR_UNRESOLVED"
               ? "VALIDATION_FAILURE"
               : code.startsWith("CAPABILITY_") && code !== "CAPABILITY_TECHNICAL_FAILURE"
@@ -163,7 +541,7 @@ export class AgentLoopCoordinator {
               });
             }
             return {
-              response: executed.response,
+              response: finalize(executed.response),
               loop: {
                 outcome: category === "AUTHORIZATION_DENIAL"
                   ? "AUTHORIZATION_DENIED"
@@ -184,7 +562,7 @@ export class AgentLoopCoordinator {
             status: workingPlan.snapshot().status,
           }));
           return {
-            response: executed.response,
+            response: finalize(executed.response),
             loop: { outcome: "AWAITING_COMPLETION_EVALUATION", iterations: iteration, workingPlan, verifiedCheckpointIds },
           };
         }
@@ -228,7 +606,7 @@ export class AgentLoopCoordinator {
             continue;
           }
           return {
-            response: executed.response,
+            response: finalize(executed.response),
             loop: {
               outcome: category === "AUTHORIZATION_DENIAL" ? "AUTHORIZATION_DENIED" : "VALIDATION_FAILURE",
               iterations: iteration,
@@ -240,6 +618,21 @@ export class AgentLoopCoordinator {
         }
 
         verifiedCheckpointIds.push(entry.journalId);
+        verifiedCheckpoints.push(entry);
+        const currentStageId = executed.response.taskExecutionPlan?.stages[
+          executed.response.taskExecutionPlan.currentStageIndex
+        ]?.id || "stage-default";
+        const stageHistory = stagePlanningAttempts.get(currentStageId);
+        if (stageHistory && stageHistory.length > 0) {
+          const prev = stageHistory[stageHistory.length - 1];
+          const previousIdentity = prev.kind === "CANONICAL_PLAN"
+            ? prev.manifestFingerprint
+            : prev.recoveryIdentity;
+          console.log(
+            `[RECOVERY] kind=${prev.kind} stage=${currentStageId} previousIdentity=${previousIdentity.slice(0, 32)} result=RECOVERED`,
+          );
+          console.log(`[PLAN_RECOVERY]\nresult=RECOVERED`);
+        }
         workspace = workspace.withRelevantPaths([
           ...workspace.snapshot().relevantPaths,
           ...entry.attemptedActions.map((action) => action.path),
@@ -267,7 +660,7 @@ export class AgentLoopCoordinator {
           status: workingPlan.snapshot().status,
         }));
         return {
-          response: executed.response,
+          response: finalize(executed.response),
           loop: { outcome: "AWAITING_COMPLETION_EVALUATION", iterations: iteration, workingPlan, verifiedCheckpointIds },
         };
       } catch (error) {
@@ -294,7 +687,7 @@ export class AgentLoopCoordinator {
         });
         if (!lastResponse) throw error;
         return {
-          response: lastResponse,
+          response: finalize(lastResponse),
           loop: {
             outcome: budget ? "BUDGET_EXHAUSTED" : authorization ? "AUTHORIZATION_DENIED" : "TECHNICAL_FAILURE",
             iterations: iteration,
@@ -308,7 +701,7 @@ export class AgentLoopCoordinator {
 
     if (!lastResponse) throw new Error("Agent loop reached its bound before producing an iteration result");
     return {
-      response: lastResponse,
+      response: finalize(lastResponse),
       loop: {
         outcome: "MAX_ITERATIONS_REACHED",
         iterations: input.maxIterations,

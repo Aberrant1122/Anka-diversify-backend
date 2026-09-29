@@ -1,10 +1,19 @@
-import { PrismaClient } from "@prisma/client";
+import { ArtifactActorType, ArtifactChangeKind, PrismaClient } from "@prisma/client";
 import { AiService } from "../ai/application/AiService";
+import { PlanningDomainError } from "../planning/planning-errors";
+import { REQUIREMENTS_PHASE } from "../planning/requirements-schema";
+import { PlanningApprovalService } from "./planning-approval.service";
+import { PlanningArtifactService } from "./planning-artifact.service";
+import { PlanningAuthorizationService } from "./planning-authorization.service";
+import {
+  GenerateInitialRequirementsInput,
+  PlanningGenerationService,
+  ReviseRequirementsInput,
+} from "./planning-generation.service";
+import { PlanningReadinessService } from "./planning-readiness.service";
+import { PlanningRequirementsRunService } from "./planning-requirements-run.service";
+import { PlanningTransitionPolicy } from "./planning-transition-policy";
 
-const prisma = new PrismaClient();
-const aiService = AiService.getInstance();
-
-// Canonical phase order — mirrors the phase model in the workflow spec.
 export const PHASE_ORDER = [
   "requirements",
   "documentation",
@@ -16,206 +25,262 @@ export const PHASE_ORDER = [
 
 export type Phase = (typeof PHASE_ORDER)[number];
 
-function nextPhase(phase: string): Phase | null {
-  const idx = PHASE_ORDER.indexOf(phase as Phase);
-  if (idx === -1 || idx === PHASE_ORDER.length - 1) return null;
-  return PHASE_ORDER[idx + 1];
-}
-
 export class PhaseService {
-  async getPhaseStates(projectId: string) {
-    return prisma.projectPhaseState.findMany({
-      where: { projectId },
-      orderBy: { phase: "asc" },
+  private readonly authorization: PlanningAuthorizationService;
+  private readonly artifacts: PlanningArtifactService;
+  private readonly approvals: PlanningApprovalService;
+  private readonly readiness: PlanningReadinessService;
+  private readonly transitions: PlanningTransitionPolicy;
+  private readonly requirementsRuns: PlanningRequirementsRunService;
+  private readonly generation: PlanningGenerationService;
+  private readonly aiService = AiService.getInstance();
+
+  constructor(private readonly prisma: PrismaClient = new PrismaClient()) {
+    this.authorization = new PlanningAuthorizationService(prisma);
+    this.transitions = new PlanningTransitionPolicy();
+    this.readiness = new PlanningReadinessService();
+    this.artifacts = new PlanningArtifactService(prisma, this.authorization, this.transitions);
+    this.approvals = new PlanningApprovalService(prisma, this.authorization, this.transitions, this.readiness);
+    this.requirementsRuns = new PlanningRequirementsRunService(
+      prisma,
+      this.authorization,
+      undefined,
+      this.artifacts,
+      this.readiness,
+    );
+    this.generation = new PlanningGenerationService(prisma, {
+      authorization: this.authorization,
+      artifacts: this.artifacts,
+      readiness: this.readiness,
+      runs: this.requirementsRuns,
     });
   }
 
-  // Idempotently create a "not_started" row for every phase that doesn't have one yet.
-  async ensurePhaseStates(projectId: string) {
-    const existing = await prisma.projectPhaseState.findMany({
+  async getPhaseStates(projectId: string, actorId: string) {
+    await this.authorization.assertCanRead(projectId, actorId);
+    return this.prisma.projectPhaseState.findMany({ where: { projectId }, orderBy: { phase: "asc" } });
+  }
+
+  async ensurePhaseStates(projectId: string, actorId: string) {
+    await this.authorization.assertCanRead(projectId, actorId);
+    const existing = await this.prisma.projectPhaseState.findMany({
       where: { projectId },
       select: { phase: true },
     });
-    const existingPhases = new Set(existing.map((s) => s.phase));
-    const missing = PHASE_ORDER.filter((p) => !existingPhases.has(p));
-
+    const existingPhases = new Set(existing.map((state) => state.phase));
+    const missing = PHASE_ORDER.filter((phase) => !existingPhases.has(phase));
     if (missing.length > 0) {
-      await prisma.projectPhaseState.createMany({
+      await this.prisma.projectPhaseState.createMany({
         data: missing.map((phase) => ({ projectId, phase })),
         skipDuplicates: true,
       });
     }
-
-    return this.getPhaseStates(projectId);
+    return this.getPhaseStates(projectId, actorId);
   }
 
-  async startPhase(projectId: string, phase: string) {
-    const state = await prisma.projectPhaseState.upsert({
+  async getRequirementsPolicy(projectId: string, actorId: string) {
+    await this.authorization.assertCanRead(projectId, actorId);
+    const state = await this.prisma.projectPhaseState.findUnique({
+      where: { projectId_phase: { projectId, phase: REQUIREMENTS_PHASE } },
+    });
+    return this.transitions.describe(state?.status ?? "not_started");
+  }
+
+  async startPhase(projectId: string, phase: string, actorId: string) {
+    await this.authorization.assertCanEdit(projectId, actorId);
+    if (phase === REQUIREMENTS_PHASE) {
+      throw new PlanningDomainError(
+        "PLANNING_ACTION_LOCKED",
+        "Requirements starts only when its first immutable artifact is created.",
+        409,
+      );
+    }
+    if (!PHASE_ORDER.includes(phase as Phase)) {
+      throw new PlanningDomainError("PLANNING_INVALID_PHASE", `Unknown phase '${phase}'.`, 422, { phase });
+    }
+    const state = await this.prisma.projectPhaseState.upsert({
       where: { projectId_phase: { projectId, phase } },
       update: { status: "in_progress", startedAt: new Date() },
       create: { projectId, phase, status: "in_progress", startedAt: new Date() },
     });
-    await prisma.project.update({ where: { id: projectId }, data: { currentPhase: phase } });
+    await this.prisma.project.update({ where: { id: projectId }, data: { currentPhase: phase } });
     return state;
   }
 
-  async requestApproval(projectId: string, phase: string) {
-    return prisma.projectPhaseState.upsert({
-      where: { projectId_phase: { projectId, phase } },
-      update: { status: "awaiting_approval" },
-      create: { projectId, phase, status: "awaiting_approval" },
-    });
+  async requestApproval(
+    projectId: string,
+    phase: string,
+    artifactId: string,
+    expectedHash: string,
+    actorId: string,
+  ) {
+    return this.approvals.requestApproval({ projectId, phase, artifactId, expectedHash, actorId });
   }
 
-  // Approve the given phase, record the approval, and advance the project to the next phase.
   async approvePhase(
     projectId: string,
     phase: string,
+    artifactId: string,
+    expectedHash: string,
     approvedById: string,
     comments?: string,
   ) {
-    const now = new Date();
-
-    await prisma.phaseApproval.create({
-      data: { projectId, phase, approvedById, decision: "approved", comments },
-    });
-
-    // Mark the artifact that was actually approved so consumers (e.g. the
-    // coding agent) can query for approved content instead of just "latest".
-    const latestArtifact = await prisma.phaseArtifact.findFirst({
-      where: { projectId, phase },
-      orderBy: { createdAt: "desc" },
-    });
-    if (latestArtifact) {
-      await prisma.phaseArtifact.update({
-        where: { id: latestArtifact.id },
-        data: { approved: true },
-      });
-    }
-
-    await prisma.projectPhaseState.upsert({
-      where: { projectId_phase: { projectId, phase } },
-      update: { status: "approved", completedAt: now, approvedById, approvedAt: now },
-      create: {
-        projectId,
-        phase,
-        status: "approved",
-        completedAt: now,
-        approvedById,
-        approvedAt: now,
-      },
-    });
-
-    const projectUpdate: Record<string, unknown> = {};
-    if (phase === "architecture") projectUpdate.architectureApprovedAt = now;
-
-    const next = nextPhase(phase);
-    if (next) {
-      await prisma.projectPhaseState.upsert({
-        where: { projectId_phase: { projectId, phase: next } },
-        update: { status: "in_progress", startedAt: now },
-        create: { projectId, phase: next, status: "in_progress", startedAt: now },
-      });
-      projectUpdate.currentPhase = next;
-    }
-
-    if (Object.keys(projectUpdate).length > 0) {
-      await prisma.project.update({ where: { id: projectId }, data: projectUpdate });
-    }
-
-    return this.getPhaseStates(projectId);
-  }
-
-  // Reject a phase — records the rejection and resets the phase to not_started.
-  async rejectPhase(
-    projectId: string,
-    phase: string,
-    approvedById: string,
-    comments?: string,
-  ) {
-    await prisma.phaseApproval.create({
-      data: { projectId, phase, approvedById, decision: "rejected", comments },
-    });
-
-    return prisma.projectPhaseState.upsert({
-      where: { projectId_phase: { projectId, phase } },
-      update: { status: "not_started", notes: comments, startedAt: null, completedAt: null },
-      create: { projectId, phase, status: "not_started", notes: comments },
+    return this.approvals.approveArtifact({
+      projectId,
+      phase,
+      artifactId,
+      expectedHash,
+      actorId: approvedById,
+      comments,
     });
   }
 
-  // Send a phase back for rework — records the decision and reopens the phase.
   async requestChanges(
     projectId: string,
     phase: string,
+    artifactId: string,
+    expectedHash: string,
     approvedById: string,
-    comments?: string,
+    comments: string,
   ) {
-    await prisma.phaseApproval.create({
-      data: { projectId, phase, approvedById, decision: "changes_requested", comments },
-    });
-
-    return prisma.projectPhaseState.upsert({
-      where: { projectId_phase: { projectId, phase } },
-      update: { status: "in_progress", notes: comments },
-      create: { projectId, phase, status: "in_progress", notes: comments },
+    return this.approvals.requestChanges({
+      projectId,
+      phase,
+      artifactId,
+      expectedHash,
+      actorId: approvedById,
+      comments,
     });
   }
 
-  async getApprovalHistory(projectId: string, phase?: string) {
-    return prisma.phaseApproval.findMany({
+  async rejectPhase(
+    projectId: string,
+    phase: string,
+    artifactId: string,
+    expectedHash: string,
+    actorId: string,
+    comments: string,
+  ) {
+    await this.authorization.assertOwner(projectId, actorId);
+    this.transitions.assertRequirementsPhase(phase);
+    if (!artifactId || !expectedHash || !comments.trim()) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        "Rejecting a planning artifact requires its exact ID, hash, and comments.",
+        422,
+      );
+    }
+    throw new PlanningDomainError(
+      "PLANNING_ACTION_NOT_IMPLEMENTED",
+      "A terminal Requirements rejection is not part of Checkpoint 1B; request changes instead.",
+      422,
+    );
+  }
+
+  async getApprovalHistory(projectId: string, actorId: string, phase?: string) {
+    await this.authorization.assertCanRead(projectId, actorId);
+    return this.prisma.phaseApproval.findMany({
       where: { projectId, ...(phase ? { phase } : {}) },
       orderBy: { approvedAt: "desc" },
     });
   }
 
-  // ── Artifacts ──────────────────────────────────────────────────────────────
-
-  async listArtifacts(projectId: string, phase?: string) {
-    return prisma.phaseArtifact.findMany({
+  async listArtifacts(projectId: string, actorId: string, phase?: string) {
+    await this.authorization.assertCanRead(projectId, actorId);
+    if (phase === REQUIREMENTS_PHASE) return this.artifacts.listVersions(projectId, actorId);
+    return this.prisma.phaseArtifact.findMany({
       where: { projectId, ...(phase ? { phase } : {}) },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ version: "desc" }, { createdAt: "desc" }],
     });
+  }
+
+  async getArtifact(projectId: string, artifactId: string, actorId: string) {
+    return this.artifacts.getArtifact(projectId, artifactId, actorId);
+  }
+
+  async getRequirementsReadiness(
+    projectId: string,
+    artifactId: string,
+    actorId: string,
+    expectedHash?: string,
+  ) {
+    const artifact = await this.artifacts.getArtifact(projectId, artifactId, actorId);
+    return this.readiness.evaluateRequirements({ artifact, expectedHash });
   }
 
   async createArtifact(
     projectId: string,
-    data: { phase: string; type: string; title: string; content: string; createdBy: string },
+    data: {
+      phase: string;
+      title: string;
+      structuredContent: unknown;
+      createdBy: string;
+      baseArtifactId?: string;
+      baseContentHash?: string;
+    },
   ) {
-    const previous = await prisma.phaseArtifact.findFirst({
-      where: { projectId, phase: data.phase },
-      orderBy: { createdAt: "desc" },
-    });
-    return prisma.phaseArtifact.create({
-      data: { projectId, ...data, version: (previous?.version || 0) + 1 },
+    this.transitions.assertRequirementsPhase(data.phase);
+    if (!data.baseArtifactId && !data.baseContentHash) {
+      return this.artifacts.createInitialArtifact({
+        projectId,
+        actorId: data.createdBy,
+        title: data.title,
+        structuredContent: data.structuredContent,
+      });
+    }
+    if (!data.baseArtifactId || !data.baseContentHash) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        "Both baseArtifactId and baseContentHash are required for a Requirements revision.",
+        422,
+      );
+    }
+    return this.artifacts.createManualRevision({
+      projectId,
+      actorId: data.createdBy,
+      title: data.title,
+      structuredContent: data.structuredContent,
+      baseArtifactId: data.baseArtifactId,
+      baseContentHash: data.baseContentHash,
     });
   }
 
-  // ── Automated runs ─────────────────────────────────────────────────────────
+  async createRequirementsSuccessor(input: {
+    projectId: string;
+    actorId: string;
+    title?: string;
+    structuredContent: unknown;
+    baseArtifactId: string;
+    baseContentHash: string;
+    createdByType: ArtifactActorType;
+    changeKind: ArtifactChangeKind;
+  }) {
+    return this.artifacts.createSuccessorVersion(input);
+  }
 
-  // AI-drafts a proposal for the given phase, saves it as an artifact, and
-  // logs a WorkflowRun with model usage/cost for auditability.
   async runAutomatedPhase(projectId: string, phase: string, createdBy: string, brief?: string) {
-    const run = await prisma.workflowRun.create({
+    await this.authorization.assertCanEdit(projectId, createdBy);
+    if (phase === REQUIREMENTS_PHASE) {
+      throw new PlanningDomainError(
+        "PLANNING_AI_NOT_IMPLEMENTED",
+        "Requirements AI generation begins in Checkpoint 1C.",
+        422,
+      );
+    }
+
+    const run = await this.prisma.workflowRun.create({
       data: { projectId, triggerType: "manual", currentPhase: phase, status: "running" },
     });
-
     try {
-      // If the phase's most recent decision was "changes requested" and there's a
-      // prior artifact, feed both into the regeneration so the AI revises the
-      // existing draft to address the feedback rather than starting from scratch.
       const [previousArtifact, latestDecision] = await Promise.all([
-        prisma.phaseArtifact.findFirst({ where: { projectId, phase }, orderBy: { createdAt: "desc" } }),
-        prisma.phaseApproval.findFirst({ where: { projectId, phase }, orderBy: { approvedAt: "desc" } }),
+        this.prisma.phaseArtifact.findFirst({ where: { projectId, phase }, orderBy: { createdAt: "desc" } }),
+        this.prisma.phaseApproval.findFirst({ where: { projectId, phase }, orderBy: { approvedAt: "desc" } }),
       ]);
-      const revision =
-        previousArtifact && latestDecision?.decision === "changes_requested" && latestDecision.comments
-          ? { previousContent: previousArtifact.content, feedback: latestDecision.comments }
-          : undefined;
-
-      const proposal = await aiService.generatePhaseProposal(projectId, phase, revision, brief);
-
-      const artifact = await prisma.phaseArtifact.create({
+      const revision = previousArtifact && latestDecision?.decision === "changes_requested" && latestDecision.comments
+        ? { previousContent: previousArtifact.content, feedback: latestDecision.comments }
+        : undefined;
+      const proposal = await this.aiService.generatePhaseProposal(projectId, phase, revision, brief);
+      const artifact = await this.prisma.phaseArtifact.create({
         data: {
           projectId,
           phase,
@@ -226,34 +291,45 @@ export class PhaseService {
           createdBy,
         },
       });
-
-      await this.startPhase(projectId, phase);
-
-      await prisma.workflowRun.update({
+      await this.startPhase(projectId, phase, createdBy);
+      await this.prisma.workflowRun.update({
         where: { id: run.id },
         data: {
           status: "completed",
           completedAt: new Date(),
           modelUsage: { model: proposal.model, ...proposal.usage },
           costUSD: proposal.costUSD,
+          outputArtifactId: artifact.id,
         },
       });
-
-      return { artifact, workflowRun: await prisma.workflowRun.findUnique({ where: { id: run.id } }) };
-    } catch (err) {
-      await prisma.workflowRun.update({
+      return { artifact, workflowRun: await this.prisma.workflowRun.findUnique({ where: { id: run.id } }) };
+    } catch (error) {
+      await this.prisma.workflowRun.update({
         where: { id: run.id },
         data: { status: "failed", completedAt: new Date() },
       });
-      throw err;
+      throw error;
     }
   }
 
-  async getWorkflowRuns(projectId: string) {
-    return prisma.workflowRun.findMany({
+  async getWorkflowRuns(projectId: string, actorId: string) {
+    await this.authorization.assertCanRead(projectId, actorId);
+    return this.prisma.workflowRun.findMany({
       where: { projectId },
       orderBy: { startedAt: "desc" },
       take: 20,
     });
+  }
+
+  async getRequirementsRun(projectId: string, runId: string, actorId: string) {
+    return this.requirementsRuns.getRequirementsRun(projectId, runId, actorId);
+  }
+
+  async generateInitialRequirements(input: GenerateInitialRequirementsInput) {
+    return this.generation.generateInitialRequirements(input);
+  }
+
+  async reviseRequirements(input: ReviseRequirementsInput) {
+    return this.generation.reviseRequirements(input);
   }
 }

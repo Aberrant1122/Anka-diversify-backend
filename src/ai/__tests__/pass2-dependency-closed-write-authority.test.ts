@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { bindUserRequest } from "../repository/TrustedTaskContext";
+import { bindStageAuthorizationId, bindUserRequest } from "../repository/TrustedTaskContext";
 import { productionIsAuthorityEligible } from "./helpers/capability-test-harness";
 import {
   EvidenceBoundWriteSetResolver,
@@ -226,6 +226,8 @@ describe("Strict Implementation Pass 2 — Dependency-Closed Write Authority & M
   // Section 18 — TEST: VALID PARENT + CHILD
   test("Section 18: Independently requested parent and child CREATE are both approved", () => {
     bindUserRequest(defaultIntent, "Create components/Calculator.tsx and integrate it in app/page.tsx");
+    // Checkpoint C requires constructive proofs to be bound to a backend-owned stage.
+    bindStageAuthorizationId(defaultIntent, "stage-1");
     const evidenceStore = store();
     const evApp = evidenceStore.observeRepository({
       kind: "FILE",

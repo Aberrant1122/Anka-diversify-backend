@@ -1,10 +1,13 @@
 import { PipelineStage } from "./PipelineStage";
+import type { LLMProviderAttempt } from "./LLMGateway";
 
 export type LLMErrorCode =
   | "LLM_TIMEOUT"
   | "LLM_RATE_LIMIT"
   | "LLM_NETWORK_ERROR"
   | "LLM_PROVIDER_ERROR"
+  | "LLM_REFUSAL"
+  | "LLM_CONTENT_FILTER"
   | "LLM_TRUNCATED"
   | "LLM_INVALID_JSON"
   | "LLM_SCHEMA_INVALID"
@@ -36,6 +39,11 @@ export class LLMError extends Error {
   public readonly model?: string;
   public readonly details: LLMErrorDetails;
   public readonly isRetryable: boolean;
+  private _providerAttempts?: readonly LLMProviderAttempt[];
+
+  public get providerAttempts(): readonly LLMProviderAttempt[] | undefined {
+    return this._providerAttempts;
+  }
 
   constructor(message: string, code: LLMErrorCode, details: LLMErrorDetails = {}, isRetryable: boolean = false, cause?: unknown) {
     super(message);
@@ -49,6 +57,14 @@ export class LLMError extends Error {
       (this as any).cause = cause;
     }
     Object.setPrototypeOf(this, new.target.prototype);
+  }
+
+  public attachProviderAttempts(attempts: readonly LLMProviderAttempt[]): this {
+    if (attempts.length === 0) return this;
+    this._providerAttempts = Object.freeze(
+      attempts.map((attempt) => Object.freeze({ ...attempt })),
+    );
+    return this;
   }
 }
 
@@ -77,6 +93,20 @@ export class LLMProviderError extends LLMError {
   constructor(message: string, details: LLMErrorDetails = {}, isRetryable: boolean = false, cause?: unknown) {
     super(message, "LLM_PROVIDER_ERROR", details, isRetryable, cause);
     this.name = "LLMProviderError";
+  }
+}
+
+export class LLMRefusalError extends LLMError {
+  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown) {
+    super(message, "LLM_REFUSAL", details, false, cause);
+    this.name = "LLMRefusalError";
+  }
+}
+
+export class LLMContentFilterError extends LLMError {
+  constructor(message: string, details: LLMErrorDetails = {}, cause?: unknown) {
+    super(message, "LLM_CONTENT_FILTER", details, false, cause);
+    this.name = "LLMContentFilterError";
   }
 }
 

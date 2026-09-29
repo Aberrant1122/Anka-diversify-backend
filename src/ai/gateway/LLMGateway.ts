@@ -17,6 +17,8 @@ import {
   LLMRateLimitError,
   LLMNetworkError,
   LLMProviderError,
+  LLMRefusalError,
+  LLMContentFilterError,
   LLMTruncationError,
   LLMInvalidJsonError,
   LLMSchemaInvalidError,
@@ -103,6 +105,25 @@ export interface LLMStructuredSchema<T = any> {
 export interface LLMStructuredCallOptions<T = any> extends LLMBaseCallOptions {
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
   schema: LLMStructuredSchema<T>;
+  structuredRepair?: {
+    instructions: string;
+  };
+}
+
+export type LLMProviderAttemptKind = "initial" | "transport_retry" | "structured_repair";
+
+export interface LLMProviderAttempt {
+  attemptNumber: number;
+  kind: LLMProviderAttemptKind;
+  providerResponseId: string | null;
+  providerRequestId: string | null;
+  model: string;
+  finishReason: string | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  usageSource: "provider" | "unavailable";
+  latencyMs: number;
 }
 
 export interface LLMCallResult<T = string> {
@@ -117,6 +138,8 @@ export interface LLMCallResult<T = string> {
   latencyMs: number;
   model: string;
   stage: PipelineStage;
+  attemptCount?: number;
+  providerAttempts?: LLMProviderAttempt[];
 }
 
 export interface LLMGatewayComponents {
@@ -277,6 +300,8 @@ export class LLMGateway {
     });
 
     let lastError: LLMError | undefined;
+    const providerAttempts: LLMProviderAttempt[] = [];
+    let nextAttemptKind: LLMProviderAttemptKind = "initial";
     try {
       for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
         const model = this.modelRouter.modelForAttempt(route, attempt);
@@ -304,6 +329,8 @@ export class LLMGateway {
         this.telemetry.emit("llm.budget_reserved", telemetryContext, reservation.reservedTokens);
         this.telemetry.emit("llm.call", telemetryContext);
         const startTime = Date.now();
+        const attemptKind = nextAttemptKind;
+        const attemptsBeforeCall = providerAttempts.length;
 
         try {
           const result = await this.executeSingleAttempt<T>(
@@ -316,11 +343,28 @@ export class LLMGateway {
             startTime,
             telemetryContext,
             reservation,
-            managedContext.estimatedTokens
+            managedContext.estimatedTokens,
+            attemptKind,
+            (providerAttempt) => providerAttempts.push(providerAttempt),
           );
           this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
-          return result;
+          return { ...result, providerAttempts: [...providerAttempts] };
         } catch (err: unknown) {
+          if (providerAttempts.length === attemptsBeforeCall) {
+            providerAttempts.push({
+              attemptNumber: attempt,
+              kind: attemptKind,
+              providerResponseId: null,
+              providerRequestId: null,
+              model,
+              finishReason: null,
+              promptTokens: null,
+              completionTokens: null,
+              totalTokens: null,
+              usageSource: "unavailable",
+              latencyMs: Date.now() - startTime,
+            });
+          }
           const failedSettlement = this.budgetManager.failAttempt(reservation);
           if (failedSettlement.outcome === "ACCOUNTED") {
             this.telemetry.emit("llm.budget_accounted", telemetryContext, failedSettlement.accountedTokens, {
@@ -328,7 +372,8 @@ export class LLMGateway {
               ...failedSettlement.snapshot,
             });
           }
-          lastError = this.normalizeError(err, stage, model, attempt, maxRetries);
+          lastError = this.normalizeError(err, stage, model, attempt, maxRetries)
+            .attachProviderAttempts(providerAttempts);
           this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
           this.recordErrorTelemetry(lastError, telemetryContext);
 
@@ -340,7 +385,7 @@ export class LLMGateway {
               `LLM call failed after ${attempt} attempts: ${lastError.message}`,
               lastError,
               { stage, model, attempt, maxRetries }
-            );
+            ).attachProviderAttempts(providerAttempts);
           }
 
           this.telemetry.emit("llm.retry", telemetryContext, attempt);
@@ -354,12 +399,27 @@ export class LLMGateway {
           }
 
           if (isStructuredCorrection) {
+            nextAttemptKind = "structured_repair";
             const structuredSchema = (options as LLMStructuredCallOptions).schema;
             const errorList = (lastError.details?.validationErrors && lastError.details.validationErrors.length > 0)
               ? lastError.details.validationErrors
               : [lastError.message];
 
-            const repairPrompt = stage === PipelineStages.MANIFEST_GENERATION
+            const callerRepair = (options as LLMStructuredCallOptions).structuredRepair;
+            const repairPrompt = callerRepair
+              ? [
+                  "Your previous structured response failed deterministic validation.",
+                  "",
+                  "VALIDATION ERRORS:",
+                  ...errorList.map((e: string) => `- ${e}`),
+                  "",
+                  "AUTHORITATIVE EXPECTED SCHEMA:",
+                  JSON.stringify(structuredSchema.schema, null, 2),
+                  "",
+                  "CALLER-SPECIFIC CORRECTION INSTRUCTIONS:",
+                  callerRepair.instructions,
+                ].join("\n")
+              : stage === PipelineStages.MANIFEST_GENERATION
               ? [
                   "Your previous manifest proposal was not valid structured JSON.",
                   "",
@@ -420,6 +480,8 @@ export class LLMGateway {
                 { role: "user", content: repairPrompt },
               ],
             };
+          } else {
+            nextAttemptKind = "transport_retry";
           }
         }
       }
@@ -428,6 +490,9 @@ export class LLMGateway {
         stage,
         model: route.primaryModel,
       });
+    } catch (error) {
+      if (error instanceof LLMError) error.attachProviderAttempts(providerAttempts);
+      throw error;
     } finally {
       if (operationScoped) this.budgetManager.releaseScope(budgetScopeId);
     }
@@ -443,7 +508,9 @@ export class LLMGateway {
     startTime: number,
     telemetryContext: LLMTelemetryContext,
     reservation: BudgetReservation,
-    estimatedInputTokens: number
+    estimatedInputTokens: number,
+    attemptKind: LLMProviderAttemptKind,
+    recordProviderAttempt: (attempt: LLMProviderAttempt) => void,
   ): Promise<LLMCallResult<T>> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -480,6 +547,20 @@ export class LLMGateway {
       const latencyMs = Date.now() - startTime;
 
       const choice = response.choices?.[0];
+      const providerUsage = response.usage;
+      recordProviderAttempt({
+        attemptNumber: telemetryContext.attempt ?? 1,
+        kind: attemptKind,
+        providerResponseId: typeof response.id === "string" && response.id.length > 0 ? response.id : null,
+        providerRequestId: this.providerRequestId(response),
+        model: typeof response.model === "string" && response.model.length > 0 ? response.model : model,
+        finishReason: choice?.finish_reason ?? null,
+        promptTokens: this.providerUsageValue(providerUsage?.prompt_tokens),
+        completionTokens: this.providerUsageValue(providerUsage?.completion_tokens),
+        totalTokens: this.providerUsageValue(providerUsage?.total_tokens),
+        usageSource: providerUsage ? "provider" : "unavailable",
+        latencyMs,
+      });
       if (!choice) {
         throw new LLMProviderError("Provider returned empty choices array", {
           stage,
@@ -487,7 +568,6 @@ export class LLMGateway {
         });
       }
 
-      const providerUsage = response.usage;
       const promptTokens = this.validUsageValue(providerUsage?.prompt_tokens, estimatedInputTokens);
       const completionTokens = this.validUsageValue(
         providerUsage?.completion_tokens,
@@ -524,6 +604,13 @@ export class LLMGateway {
       // ── COMPLETION / TRUNCATION CONTRACT ──
       // Critical: Inspect finish_reason.
       const finishReason = choice.finish_reason;
+      if (choice.message?.refusal) {
+        throw new LLMRefusalError("LLM provider refused the requested completion", {
+          stage,
+          model,
+          finishReason,
+        });
+      }
       if (finishReason === "length") {
         throw new LLMTruncationError(
           `LLM response was truncated due to output token exhaustion (finish_reason: length). Business result discarded.`,
@@ -537,7 +624,7 @@ export class LLMGateway {
       }
 
       if (finishReason === "content_filter") {
-        throw new LLMProviderError("LLM response was blocked by content filter", {
+        throw new LLMContentFilterError("LLM response was blocked by content filter", {
           stage,
           model,
           finishReason,
@@ -574,7 +661,8 @@ export class LLMGateway {
           (options as LLMStructuredCallOptions).schema,
           stage,
           model,
-          telemetryContext
+          telemetryContext,
+          Boolean((options as LLMStructuredCallOptions).structuredRepair),
         );
       } else if (mode === "tools") {
         finalContent = this.parseAndValidateToolCompletion(
@@ -600,6 +688,7 @@ export class LLMGateway {
         latencyMs,
         model,
         stage,
+        attemptCount: telemetryContext.attempt,
       };
     } finally {
       clearTimeout(timer);
@@ -665,7 +754,8 @@ export class LLMGateway {
     schema: LLMStructuredSchema<T>,
     stage: PipelineStage,
     model: string,
-    telemetryContext: LLMTelemetryContext
+    telemetryContext: LLMTelemetryContext,
+    allowCallerRepair: boolean,
   ): T {
     // ── SAFE PARSING ──
     let parsed: any;
@@ -683,7 +773,7 @@ export class LLMGateway {
           rawPayloadSnippet: rawContent.slice(0, 300),
         },
         parseErr,
-        isManifestCorrection
+        isManifestCorrection || (allowCallerRepair && telemetryContext.attempt === 1)
       );
     }
 
@@ -713,6 +803,7 @@ export class LLMGateway {
 
     if (!validationResult || validationResult.valid !== true) {
       const isRetryable =
+        (allowCallerRepair && telemetryContext.attempt === 1) ||
         stage === PipelineStages.INTENT_CLASSIFICATION ||
         ((stage === PipelineStages.CODE_GENERATION || stage === PipelineStages.MANIFEST_GENERATION) &&
           telemetryContext.attempt === 1);
@@ -740,6 +831,16 @@ export class LLMGateway {
   private validUsageValue(value: number | undefined, fallback: number): number {
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return fallback;
     return Math.floor(value);
+  }
+
+  private providerUsageValue(value: number | undefined): number | null {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+    return Math.floor(value);
+  }
+
+  private providerRequestId(response: OpenAI.Chat.Completions.ChatCompletion): string | null {
+    const requestId = (response as OpenAI.Chat.Completions.ChatCompletion & { _request_id?: string | null })._request_id;
+    return typeof requestId === "string" && requestId.length > 0 ? requestId : null;
   }
 
   private normalizeError(
@@ -814,6 +915,8 @@ export class LLMGateway {
         this.telemetry.emit("llm.network_error", context);
         break;
       case "LLM_PROVIDER_ERROR":
+      case "LLM_REFUSAL":
+      case "LLM_CONTENT_FILTER":
         this.telemetry.emit("llm.provider_error", context);
         break;
       case "LLM_TRUNCATED":
@@ -843,10 +946,17 @@ export class LLMGateway {
       }];
     }
     if (mode === "structured") {
-      return [{
-        id: "structured-response-format",
-        value: this.structuredResponseFormat(options as LLMStructuredCallOptions),
-      }];
+      const structured = options as LLMStructuredCallOptions;
+      return [
+        {
+          id: "structured-response-format",
+          value: this.structuredResponseFormat(structured),
+        },
+        ...(structured.structuredRepair ? [{
+          id: "structured-repair-instructions",
+          value: structured.structuredRepair.instructions,
+        }] : []),
+      ];
     }
     return [];
   }

@@ -255,6 +255,9 @@ Generate a corrected, valid FileManifest JSON that resolves all validation error
         files: normalizedFiles,
         totalFiles: normalizedFiles.length,
         manifestVersion: parsed.manifestVersion,
+        ...(normalizedRejectedManifest.prospectiveTopology
+          ? { prospectiveTopology: normalizedRejectedManifest.prospectiveTopology }
+          : {}),
       };
     } catch (err: any) {
       console.warn("[ManifestCorrectionEngine] Correction attempt failed:", err?.message || err);

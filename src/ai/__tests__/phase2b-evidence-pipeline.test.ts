@@ -93,12 +93,23 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
       reasoning: "Task without hardcoded target",
     } as any);
 
-    jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (initialChanges: any) => ({
-      success: true,
-      attempts: 1,
-      finalChanges: initialChanges || [],
-      errorLog: "",
-    } as any));
+    jest.spyOn(SelfHealingEngine, "runSelfHealingLoop").mockImplementation(async (
+      initialChanges: any,
+      localPath: any,
+      _validationCommands: any,
+      _systemPrompt: any,
+      _requestMessage: any,
+      fsManager?: FileSystemStateManager,
+    ) => {
+      if (!fsManager) throw new Error("fixture requires the guarded filesystem manager");
+      await fsManager.apply(initialChanges || [], localPath);
+      return {
+        success: true,
+        attempts: 1,
+        finalChanges: initialChanges || [],
+        errorLog: "",
+      } as any;
+    });
 
     jest.spyOn(SecurityAuditor, "runReflectionAndSecurityAudit").mockResolvedValue({
       securityPass: true,
@@ -171,6 +182,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Found semantic candidates",
         inspectedFiles: ["src/Dashboard.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/Dashboard.tsx"] },
       } as any;
     });
 
@@ -197,11 +209,15 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", chatReq, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
-    // Resolver MUST reject unrelated Dashboard because FILE existence alone without structural/task relation does not authorize MODIFY
-    // Final targetPaths becomes [] -> pipeline immediately fails closed with [Manifest Validation Failed]
+    // Resolver MUST reject unrelated Dashboard because FILE existence alone without structural/task relation does not authorize MODIFY.
+    // The first candidate failure is internal; an unchanged recovery topology is then deterministically blocked.
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
+    expect(result.explanation).toMatch(/\[(Duplicate Recovery Plan|Manifest Validation Failed)\]/);
     expect(codeGenSpy).not.toHaveBeenCalled();
+    const persistedAssistantMessages = jest.mocked(MemoryPersistence.saveMessage).mock.calls
+      .filter(([role]) => role === "assistant")
+      .map(([, content]) => content);
+    expect(persistedAssistantMessages.some((content) => content.includes("[Planning Scope Rejected]"))).toBe(false);
   });
 
   test("B. Orphan CREATE rejection in full pipeline flow", async () => {
@@ -229,6 +245,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Found entry point",
         inspectedFiles: ["src/App.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/App.tsx"] },
       } as any;
     });
 
@@ -257,7 +274,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     // Orphan CREATE citing only ENTRY_POINT without importer or standalone proof MUST be rejected
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
+    expect(result.explanation).toMatch(/\[(Duplicate Recovery Plan|Manifest Validation Failed)\]/);
     expect(codeGenSpy).not.toHaveBeenCalled();
   });
 
@@ -294,6 +311,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Verified Button relation",
         inspectedFiles: ["src/Button.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/Button.tsx"] },
       } as any;
     });
 
@@ -330,8 +348,6 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
       commitMessage: "feat: update button",
       validationCommands: [],
     });
-
-    jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
 
     const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", { ...chatReq, message: "Update the button rendered by src/App.tsx" }, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
@@ -374,6 +390,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Verified App integration site",
         inspectedFiles: ["src/App.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/App.tsx"] },
       } as any;
     });
 
@@ -426,8 +443,6 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
       validationCommands: [],
     });
 
-    jest.spyOn(FileSystemStateManager.prototype, "apply").mockImplementation(async () => {});
-
     const result = await AgentPipeline.runCodingAgent("user-1", "proj-p2b", { ...chatReq, message: "Create src/components/Header.tsx and integrate it in src/App.tsx" }, undefined, { authorizedCapabilityScope: getAuthorizedScope() });
 
     // Both Header.tsx and App.tsx should be approved and generated
@@ -463,6 +478,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Summary",
         inspectedFiles: ["src/Dashboard.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/Dashboard.tsx"] },
       } as any;
     });
 
@@ -488,7 +504,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
 
     // Rejection guarantees zero changes applied and strict failure explanation
     expect(result.changes).toHaveLength(0);
-    expect(result.explanation).toMatch(/\[(Planning Scope Rejected|Manifest Validation Failed)\]/);
+    expect(result.explanation).toMatch(/\[(Duplicate Recovery Plan|Manifest Validation Failed)\]/);
   });
 
   test("F. searchPlanHistory is populated with real tool execution records", async () => {
@@ -555,6 +571,7 @@ describe("Phase 2B Pipeline-Level Evidence-Bound Authority Integration Tests", (
         searchSummary: "Investigation completed in 3 rounds",
         inspectedFiles: ["src/App.tsx"],
         evidenceStore: store,
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/App.tsx"] },
       } as any;
     });
 

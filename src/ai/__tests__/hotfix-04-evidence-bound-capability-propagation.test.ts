@@ -620,6 +620,7 @@ describe("Hotfix 04: Authentic Evidence-Bound Capability Issuance & Policy Propa
         executionMemory: { inspectedFiles: new Set(["src/index.ts"]) },
         finalConfidence: 0.9,
         searchSummary: "discovered implementation area",
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/index.ts"] },
       } as any;
     });
 

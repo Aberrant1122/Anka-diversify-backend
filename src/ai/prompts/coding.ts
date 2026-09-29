@@ -252,6 +252,7 @@ MINIMALITY & SCOPE GUIDELINES
 6. AUTHORIZATION BOUNDARY: You propose planning intent only. Do not emit evidenceIds or any other authorization token; the backend independently binds current-revision deterministic evidence.
 7. REPOSITORY CREATE SCOPE: Propose action "create" only when the original user request explicitly names the exact new repository path. When no exact new path was requested, implement the feature by modifying the smallest coherent set of verified existing files. Integration metadata alone does not authorize a new path.
 8. DEPENDENCY INTENT: Put repository files, relative imports, configured aliases, and workspace-local packages in repositoryDependencies. Put npm/Node packages in externalPackages. Keep legacy dependencies as an empty compatibility array when typed fields are used. These fields express intent only; the backend independently resolves every value against repository and package reality.
+9. MULTI-FILE TOPOLOGY: For a multi-file feature, include prospectiveTopology. Use temporary IDs only to connect nodes. Declare typed roles (ROUTE, COMPONENT, CHILD_COMPONENT, MODULE, EXISTING_DEPENDENCY, INTEGRATION_ROOT), typed relations (RENDERS, IMPORTS, DEPENDS_ON, REGISTERS, ROUTES_TO), and deterministic feature roots. Do not invent a final import string; rawImportHint is diagnostic only. A one-file task may omit prospectiveTopology.
 
 Respond ONLY with valid JSON:
 {
@@ -266,7 +267,15 @@ Respond ONLY with valid JSON:
     }
   ],
   "totalFiles": 1,
-  "manifestVersion": "1.0.0"
+  "manifestVersion": "1.0.0",
+  "prospectiveTopology": {
+    "nodes": [
+      { "temporaryId": "n1", "path": "relative/page.tsx", "kind": "PROSPECTIVE", "role": "ROUTE" },
+      { "temporaryId": "n2", "path": "relative/Panel.tsx", "kind": "PROSPECTIVE", "role": "COMPONENT" }
+    ],
+    "edges": [{ "sourceId": "n1", "targetId": "n2", "relation": "RENDERS", "rawImportHint": "optional diagnostic hint" }],
+    "featureRoots": ["n1"]
+  }
 }`;
 
 export const CODE_CRITIQUE_PROMPT = `You are an Independent Code Review & Quality Reflection Agent.

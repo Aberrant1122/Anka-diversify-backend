@@ -9,6 +9,7 @@ import path from "path";
 import {
   isAllowedBuiltinOrInstalled,
   detectRepositoryArchitecture,
+  RepositoryArchitectureSummary,
 } from "../ai/planning/RepositoryArchitectureDetector";
 import { MonorepoDetector, MonorepoDescriptor } from "../ai/workspace/MonorepoDetector";
 import {
@@ -16,6 +17,12 @@ import {
   ManifestDependencyConfigurationFile,
   ManifestDependencyResolver,
 } from "../ai/planning/ManifestDependencyResolver";
+import {
+  canonicalizeProspectiveFeatureGraph,
+  ProspectiveGraphContext,
+  validateProspectiveGraphBinding,
+} from "../ai/planning/ProspectiveFeatureGraph";
+import type { VerifiedProspectiveFeatureGraph } from "../types";
 
 export interface RepositoryContext {
   existingFiles: string[];
@@ -24,6 +31,8 @@ export interface RepositoryContext {
   packageJsonContent?: string | object;
   monorepo?: MonorepoDescriptor | null;
   configurationFiles?: ManifestDependencyConfigurationFile[];
+  architecture?: RepositoryArchitectureSummary;
+  graphBinding?: Omit<ProspectiveGraphContext, "existingFiles" | "architecture" | "installedPackages" | "configurationFiles" | "monorepo">;
 }
 
 /**
@@ -33,16 +42,21 @@ export interface RepositoryContext {
 export class ManifestValidator {
   private contract: ExecutionContract;
   private existingFiles: Set<string>;
+  private existingFilePaths: string[] = [];
   private installedPackages: Set<string>;
   private monorepo: MonorepoDescriptor | null = null;
   private configurationFiles: ManifestDependencyConfigurationFile[] = [];
+  private architecture?: RepositoryArchitectureSummary;
+  private graphBinding?: RepositoryContext["graphBinding"];
 
   constructor(contract: ExecutionContract, repoContext?: RepositoryContext | string[]) {
     this.contract = contract;
     if (Array.isArray(repoContext)) {
+      this.existingFilePaths = repoContext.map((file) => file.replace(/\\/g, "/").replace(/^\.\//, ""));
       this.existingFiles = new Set(repoContext.map((f) => this.normalizePath(f)));
       this.installedPackages = new Set();
     } else if (repoContext && Array.isArray(repoContext.existingFiles)) {
+      this.existingFilePaths = repoContext.existingFiles.map((file) => file.replace(/\\/g, "/").replace(/^\.\//, ""));
       this.existingFiles = new Set(repoContext.existingFiles.map((f) => this.normalizePath(f)));
       if (Array.isArray(repoContext.installedPackages)) {
         this.installedPackages = new Set(repoContext.installedPackages);
@@ -57,6 +71,8 @@ export class ManifestValidator {
       const monorepo = repoContext.monorepo || MonorepoDetector.detectMonorepo(null, repoContext.existingFiles.map((f) => ({ path: f })));
       this.monorepo = monorepo || null;
       this.configurationFiles = repoContext.configurationFiles || [];
+      this.architecture = repoContext.architecture || detectRepositoryArchitecture(repoContext.existingFiles, repoContext.packageJsonContent, repoContext.monorepo);
+      this.graphBinding = repoContext.graphBinding;
       if (monorepo?.isMonorepo) {
         for (const ws of monorepo.workspaces) {
           this.installedPackages.add(ws.name);
@@ -76,6 +92,7 @@ export class ManifestValidator {
    */
   public validate(manifest: FileManifest, options?: { isSubTask?: boolean }): ValidationResult {
     const errors: ValidationError[] = [];
+    let verifiedTopology: VerifiedProspectiveFeatureGraph | undefined;
 
     // Rule 1: Schema Conformance
     errors.push(...this.validateSchema(manifest));
@@ -83,6 +100,43 @@ export class ManifestValidator {
     // If basic schema is broken, return early to prevent downstream crashes
     if (errors.some((e) => e.type === "schema")) {
       return { valid: false, errors };
+    }
+    verifiedTopology = manifest.verifiedTopology;
+
+    if (manifest.prospectiveTopology) {
+      if (!this.graphBinding || !this.architecture) {
+        errors.push({
+          type: "prospective-topology",
+          affectedFiles: manifest.files.map((file) => file.path),
+          message: "Prospective topology cannot be validated without trusted stage, clause, workspace, and revision bindings.",
+          suggestion: "Re-run planning from the current authenticated stage and repository snapshot.",
+        });
+      } else {
+        const graphResult = canonicalizeProspectiveFeatureGraph(manifest.prospectiveTopology, manifest, {
+          ...this.graphBinding,
+          existingFiles: this.existingFilePaths,
+          architecture: this.architecture,
+          installedPackages: [...this.installedPackages],
+          configurationFiles: this.configurationFiles,
+          monorepo: this.monorepo,
+        });
+        errors.push(...graphResult.errors);
+        verifiedTopology = graphResult.graph;
+      }
+    } else if (verifiedTopology) {
+      if (!this.graphBinding) {
+        errors.push({
+          type: "prospective-topology",
+          affectedFiles: manifest.files.map((file) => file.path),
+          message: "Verified topology has no current trusted binding context.",
+          suggestion: "Re-canonicalize the topology from the current stage and repository snapshot.",
+        });
+        verifiedTopology = undefined;
+      } else {
+        const binding = validateProspectiveGraphBinding(verifiedTopology, this.graphBinding);
+        errors.push(...binding.errors);
+        verifiedTopology = binding.graph;
+      }
     }
 
     // Special Case: Standalone HTML/CSS/JS Applications
@@ -94,10 +148,10 @@ export class ManifestValidator {
     }
 
     // Rule 3: Import Resolution
-    errors.push(...this.validateImports(manifest));
+    errors.push(...this.validateImports(manifest, verifiedTopology));
 
     // Rule 4: Orphan Detection (bypassed if in sub-task mode)
-    if (!options?.isSubTask) {
+    if (!options?.isSubTask && !verifiedTopology) {
       errors.push(...this.detectOrphans(manifest));
     }
 
@@ -113,6 +167,7 @@ export class ManifestValidator {
     return {
       valid: errors.length === 0,
       errors,
+      ...(verifiedTopology ? { verifiedTopology } : {}),
     };
   }
 
@@ -242,14 +297,27 @@ export class ManifestValidator {
   /**
    * Validates that all imported local modules resolve to an existing repo file or a file in the manifest.
    */
-  public validateImports(manifest: FileManifest): ValidationError[] {
+  public validateImports(manifest: FileManifest, topology?: VerifiedProspectiveFeatureGraph): ValidationError[] {
     const errors: ValidationError[] = [];
     const resolver = this.createDependencyResolver(manifest);
 
     for (const file of manifest.files) {
       if (!file.path || !Array.isArray(file.dependencies)) continue;
       if (file.action === "delete") continue;
-      for (const dependency of this.getDependencyCandidates(file)) {
+      const canonicalEdges = topology?.edges.filter((edge) => {
+        const source = topology.nodes.find((node) => node.id === edge.sourceId);
+        return source && this.normalizePath(source.path) === this.normalizePath(file.path) && edge.canonicalSpecifier;
+      }) || [];
+      const candidates = topology
+        ? [
+            ...canonicalEdges.map((edge) => ({ value: edge.canonicalSpecifier!, intent: "REPOSITORY" as const })),
+            ...(file.externalPackages || []).map((dependency) => ({
+              value: dependency.subpath ? `${dependency.packageName}/${dependency.subpath}` : dependency.packageName,
+              intent: "EXTERNAL" as const,
+            })),
+          ]
+        : this.getDependencyCandidates(file);
+      for (const dependency of candidates) {
         const resolution = resolver.resolve(file.path, dependency);
         if (resolution.classification === "REPOSITORY") continue;
         if (resolution.classification === "EXTERNAL") {

@@ -121,9 +121,39 @@ export interface PlannedChange {
   integration?: IntegrationObligation;
 }
 
+export type WriteRejectionCode =
+  | "POLICY_BLOCKED_UNKNOWN_OR_CLARIFICATION"
+  | "MAX_FILES_EXCEEDED"
+  | "ACTION_NOT_ALLOWED_BY_POLICY"
+  | "NO_EVIDENCE_IDS_CITED"
+  | "INVENTED_OR_MISSING_EVIDENCE_IDS"
+  | "UNAUTHENTICATED_REPOSITORY_EVIDENCE"
+  | "PROSPECTIVE_EVIDENCE_ALONE_INSUFFICIENT"
+  | "MULTI_REPO_ISOLATION_VIOLATION"
+  | "MONOREPO_WORKSPACE_VIOLATION"
+  | "AUTHORITY_WORKSPACE_MISMATCH"
+  | "NO_TASK_OR_STRUCTURAL_RELATION"
+  | "STALE_AUTHORITY_EVIDENCE"
+  | "EXISTING_FILE_NOT_FOUND"
+  | "DELETE_WITHOUT_DESTRUCTIVE_INTENT"
+  | "NOT_AUTHORIZED_FOR_DELETE"
+  | "NO_FILE_EXISTENCE_EVIDENCE"
+  | "ACTION_MISMATCH_WITH_INTENT"
+  | "CANNOT_CREATE_EXISTING_FILE"
+  | "REJECT_INTEGRATION_DEPENDENCY"
+  | "REJECT_DEPENDENCY"
+  | "UNCLASSIFIED_AUTHORIZATION_FAILURE";
+
+export interface RejectedWriteCandidate {
+  path: string;
+  action: PlannedChange["action"];
+  reasonCode: WriteRejectionCode;
+  reason: string;
+}
+
 export interface WriteAuthorizationResult {
   approvedPaths: string[];
-  rejectedPaths: Array<{ path: string; reason: string }>;
+  rejectedPaths: RejectedWriteCandidate[];
   authorizedChanges: PlannedChange[];
   evidenceAuthorization: EvidenceBoundAuthorization;
 }
@@ -214,7 +244,7 @@ export class EvidenceBoundWriteSetResolver {
     );
 
     const approvedPaths: string[] = [];
-    const rejectedPaths: Array<{ path: string; reason: string }> = [];
+    const rejectedPaths: RejectedWriteCandidate[] = [];
     const authorizedChanges: PlannedChange[] = [];
 
     // Fast-fail if policy requires clarification or task is unknown
@@ -232,7 +262,12 @@ export class EvidenceBoundWriteSetResolver {
       });
       return {
         approvedPaths: [],
-        rejectedPaths: proposedChanges.map((c) => ({ path: c.path, reason: "POLICY_BLOCKED_UNKNOWN_OR_CLARIFICATION" })),
+        rejectedPaths: proposedChanges.map((c) => ({
+          path: c.path,
+          action: c.action,
+          reasonCode: "POLICY_BLOCKED_UNKNOWN_OR_CLARIFICATION",
+          reason: "POLICY_BLOCKED_UNKNOWN_OR_CLARIFICATION",
+        })),
         authorizedChanges: [],
         evidenceAuthorization: emptyAuth,
       };
@@ -241,7 +276,14 @@ export class EvidenceBoundWriteSetResolver {
 
     // Phase A: Evaluate intrinsic eligibility for every change independently
     const intrinsicallyEligible = new Map<string, PlannedChange>();
-    const rejectionReasons = new Map<string, string>();
+    const rejectionReasons = new Map<string, { reasonCode: WriteRejectionCode; reason: string }>();
+    const reject = (
+      normalizedPath: string,
+      reasonCode: WriteRejectionCode,
+      reason: string,
+    ): void => {
+      rejectionReasons.set(normalizedPath, { reasonCode, reason });
+    };
     const candidateProofs = new Map<string, TaskRootedAuthorizationProof>();
 
     for (const change of proposedChanges) {
@@ -250,7 +292,7 @@ export class EvidenceBoundWriteSetResolver {
       // 1. Policy max files check (fail-closed if total proposed files exceeds policy maxFiles)
       if (proposedChanges.length > policy.maxFiles) {
         console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=MAX_FILES_EXCEEDED`);
-        rejectionReasons.set(normPath, `Max allowed files exceeded (${policy.maxFiles})`);
+        reject(normPath, "MAX_FILES_EXCEEDED", `Max allowed files exceeded (${policy.maxFiles})`);
         continue;
       }
 
@@ -264,14 +306,14 @@ export class EvidenceBoundWriteSetResolver {
       const forbidden = policy.forbiddenActions.some((a) => [change.action, `${change.action}_file`, `${change.action}_files`, ...(change.action === "delete" ? ["delete_folder", "delete_folders"] : [])].includes(a.toLowerCase()));
       if (!isAllowed || forbidden) {
         console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=ACTION_NOT_ALLOWED_BY_POLICY`);
-        rejectionReasons.set(normPath, `Action "${change.action}" is forbidden by PolicyContract`);
+        reject(normPath, "ACTION_NOT_ALLOWED_BY_POLICY", `Action "${change.action}" is forbidden by PolicyContract`);
         continue;
       }
 
       // 3. Evidence IDs cited
       if (!Array.isArray(change.evidenceIds) || change.evidenceIds.length === 0) {
         console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NO_EVIDENCE_IDS_CITED`);
-        rejectionReasons.set(normPath, "Proposed change cited no evidence IDs");
+        reject(normPath, "NO_EVIDENCE_IDS_CITED", "Proposed change cited no evidence IDs");
         continue;
       }
 
@@ -281,8 +323,9 @@ export class EvidenceBoundWriteSetResolver {
         console.log(
           `[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=INVENTED_OR_MISSING_EVIDENCE_IDS missing=[${evidenceValidation.missingIds.join(", ")}]`
         );
-        rejectionReasons.set(
+        reject(
           normPath,
+          "INVENTED_OR_MISSING_EVIDENCE_IDS",
           `INVENTED_OR_MISSING_EVIDENCE_IDS: Cited non-existent or unverified evidence IDs: ${evidenceValidation.missingIds.join(", ")}`
         );
         continue;
@@ -293,7 +336,7 @@ export class EvidenceBoundWriteSetResolver {
         .map((evidence) => evidence.id);
       if (unauthenticatedEvidenceIds.length > 0) {
         console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=UNAUTHENTICATED_REPOSITORY_EVIDENCE ids=[${unauthenticatedEvidenceIds.join(", ")}]`);
-        rejectionReasons.set(normPath, "UNAUTHENTICATED_REPOSITORY_EVIDENCE: Caller-shaped or advisory evidence cannot authorize mutation");
+        reject(normPath, "UNAUTHENTICATED_REPOSITORY_EVIDENCE", "UNAUTHENTICATED_REPOSITORY_EVIDENCE: Caller-shaped or advisory evidence cannot authorize mutation");
         continue;
       }
 
@@ -311,8 +354,9 @@ export class EvidenceBoundWriteSetResolver {
 
       if (nonProspectiveEvidence.length === 0 && !isExplicitCreatePath) {
         console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=PROSPECTIVE_EVIDENCE_ALONE_INSUFFICIENT`);
-        rejectionReasons.set(
+        reject(
           normPath,
+          "PROSPECTIVE_EVIDENCE_ALONE_INSUFFICIENT",
           "PROSPECTIVE_EVIDENCE_ALONE_INSUFFICIENT: Prospective absence observation carries zero mutation authority and cannot independently satisfy evidence requirements"
         );
         continue;
@@ -324,7 +368,7 @@ export class EvidenceBoundWriteSetResolver {
       );
       if (foreignRepoEvidence) {
         console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=MULTI_REPO_ISOLATION_VIOLATION`);
-        rejectionReasons.set(normPath, `Evidence originated from outside the target repository "${targetRepositoryId}"`);
+        reject(normPath, "MULTI_REPO_ISOLATION_VIOLATION", `Evidence originated from outside the target repository "${targetRepositoryId}"`);
         continue;
       }
 
@@ -335,7 +379,7 @@ export class EvidenceBoundWriteSetResolver {
           const hasCrossWsEvidence = evidenceValidation.evidence.some((e) => e.kind === "WORKSPACE" || e.kind === "PACKAGE");
           if (!hasCrossWsEvidence) {
             console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=MONOREPO_WORKSPACE_VIOLATION`);
-            rejectionReasons.set(normPath, `File lies outside workspace root "${normWs}" without explicit cross-workspace evidence`);
+            reject(normPath, "MONOREPO_WORKSPACE_VIOLATION", `File lies outside workspace root "${normWs}" without explicit cross-workspace evidence`);
             continue;
           }
         }
@@ -343,21 +387,21 @@ export class EvidenceBoundWriteSetResolver {
 
       const storeRoot = evidenceStore.getDefaultWorkspace();
       if (!storeRoot || !evidenceStore.getCanonicalWorkspaceRoot() || (params.workspaceRoot && fs.realpathSync(storeRoot) !== fs.realpathSync(params.workspaceRoot))) {
-        rejectionReasons.set(normPath, "AUTHORITY_WORKSPACE_MISMATCH");
+        reject(normPath, "AUTHORITY_WORKSPACE_MISMATCH", "AUTHORITY_WORKSPACE_MISMATCH");
         continue;
       }
       // Mandatory task-rooted gate. Dependencies, manifests and existence can only
       // narrow an already proven candidate; they cannot create authority.
       const proof = TaskRootedAuthorizationVerifier.derive(evidenceStore, intentSpec, normPath, change.action);
       if (!proof) {
-        rejectionReasons.set(normPath, "NO_TASK_OR_STRUCTURAL_RELATION: No current task-rooted forward proof");
+        reject(normPath, "NO_TASK_OR_STRUCTURAL_RELATION", "NO_TASK_OR_STRUCTURAL_RELATION: No current task-rooted forward proof");
         continue;
       }
 
       candidateProofs.set(normPath, proof);
 
       if (evidenceValidation.evidence.some((e) => e.repositoryRevision !== proof.repositoryRevision)) {
-        rejectionReasons.set(normPath, "STALE_AUTHORITY_EVIDENCE: Evidence belongs to a different worktree revision");
+        reject(normPath, "STALE_AUTHORITY_EVIDENCE", "STALE_AUTHORITY_EVIDENCE: Evidence belongs to a different worktree revision");
         continue;
       }
 
@@ -365,12 +409,12 @@ export class EvidenceBoundWriteSetResolver {
       if (change.action === "delete") {
         if (!existingSet.has(normPath)) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=EXISTING_FILE_NOT_FOUND`);
-          rejectionReasons.set(normPath, `Target file for delete does not exist in repository`);
+          reject(normPath, "EXISTING_FILE_NOT_FOUND", "Target file for delete does not exist in repository");
           continue;
         }
         if (!intentSpec.destructive) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=DELETE_WITHOUT_DESTRUCTIVE_INTENT`);
-          rejectionReasons.set(normPath, "DELETE_WITHOUT_DESTRUCTIVE_INTENT: DELETE action proposed without structured destructive intent");
+          reject(normPath, "DELETE_WITHOUT_DESTRUCTIVE_INTENT", "DELETE_WITHOUT_DESTRUCTIVE_INTENT: DELETE action proposed without structured destructive intent");
           continue;
         }
         // Action compatibility: Importer cleanup paths are authorized for MODIFY only, never DELETE
@@ -381,8 +425,9 @@ export class EvidenceBoundWriteSetResolver {
           );
         if (isImporterCleanup) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NOT_AUTHORIZED_FOR_DELETE`);
-          rejectionReasons.set(
+          reject(
             normPath,
+            "NOT_AUTHORIZED_FOR_DELETE",
             "NOT_AUTHORIZED_FOR_DELETE: Importer cleanup path is only authorized for MODIFY, not DELETE"
           );
           continue;
@@ -396,7 +441,7 @@ export class EvidenceBoundWriteSetResolver {
         );
         if (existenceEvidence.length === 0) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NO_FILE_EXISTENCE_EVIDENCE`);
-          rejectionReasons.set(normPath, "NO_FILE_EXISTENCE_EVIDENCE: No verified file existence evidence cited for target path; semantic search alone is not delete authority");
+          reject(normPath, "NO_FILE_EXISTENCE_EVIDENCE", "NO_FILE_EXISTENCE_EVIDENCE: No verified file existence evidence cited for target path; semantic search alone is not delete authority");
           continue;
         }
         intrinsicallyEligible.set(normPath, change);
@@ -407,7 +452,7 @@ export class EvidenceBoundWriteSetResolver {
       if (change.action === "modify") {
         if (!existingSet.has(normPath)) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=EXISTING_FILE_NOT_FOUND`);
-          rejectionReasons.set(normPath, "EXISTING_FILE_NOT_FOUND: Target file for modify does not exist in repository");
+          reject(normPath, "EXISTING_FILE_NOT_FOUND", "EXISTING_FILE_NOT_FOUND: Target file for modify does not exist in repository");
           continue;
         }
         // Action compatibility: Primary destructive targets must be DELETED, not MODIFIED
@@ -418,8 +463,9 @@ export class EvidenceBoundWriteSetResolver {
           );
         if (isPrimaryDestructiveTarget) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=ACTION_MISMATCH_WITH_INTENT`);
-          rejectionReasons.set(
+          reject(
             normPath,
+            "ACTION_MISMATCH_WITH_INTENT",
             "ACTION_MISMATCH_WITH_INTENT: Primary destructive target must be DELETED, not MODIFIED"
           );
           continue;
@@ -433,7 +479,7 @@ export class EvidenceBoundWriteSetResolver {
         );
         if (existenceEvidence.length === 0) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=NO_FILE_EXISTENCE_EVIDENCE`);
-          rejectionReasons.set(normPath, "NO_FILE_EXISTENCE_EVIDENCE: No verified file existence evidence cited for target path");
+          reject(normPath, "NO_FILE_EXISTENCE_EVIDENCE", "NO_FILE_EXISTENCE_EVIDENCE: No verified file existence evidence cited for target path");
           continue;
         }
 
@@ -445,7 +491,7 @@ export class EvidenceBoundWriteSetResolver {
       if (change.action === "create") {
         if (existingSet.has(normPath)) {
           console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=CANNOT_CREATE_EXISTING_FILE`);
-          rejectionReasons.set(normPath, "CANNOT_CREATE_EXISTING_FILE: File already exists; cannot create");
+          reject(normPath, "CANNOT_CREATE_EXISTING_FILE", "CANNOT_CREATE_EXISTING_FILE: File already exists; cannot create");
           continue;
         }
 
@@ -473,7 +519,7 @@ export class EvidenceBoundWriteSetResolver {
           if ((change.integration?.required === true || integrators.length > 0) &&
               !integrators.some((other) => other.action !== "delete" && intrinsicallyEligible.has(normalizeRepoPath(other.path)))) {
             intrinsicallyEligible.delete(normPath);
-            rejectionReasons.set(normPath, "REJECT_INTEGRATION_DEPENDENCY: Required integrating change is not independently authorized");
+            reject(normPath, "REJECT_INTEGRATION_DEPENDENCY", "REJECT_INTEGRATION_DEPENDENCY: Required integrating change is not independently authorized");
             fixedPointChanged = true;
             continue;
           }
@@ -494,11 +540,12 @@ export class EvidenceBoundWriteSetResolver {
           }
 
           if (rejectedDependencyPath) {
-            const depReason = rejectionReasons.get(normalizeRepoPath(rejectedDependencyPath)) || "unapproved";
+            const dependencyRejection = rejectionReasons.get(normalizeRepoPath(rejectedDependencyPath));
+            const depReason = dependencyRejection?.reason || "unapproved";
             const reason = `REJECT_DEPENDENCY: Required dependency '${rejectedDependencyPath}' was rejected (${depReason})`;
             console.log(`[WRITE_AUTH] candidate="${normPath}" decision=REJECT reason=${reason}`);
             intrinsicallyEligible.delete(normPath);
-            rejectionReasons.set(normPath, reason);
+            reject(normPath, "REJECT_DEPENDENCY", reason);
             fixedPointChanged = true;
             continue;
           }
@@ -512,7 +559,7 @@ export class EvidenceBoundWriteSetResolver {
           const missingCleanup = incoming.find((file) => !intrinsicallyEligible.has(file));
           if (missingCleanup) {
             intrinsicallyEligible.delete(normPath);
-            rejectionReasons.set(normPath, `REJECT_DEPENDENCY: Required importer cleanup '${missingCleanup}' is not independently authorized`);
+            reject(normPath, "REJECT_DEPENDENCY", `REJECT_DEPENDENCY: Required importer cleanup '${missingCleanup}' is not independently authorized`);
             fixedPointChanged = true;
             continue;
           }
@@ -531,9 +578,15 @@ export class EvidenceBoundWriteSetResolver {
     for (const change of proposedChanges) {
       const normPath = normalizeRepoPath(change.path);
       if (!intrinsicallyEligible.has(normPath)) {
+        const rejection = rejectionReasons.get(normPath) || {
+          reasonCode: "UNCLASSIFIED_AUTHORIZATION_FAILURE" as const,
+          reason: "Failed dependency closure or write authorization",
+        };
         rejectedPaths.push({
           path: normPath,
-          reason: rejectionReasons.get(normPath) || "Failed dependency closure or write authorization",
+          action: change.action,
+          reasonCode: rejection.reasonCode,
+          reason: rejection.reason,
         });
       }
     }

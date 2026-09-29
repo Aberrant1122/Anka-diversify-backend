@@ -1,3 +1,5 @@
+import type { StagePlanningRecoveryRecord } from "../planning/PlanningFailureFacts";
+
 export type WorkingPlanStatus =
   | "ACTIVE"
   | "REVISION_REQUIRED"
@@ -18,6 +20,7 @@ export interface WorkingPlanSnapshot {
   readonly advisoryHypothesis?: string;
   readonly revisionReason?: string;
   readonly lastFailure?: WorkingPlanFailure;
+  readonly planningRecoveryHistory?: readonly StagePlanningRecoveryRecord[];
   readonly authority: "ADVISORY_ONLY_NO_FILESYSTEM_AUTHORITY";
 }
 
@@ -29,6 +32,10 @@ function requireText(value: string, field: string): string {
 function freeze(snapshot: WorkingPlanSnapshot): WorkingPlanSnapshot {
   Object.freeze(snapshot.advisoryStageIds);
   if (snapshot.lastFailure) Object.freeze(snapshot.lastFailure);
+  if (snapshot.planningRecoveryHistory) {
+    snapshot.planningRecoveryHistory.forEach(Object.freeze);
+    Object.freeze(snapshot.planningRecoveryHistory);
+  }
   return Object.freeze(snapshot);
 }
 
@@ -92,6 +99,19 @@ export class WorkingPlan {
     return this.copy({ status: "BLOCKED" });
   }
 
+  public withPlanningRecovery(record: StagePlanningRecoveryRecord): WorkingPlan {
+    const history = [...(this.value.planningRecoveryHistory || []), record];
+    const failureKinds = record.failureFacts.map((f) => f.kind);
+    const kindsDesc = failureKinds.length > 0 ? failureKinds.join(", ") : "planning validation";
+    return this.copy({
+      planningRecoveryHistory: history,
+      revision: this.value.revision + 1,
+      status: "ACTIVE",
+      revisionReason: `Planning attempt ${record.attemptNumber} for stage ${record.stageId} failed (${kindsDesc}). Reinvestigation and revised plan required.`,
+      lastFailure: undefined,
+    });
+  }
+
   public snapshot(): WorkingPlanSnapshot {
     return this.value;
   }
@@ -101,6 +121,9 @@ export class WorkingPlan {
       ...this.value,
       ...changes,
       advisoryStageIds: Object.freeze([...(changes.advisoryStageIds ?? this.value.advisoryStageIds)]),
+      planningRecoveryHistory: changes.planningRecoveryHistory
+        ? Object.freeze([...changes.planningRecoveryHistory])
+        : this.value.planningRecoveryHistory,
       ...(changes.lastFailure === undefined && "lastFailure" in changes
         ? { lastFailure: undefined }
         : this.value.lastFailure

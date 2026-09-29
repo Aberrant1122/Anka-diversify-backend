@@ -93,6 +93,7 @@ describe("AgentPipeline Real Transaction Integration Tests (Phase A)", () => {
         executionMemory: { inspectedFiles: new Set(["src/index.ts"]) },
         finalConfidence: 0.9,
         searchSummary: "ok",
+        investigationReadiness: { readyToPlan: true, missingEvidenceKinds: [], missingTargets: [], inspectedPaths: ["src/index.ts"] },
       } as any;
     });
 

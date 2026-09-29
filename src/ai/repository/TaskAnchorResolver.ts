@@ -1,11 +1,12 @@
 import { authoritySnapshot, withAuthoritySnapshot } from "./AuthorityWorktree";
-import { trustedUserRequest } from "./TrustedTaskContext";
+import { trustedUserRequest, trustedStageAuthorizationContext } from "./TrustedTaskContext";
 import { TaskIntentSpec } from "../shared/TaskIntentSpec";
 import { RepositoryEvidenceStore } from "./RepositoryEvidenceStore";
 import { RepositoryObservationTools } from "./RepositoryObservation";
 import { describeFrameworkRoute, selectFrameworkRoutes, supportsStaticRouteDiscovery } from "./FrameworkRouteMatcher";
 import { isExistingPrimaryUIRefinement, detectPrimaryActiveEntryPoint } from "../planning/RepositoryArchitectureDetector";
 import { discoverStaticApiRegistrations, isApiArchitectureTask, routeResourceTokens, taskWordTokens, testExercisesRoute } from "./StaticApiArchitecture";
+import { authenticatedConstructiveClause } from "../contracts/ConstructiveCapabilityEnvelope";
 
 export interface ResolvedRuntimeRouteAnchor {
   readonly runtimeRoute: string;
@@ -23,7 +24,7 @@ export interface TaskAnchorResolution {
 }
 
 function taskText(intentSpec: TaskIntentSpec): string {
-  return trustedUserRequest(intentSpec) ?? "";
+  return trustedStageAuthorizationContext(intentSpec) ?? trustedUserRequest(intentSpec) ?? "";
 }
 
 export function isConstructiveFeatureRequest(intentSpec: TaskIntentSpec): boolean {
@@ -36,15 +37,12 @@ export function isConstructiveFeatureRequest(intentSpec: TaskIntentSpec): boolea
   ) {
     return false;
   }
-  const request = trustedUserRequest(intentSpec);
-  if (!request) return false;
+  const clause = authenticatedConstructiveClause(intentSpec);
+  if (!clause) return false;
+  const request = clause.sourceText;
 
   if (isExistingPrimaryUIRefinement(request)) return false;
-
-  const text = `${request} ${intentSpec.goal || ""}`;
-  const hasConstructiveKeywords = /\b(add|create|implement|build|introduce|new)\b.*\b(list|task|component|widget|page|view|panel|modal|item|element|screen)\b/i.test(text);
-
-  return hasConstructiveKeywords;
+  return clause.operation === "CREATE" && clause.entityTokens.length > 0;
 }
 
 export class TaskAnchorResolver {
@@ -52,7 +50,8 @@ export class TaskAnchorResolver {
     intentSpec: TaskIntentSpec,
     files: ReadonlyMap<string, string>,
   ): string | null {
-    if (intentSpec.destructive || !isExistingPrimaryUIRefinement(taskText(intentSpec))) return null;
+    const isUi = isExistingPrimaryUIRefinement(trustedUserRequest(intentSpec) ?? "") || isExistingPrimaryUIRefinement(trustedStageAuthorizationContext(intentSpec) ?? "");
+    if (intentSpec.destructive || !isUi) return null;
 
     const bootstrapPattern = /^(?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?(?:main|index)\.[cm]?[jt]sx?$/i;
     const mountPattern = /(?:\bcreateRoot\s*\(|\bReactDOM\.render\s*\(|\bcreateApp\s*\([^)]*\)\.mount\s*\(|\bnew\s+Vue\s*\()/;
@@ -125,8 +124,35 @@ export class TaskAnchorResolver {
           input.repositoryId,
           input.workspaceRoot,
           detectedEntryPoint,
-        );
-        if (receipt && input.evidenceStore.recordObservation(receipt)) uiAnchors.push(detectedEntryPoint);
+      );
+        if (receipt && input.evidenceStore.recordObservation(receipt)) {
+          uiAnchors.push(detectedEntryPoint);
+        } else {
+          const integrationReceipt = RepositoryObservationTools.observeArchitectureIntegrationAnchor(
+            input.repositoryId,
+            input.workspaceRoot,
+            detectedEntryPoint,
+          );
+          if (integrationReceipt && input.evidenceStore.recordObservation(integrationReceipt)) {
+            apiAnchors.push(detectedEntryPoint);
+          }
+        }
+      } else {
+        const integrationCandidates = filesToCheck
+          .filter((filePath) => /(?:^|\/)(?:src\/)?(?:index|server)\.[cm]?[jt]s$/i.test(filePath))
+          .map((filePath) => ({
+            filePath,
+            receipt: RepositoryObservationTools.observeArchitectureIntegrationAnchor(
+              input.repositoryId,
+              input.workspaceRoot!,
+              filePath,
+            ),
+          }))
+          .filter((candidate) => candidate.receipt !== null);
+        if (integrationCandidates.length === 1) {
+          const selected = integrationCandidates[0];
+          if (input.evidenceStore.recordObservation(selected.receipt!)) apiAnchors.push(selected.filePath);
+        }
       }
     }
 
