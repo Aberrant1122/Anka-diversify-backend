@@ -150,6 +150,54 @@ describe("Requirements gateway metadata and correction", () => {
     expect(JSON.stringify(secondRequest.messages)).not.toContain("semantic code changes");
   });
 
+  test("records ordered transport retry metadata from the actual gateway sequence", async () => {
+    const networkError = Object.assign(new Error("network error"), { code: "ECONNRESET" });
+    const create = jest.fn()
+      .mockRejectedValueOnce(networkError)
+      .mockResolvedValueOnce(response({
+        content: '{"ok":true}',
+        id: "chatcmpl-after-transport-retry",
+        requestId: "req-after-transport-retry",
+        finishReason: "stop",
+        usage: { prompt_tokens: 21, completion_tokens: 8, total_tokens: 29 },
+      }));
+    const client = { chat: { completions: { create } } } as unknown as OpenAI;
+
+    const result = await new LLMGateway().callStructured<{ ok: boolean }>({
+      stage: PipelineStages.ROADMAP_PLANNING,
+      messages: [{ role: "user", content: "requirements" }],
+      schema: { name: "requirements", validate: (parsed) => ({ valid: true, data: parsed as { ok: boolean } }) },
+      maxRetries: 1,
+      retryDelayMs: 0,
+      openaiClient: client,
+    });
+
+    expect(result.providerAttempts).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        kind: "initial",
+        providerRequestId: null,
+        providerResponseId: null,
+        finishReason: null,
+        usageSource: "unavailable",
+        latencyMs: expect.any(Number),
+      }),
+      expect.objectContaining({
+        attemptNumber: 2,
+        kind: "transport_retry",
+        providerRequestId: "req-after-transport-retry",
+        providerResponseId: "chatcmpl-after-transport-retry",
+        finishReason: "stop",
+        promptTokens: 21,
+        completionTokens: 8,
+        totalTokens: 29,
+        usageSource: "provider",
+        latencyMs: expect.any(Number),
+      }),
+    ]);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
   test("preserves sanitized provider attempts when structured repair also fails", async () => {
     const { client, create } = clientWithResponses([
       response({

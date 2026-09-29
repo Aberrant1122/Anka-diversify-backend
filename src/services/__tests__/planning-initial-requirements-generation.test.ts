@@ -9,6 +9,7 @@ import {
 } from "../../ai/gateway/LLMGateway";
 import { LLMTimeoutError } from "../../ai/gateway/LLMError";
 import { PipelineStages } from "../../ai/gateway/PipelineStage";
+import { PlanningDomainError } from "../../planning/planning-errors";
 import { REQUIREMENTS_INPUT_LIMITS } from "../../planning/requirements-run-config";
 import { RequirementsContent } from "../../planning/requirements-schema";
 import {
@@ -159,6 +160,18 @@ class TransactionAFailureRunService extends PlanningRequirementsRunService {
     _input: Parameters<PlanningRequirementsRunService["startRequirementsRun"]>[0],
   ): ReturnType<PlanningRequirementsRunService["startRequirementsRun"]> {
     throw new Error("sensitive database host and query text");
+  }
+}
+
+class ConcurrentFinalizationRunService extends PlanningRequirementsRunService {
+  override async finalizeInitialGeneration(
+    _input: Parameters<PlanningRequirementsRunService["finalizeInitialGeneration"]>[0],
+  ): ReturnType<PlanningRequirementsRunService["finalizeInitialGeneration"]> {
+    throw new PlanningDomainError(
+      "PLANNING_CONCURRENT_UPDATE",
+      "Initial Requirements generation could not be finalized because planning state changed concurrently.",
+      409,
+    );
   }
 }
 
@@ -412,6 +425,62 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
     expect(result.run.costUSD).toBeNull();
   });
 
+  test("aggregates the supported transport-retry attempt sequence without fabricating failed-attempt usage", async () => {
+    const projectId = await createProject();
+    const gateway = new FakeRequirementsGateway(requirements("transport retry"), {
+      providerAttempts: [
+        {
+          attemptNumber: 1,
+          kind: "initial",
+          providerResponseId: null,
+          providerRequestId: null,
+          model: "gpt-4o",
+          finishReason: null,
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          usageSource: "unavailable",
+          latencyMs: 7,
+        },
+        {
+          attemptNumber: 2,
+          kind: "transport_retry",
+          providerResponseId: "chatcmpl-transport-success",
+          providerRequestId: "req-transport-success",
+          model: "gpt-4o",
+          finishReason: "stop",
+          promptTokens: 90,
+          completionTokens: 40,
+          totalTokens: 130,
+          usageSource: "provider",
+          latencyMs: 11,
+        },
+      ],
+    });
+    const result = await service(gateway).generateInitialRequirements({
+      projectId,
+      actorId: ownerId,
+      idempotencyKey: "transport-retry-audit",
+      brief: "Retain transport retry audit.",
+    });
+    expect(result.run.modelUsage).toMatchObject({
+      attemptCount: 2,
+      usageSource: "partial_provider",
+      promptTokens: 90,
+      completionTokens: 40,
+      totalTokens: 130,
+      providerRequestId: "req-transport-success",
+      providerResponseId: "chatcmpl-transport-success",
+      finishReason: "stop",
+      latencyMs: 11,
+      attempts: [
+        expect.objectContaining({ attemptNumber: 1, kind: "initial", latencyMs: 7 }),
+        expect.objectContaining({ attemptNumber: 2, kind: "transport_retry", latencyMs: 11 }),
+      ],
+    });
+    expect(result.run.costUSD).toBeNull();
+  });
+
   test("does not apply fallback pricing to an unknown model with real provider usage", async () => {
     const projectId = await createProject();
     const result = await service(new FakeRequirementsGateway(requirements("unknown price"), {
@@ -649,6 +718,126 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
     });
   });
 
+  test("replays a recovered stale v1 run as a deterministic 409 without provider or artifact work", async () => {
+    const projectId = await createProject();
+    const runs = new PlanningRequirementsRunService(prisma);
+    const original = {
+      projectId,
+      actorId: ownerId,
+      operation: "INITIAL_GENERATION" as const,
+      idempotencyKey: "stale-v1-replay",
+      brief: "Abandoned v1 prompt run",
+    };
+    const abandoned = await runs.startRequirementsRun(original);
+    const manifest = structuredClone(abandoned.run.contextManifest) as Prisma.JsonObject;
+    manifest.promptVersion = "requirements-initial-generation-v1";
+    await prisma.workflowRun.update({
+      where: { id: abandoned.run.id },
+      data: { startedAt: new Date("2000-01-01T00:00:00.000Z"), contextManifest: manifest },
+    });
+    const recovery = await runs.startRequirementsRun({
+      ...original,
+      idempotencyKey: "stale-recovery-trigger",
+      brief: "Recover the expired lease",
+    });
+    const gateway = new FakeRequirementsGateway(requirements("must not run"));
+    await expect(service(gateway).generateInitialRequirements({
+      projectId,
+      actorId: ownerId,
+      idempotencyKey: original.idempotencyKey,
+      brief: original.brief,
+    })).rejects.toMatchObject({
+      code: "PLANNING_STALE_RUN_RECOVERED",
+      httpStatus: 409,
+      details: { runId: abandoned.run.id, reused: true },
+    });
+    expect(gateway.calls).toBe(0);
+    expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(0);
+    await runs.cancelRequirementsRun(projectId, recovery.run.id, {
+      code: "PLANNING_AUTHORIZATION_CHANGED", message: "Test cleanup cancellation.",
+    });
+  });
+
+  test("fails closed with a sanitized invariant for an unknown persisted replay code", async () => {
+    const projectId = await createProject();
+    const runs = new PlanningRequirementsRunService(prisma);
+    const input = {
+      projectId,
+      actorId: ownerId,
+      operation: "INITIAL_GENERATION" as const,
+      idempotencyKey: "corrupt-replay",
+      brief: "Corrupt terminal state",
+    };
+    const started = await runs.startRequirementsRun(input);
+    await prisma.$transaction([
+      prisma.workflowRun.update({
+        where: { id: started.run.id },
+        data: {
+          status: "failed",
+          completedAt: new Date(),
+          errorCode: "UNKNOWN_INTERNAL_CODE",
+          errorMessage: "sensitive stored database details",
+        },
+      }),
+      prisma.projectPhaseState.update({
+        where: { projectId_phase: { projectId, phase: "requirements" } },
+        data: { activeRunId: null, stateVersion: { increment: 1 } },
+      }),
+    ]);
+    const gateway = new FakeRequirementsGateway(requirements("must not run"));
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(service(gateway).generateInitialRequirements({
+        projectId,
+        actorId: ownerId,
+        idempotencyKey: input.idempotencyKey,
+        brief: input.brief,
+      })).rejects.toMatchObject({
+        code: "PLANNING_RUN_INVARIANT",
+        httpStatus: 500,
+        message: "The stored Requirements run cannot be replayed safely.",
+        details: { runId: started.run.id, reused: true },
+      });
+      expect(errorSpy).toHaveBeenCalledWith(
+        "Requirements run terminal replay invariant violated",
+        expect.objectContaining({ runId: started.run.id, storedCode: "UNKNOWN_INTERNAL_CODE", terminalStatus: "failed" }),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(gateway.calls).toBe(0);
+  });
+
+  test("classifies finalization retry exhaustion as a replayable concurrency conflict", async () => {
+    const projectId = await createProject();
+    const gateway = new FakeRequirementsGateway(requirements("concurrent finalization"));
+    const runs = new ConcurrentFinalizationRunService(prisma);
+    const generation = service(gateway, undefined, runs);
+    const input = {
+      projectId,
+      actorId: ownerId,
+      idempotencyKey: "concurrent-finalization",
+      brief: "Exercise terminal classification",
+    };
+    await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
+      code: "PLANNING_CONCURRENT_UPDATE",
+      httpStatus: 409,
+    });
+    await expect(prisma.workflowRun.findFirstOrThrow({ where: { projectId } })).resolves.toMatchObject({
+      status: "conflicted",
+      errorCode: "PLANNING_CONCURRENT_UPDATE",
+      outputArtifactId: null,
+      modelUsage: { attemptCount: 1 },
+    });
+    await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
+      code: "PLANNING_CONCURRENT_UPDATE",
+      httpStatus: 409,
+      details: { reused: true },
+    });
+    expect(gateway.calls).toBe(1);
+    expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(0);
+  });
+
   test("manual v1 created during the call remains current and no AI artifact survives", async () => {
     const projectId = await createProject();
     const artifacts = new PlanningArtifactService(prisma);
@@ -689,12 +878,14 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
         await prisma.projectMember.delete({ where: { projectId_userId: { projectId, userId: memberId } } });
       },
     });
-    await expect(service(gateway).generateInitialRequirements({
+    const generation = service(gateway);
+    const input = {
       projectId,
       actorId: memberId,
       idempotencyKey: "permission-race",
       brief: "Member begins generation.",
-    })).rejects.toMatchObject({ code: "PLANNING_PROJECT_NOT_FOUND" });
+    };
+    await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({ code: "PLANNING_PROJECT_NOT_FOUND" });
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(0);
     await expect(prisma.workflowRun.findFirstOrThrow({ where: { projectId } })).resolves.toMatchObject({
       status: "cancelled",
@@ -706,6 +897,13 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
     await expect(prisma.projectPhaseState.findUniqueOrThrow({
       where: { projectId_phase: { projectId, phase: "requirements" } },
     })).resolves.toMatchObject({ activeRunId: null, currentArtifactId: null });
+    await prisma.projectMember.create({ data: { projectId, userId: memberId } });
+    await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
+      code: "PLANNING_RUN_CANCELLED",
+      httpStatus: 409,
+      details: { reused: true },
+    });
+    expect(gateway.calls).toBe(1);
   });
 
   test("oversized canonical output creates no artifact and releases the lease", async () => {
@@ -724,17 +922,79 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
     })).resolves.toMatchObject({ activeRunId: null, currentArtifactId: null });
   });
 
+  test("rejects a repaired oversized canonical output, retains both attempts, and replays without provider work", async () => {
+    const projectId = await createProject();
+    const oversized = requirements("repaired oversized");
+    oversized.projectGoal = "x".repeat(REQUIREMENTS_INPUT_LIMITS.canonicalArtifactJsonBytes + 1);
+    const { gateway, create } = gatewayWithResponses([
+      gatewayResponse({
+        content: JSON.stringify({ projectGoal: "structurally incomplete" }),
+        id: "chatcmpl-invalid-before-oversize",
+        requestId: "req-invalid-before-oversize",
+        model: "gpt-4o",
+        usage: { prompt_tokens: 100, completion_tokens: 25, total_tokens: 125 },
+      }),
+      gatewayResponse({
+        content: JSON.stringify(oversized),
+        id: "chatcmpl-repaired-oversize",
+        requestId: "req-repaired-oversize",
+        model: "gpt-4o",
+        usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200 },
+      }),
+    ]);
+    const generation = service(gateway);
+    const input = {
+      projectId,
+      actorId: ownerId,
+      idempotencyKey: "repaired-oversized-output",
+      brief: "Repair once, then enforce the canonical output limit.",
+    };
+
+    await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
+      code: "PLANNING_AI_OUTPUT_TOO_LARGE",
+      httpStatus: 502,
+    });
+    const run = await prisma.workflowRun.findFirstOrThrow({ where: { projectId } });
+    expect(run).toMatchObject({ status: "failed", errorCode: "PLANNING_AI_OUTPUT_TOO_LARGE", outputArtifactId: null });
+    expect(run.modelUsage).toMatchObject({
+      attemptCount: 2,
+      promptTokens: 220,
+      completionTokens: 105,
+      totalTokens: 325,
+      attempts: [
+        expect.objectContaining({ attemptNumber: 1, kind: "initial", providerRequestId: "req-invalid-before-oversize" }),
+        expect.objectContaining({ attemptNumber: 2, kind: "structured_repair", providerRequestId: "req-repaired-oversize" }),
+      ],
+    });
+    await expect(prisma.projectPhaseState.findUniqueOrThrow({
+      where: { projectId_phase: { projectId, phase: "requirements" } },
+    })).resolves.toMatchObject({
+      activeRunId: null,
+      currentArtifactId: null,
+      currentApprovedArtifactId: null,
+      approvalCandidateArtifactId: null,
+    });
+    expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(0);
+    await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
+      code: "PLANNING_AI_OUTPUT_TOO_LARGE",
+      details: { runId: run.id, reused: true },
+    });
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
   test("Transaction B rollback removes an inserted artifact and never completes the run", async () => {
     const projectId = await createProject();
     const authorization = new PlanningAuthorizationService(prisma);
     const rollbackArtifacts = new RollbackArtifactService(prisma, authorization);
-    await expect(service(new FakeRequirementsGateway(requirements("rollback")), rollbackArtifacts)
-      .generateInitialRequirements({
-        projectId,
-        actorId: ownerId,
-        idempotencyKey: "rollback",
-        brief: "Force Transaction B rollback.",
-      })).rejects.toMatchObject({ code: "PLANNING_PERSISTENCE_FAILED" });
+    const gateway = new FakeRequirementsGateway(requirements("rollback"));
+    const generation = service(gateway, rollbackArtifacts);
+    const input = {
+      projectId,
+      actorId: ownerId,
+      idempotencyKey: "rollback",
+      brief: "Force Transaction B rollback.",
+    };
+    await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({ code: "PLANNING_PERSISTENCE_FAILED" });
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(0);
     await expect(prisma.projectPhaseState.findUniqueOrThrow({
       where: { projectId_phase: { projectId, phase: "requirements" } },
@@ -748,5 +1008,11 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       status: "failed",
       outputArtifactId: null,
     });
+    await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
+      code: "PLANNING_PERSISTENCE_FAILED",
+      httpStatus: 503,
+      details: { reused: true },
+    });
+    expect(gateway.calls).toBe(1);
   });
 });

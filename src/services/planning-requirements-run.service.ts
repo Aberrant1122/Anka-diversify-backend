@@ -19,7 +19,14 @@ import {
   RequirementsRevisionOperation,
   RevisionRequirementsContextPayload,
 } from "../planning/requirements-context";
-import { PlanningDomainError } from "../planning/planning-errors";
+import {
+  isPlanningDomainError,
+  PlanningDomainError,
+  RequirementsRunCancelledCode,
+  RequirementsRunConflictCode,
+  RequirementsRunFailedCode,
+  RequirementsRunPersistedFailureCode,
+} from "../planning/planning-errors";
 import {
   parseRequirementsContent,
   isRequirementsSectionKey,
@@ -44,8 +51,10 @@ const MAX_TRANSACTION_ATTEMPTS = 3;
 const TERMINAL_STATUSES = ["completed", "failed", "conflicted", "cancelled"] as const;
 export type RequirementsRunTerminalStatus = (typeof TERMINAL_STATUSES)[number];
 
-export interface RequirementsRunFailure {
-  code: string;
+export interface RequirementsRunFailure<
+  Code extends RequirementsRunPersistedFailureCode = RequirementsRunPersistedFailureCode,
+> {
+  code: Code;
   message: string;
   details?: Record<string, unknown>;
 }
@@ -333,8 +342,10 @@ export class PlanningRequirementsRunService {
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         return { ...result, context };
       } catch (error) {
-        if (isRetryable(error) && attempt < MAX_TRANSACTION_ATTEMPTS) continue;
-        throw error;
+        if (isPlanningDomainError(error)) throw error;
+        if (!isRetryable(error)) throw error;
+        if (attempt < MAX_TRANSACTION_ATTEMPTS) continue;
+        break;
       }
     }
     throw new PlanningDomainError("PLANNING_CONCURRENT_UPDATE", "Could not acquire the Requirements run lease.", 409);
@@ -347,7 +358,7 @@ export class PlanningRequirementsRunService {
   async failRequirementsRun(
     projectId: string,
     runId: string,
-    failure: RequirementsRunFailure,
+    failure: RequirementsRunFailure<RequirementsRunFailedCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<WorkflowRun> {
     return this.finish(projectId, runId, "failed", failure, audit);
@@ -356,7 +367,7 @@ export class PlanningRequirementsRunService {
   async markRequirementsRunConflicted(
     projectId: string,
     runId: string,
-    failure: RequirementsRunFailure,
+    failure: RequirementsRunFailure<RequirementsRunConflictCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<WorkflowRun> {
     return this.finish(projectId, runId, "conflicted", failure, audit);
@@ -365,7 +376,7 @@ export class PlanningRequirementsRunService {
   async cancelRequirementsRun(
     projectId: string,
     runId: string,
-    failure?: RequirementsRunFailure,
+    failure: RequirementsRunFailure<RequirementsRunCancelledCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<WorkflowRun> {
     return this.finish(projectId, runId, "cancelled", failure, audit);
@@ -623,14 +634,16 @@ export class PlanningRequirementsRunService {
           return { run: completedRun, artifact, readiness };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       } catch (error) {
-        if (isRetryable(error) && attempt < MAX_TRANSACTION_ATTEMPTS) continue;
-        throw error;
+        if (isPlanningDomainError(error)) throw error;
+        if (!isRetryable(error)) throw error;
+        if (attempt < MAX_TRANSACTION_ATTEMPTS) continue;
+        break;
       }
     }
     throw new PlanningDomainError(
-      "PLANNING_PERSISTENCE_FAILED",
-      "Initial Requirements generation could not be finalized.",
-      503,
+      "PLANNING_CONCURRENT_UPDATE",
+      "Initial Requirements generation could not be finalized because planning state changed concurrently.",
+      409,
     );
   }
 
@@ -864,14 +877,16 @@ export class PlanningRequirementsRunService {
           return { run: completedRun, artifact, readiness, diff };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       } catch (error) {
-        if (isRetryable(error) && attempt < MAX_TRANSACTION_ATTEMPTS) continue;
-        throw error;
+        if (isPlanningDomainError(error)) throw error;
+        if (!isRetryable(error)) throw error;
+        if (attempt < MAX_TRANSACTION_ATTEMPTS) continue;
+        break;
       }
     }
     throw new PlanningDomainError(
-      "PLANNING_PERSISTENCE_FAILED",
-      "Requirements revision could not be finalized.",
-      503,
+      "PLANNING_CONCURRENT_UPDATE",
+      "Requirements revision could not be finalized because planning state changed concurrently.",
+      409,
     );
   }
 

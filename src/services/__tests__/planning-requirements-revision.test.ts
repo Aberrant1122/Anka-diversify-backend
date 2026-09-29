@@ -369,7 +369,7 @@ describeIsolated("Checkpoint 1C-D1 Whole-Document Requirements Revision + Feedba
       expect(manifest.baseArtifact.id).toBe(v1.id);
       expect(manifest.baseArtifact.version).toBe(v1.version);
       expect(manifest.baseArtifact.hash).toBe(v1.contentHash);
-      expect(manifest.promptVersion).toBe("requirements-revision-v1");
+      expect(manifest.promptVersion).toBe("requirements-revision-v2");
     });
   });
 

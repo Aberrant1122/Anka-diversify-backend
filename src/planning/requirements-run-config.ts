@@ -1,10 +1,10 @@
 export const REQUIREMENTS_VERSIONS = Object.freeze({
   contextBuilder: "requirements-context-v1",
   canonicalSchema: 1,
-  prompt: "requirements-initial-generation-v1",
-  revisionPrompt: "requirements-revision-v1",
-  sectionRevisionPrompt: "requirements-section-revision-v1",
-  sectionRegenerationPrompt: "requirements-section-regeneration-v1",
+  prompt: "requirements-initial-generation-v2",
+  revisionPrompt: "requirements-revision-v2",
+  sectionRevisionPrompt: "requirements-section-revision-v2",
+  sectionRegenerationPrompt: "requirements-section-regeneration-v2",
   providerSchema: "requirements-provider-schema-v1",
 });
 

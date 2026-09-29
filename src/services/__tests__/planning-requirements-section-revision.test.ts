@@ -199,9 +199,9 @@ describeIsolated("Checkpoint 1C-D2 section Requirements revision and regeneratio
       operation: "SECTION_REVISION",
       targetSectionKey: "functionalRequirements",
       allowedSectionKeys: ["functionalRequirements", "acceptanceCriteria", "userStories"],
-      promptVersion: "requirements-section-revision-v1",
+      promptVersion: "requirements-section-revision-v2",
     });
-    expect(result.run.modelUsage).toMatchObject({ promptVersion: "requirements-section-revision-v1" });
+    expect(result.run.modelUsage).toMatchObject({ promptVersion: "requirements-section-revision-v2" });
     expect(gateway.lastOptions?.structuredRepair?.instructions).toContain("Target section: functionalRequirements");
     expect(JSON.stringify(gateway.lastOptions?.messages)).toContain("Cross-root reclassification is forbidden");
   });
@@ -219,7 +219,7 @@ describeIsolated("Checkpoint 1C-D2 section Requirements revision and regeneratio
 
     expect(result.artifact?.changeKind).toBe(ArtifactChangeKind.AI_SECTION_REGENERATION);
     expect(result.diff).toMatchObject({ changedRootSections: ["constraints"], addedIds: ["CON-002"], removedIds: ["CON-001"] });
-    expect(result.run.modelUsage).toMatchObject({ promptVersion: "requirements-section-regeneration-v1" });
+    expect(result.run.modelUsage).toMatchObject({ promptVersion: "requirements-section-regeneration-v2" });
     expect(JSON.stringify(gateway.lastOptions?.messages)).toContain("Rebuild the target section");
   });
 
@@ -308,7 +308,7 @@ describeIsolated("Checkpoint 1C-D2 section Requirements revision and regeneratio
     });
     const run = await prisma.workflowRun.findFirstOrThrow({ where: { projectId, idempotencyKey: { not: null } } });
     expect(run).toMatchObject({ status: "failed", errorCode: "PLANNING_SECTION_SCOPE_VIOLATION" });
-    expect(run.modelUsage).toMatchObject({ promptVersion: "requirements-section-revision-v1" });
+    expect(run.modelUsage).toMatchObject({ promptVersion: "requirements-section-revision-v2" });
     await expect(prisma.projectPhaseState.findUniqueOrThrow({
       where: { projectId_phase: { projectId, phase: "requirements" } },
     })).resolves.toMatchObject({ activeRunId: null, currentArtifactId: base.id });
@@ -338,7 +338,7 @@ describeIsolated("Checkpoint 1C-D2 section Requirements revision and regeneratio
     const run = await prisma.workflowRun.findFirstOrThrow({ where: { projectId } });
     const usage = run.modelUsage as Record<string, unknown>;
     expect(run).toMatchObject({ status: "failed", errorCode: "PLANNING_SECTION_SCOPE_VIOLATION" });
-    expect(usage).toMatchObject({ attemptCount: 2, promptVersion: "requirements-section-revision-v1" });
+    expect(usage).toMatchObject({ attemptCount: 2, promptVersion: "requirements-section-revision-v2" });
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(1);
   });
 
@@ -455,7 +455,9 @@ describeIsolated("Checkpoint 1C-D2 section Requirements revision and regeneratio
       projectId, actorId: ownerId, baseArtifactId: base.id, idempotencyKey: "lease-contender",
       operation: WorkflowOperation.SECTION_REGENERATION, targetSectionKey: "constraints", instruction: "Regenerate.",
     })).rejects.toMatchObject({ code: "PLANNING_GENERATION_IN_PROGRESS", httpStatus: 409 });
-    await runs.cancelRequirementsRun(projectId, first.run.id);
+    await runs.cancelRequirementsRun(projectId, first.run.id, {
+      code: "PLANNING_AUTHORIZATION_CHANGED", message: "Test cleanup cancellation.",
+    });
   });
 
   test("human successor race preserves the human artifact and terminalizes the section run with audit", async () => {
@@ -533,5 +535,35 @@ describeIsolated("Checkpoint 1C-D2 section Requirements revision and regeneratio
       where: { projectId_phase: { projectId, phase: "requirements" } },
     })).resolves.toMatchObject({ currentArtifactId: result.artifact?.id, currentApprovedArtifactId: base.id });
     expect(await prisma.phaseApproval.count({ where: { projectId } })).toBe(1);
+  });
+
+  test("clearing the last unresolved question makes the draft ready without approving it", async () => {
+    const projectId = await createProject();
+    const baseContent = requirements("unresolved-only-blocker");
+    const base = await seedV1(projectId, baseContent);
+    const output = structuredClone(baseContent);
+    output.unresolvedQuestions = [];
+
+    const result = await services(new CapturingGateway(output)).generation.reviseRequirements({
+      projectId,
+      actorId: ownerId,
+      baseArtifactId: base.id,
+      idempotencyKey: "ready-without-approval",
+      operation: "SECTION_REVISION",
+      targetSectionKey: "unresolvedQuestions",
+      instruction: "Clear the resolved question.",
+    });
+
+    expect(result.readiness).toMatchObject({ ready: true, blockers: [] });
+    expect(result.artifact).toMatchObject({ lifecycleStatus: "DRAFT", approved: false });
+    await expect(prisma.projectPhaseState.findUniqueOrThrow({
+      where: { projectId_phase: { projectId, phase: "requirements" } },
+    })).resolves.toMatchObject({
+      status: "in_progress",
+      currentArtifactId: result.artifact?.id,
+      currentApprovedArtifactId: null,
+      approvalCandidateArtifactId: null,
+    });
+    expect(await prisma.phaseApproval.count({ where: { projectId } })).toBe(0);
   });
 });

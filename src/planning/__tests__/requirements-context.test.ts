@@ -125,7 +125,7 @@ describe("PlanningRequirementsContextBuilder", () => {
     expect(result.manifest.targetSectionKey).toBe("usersAndActors");
     expect(result.manifest.allowedSectionKeys).toEqual(["usersAndActors", "userStories"]);
     expect(result.payload.allowedSectionKeys).toEqual(["usersAndActors", "userStories"]);
-    expect(result.payload.versions.prompt).toBe("requirements-section-revision-v1");
+    expect(result.payload.versions.prompt).toBe("requirements-section-revision-v2");
     expect(result.payload.baseArtifact.content).toEqual(content);
     expect(result.manifest).not.toHaveProperty("memory");
   });
