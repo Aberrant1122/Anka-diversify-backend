@@ -123,8 +123,35 @@ describe("PlanningRequirementsContextBuilder", () => {
     });
     expect(result.manifest.baseArtifact).toEqual({ id: "artifact-v3", version: 3, hash: "hash-v3" });
     expect(result.manifest.targetSectionKey).toBe("usersAndActors");
+    expect(result.manifest.allowedSectionKeys).toEqual(["usersAndActors", "userStories"]);
+    expect(result.payload.allowedSectionKeys).toEqual(["usersAndActors", "userStories"]);
+    expect(result.payload.versions.prompt).toBe("requirements-section-revision-v1");
     expect(result.payload.baseArtifact.content).toEqual(content);
     expect(result.manifest).not.toHaveProperty("memory");
+  });
+
+  test("section target and closure change the deterministic context hash", async () => {
+    const builder = new PlanningRequirementsContextBuilder(prismaMock().prisma);
+    const actors = await builder.buildRevision({
+      projectId: "project-1", actorId: "owner-1", operation: WorkflowOperation.SECTION_REVISION,
+      baseArtifactId: "artifact-v3", instruction: "Revise.", targetSectionKey: "usersAndActors",
+    });
+    const constraints = await builder.buildRevision({
+      projectId: "project-1", actorId: "owner-1", operation: WorkflowOperation.SECTION_REVISION,
+      baseArtifactId: "artifact-v3", instruction: "Revise.", targetSectionKey: "constraints",
+    });
+    expect(actors.contextHash).not.toBe(constraints.contextHash);
+    expect(constraints.manifest.allowedSectionKeys).toEqual(["constraints"]);
+  });
+
+  test.each([undefined, null, "", "unknown"])("rejects invalid section target %p before database reads", async (targetSectionKey) => {
+    const mock = prismaMock();
+    await expect(new PlanningRequirementsContextBuilder(mock.prisma).buildRevision({
+      projectId: "project-1", actorId: "owner-1", operation: WorkflowOperation.SECTION_REGENERATION,
+      baseArtifactId: "artifact-v3", instruction: "Regenerate.", targetSectionKey,
+    })).rejects.toMatchObject({ code: "PLANNING_INVALID_SECTION", httpStatus: 422 });
+    expect(mock.projectFind).not.toHaveBeenCalled();
+    expect(mock.artifactFind).not.toHaveBeenCalled();
   });
 
   test("manifest and payload exclude unrelated artifacts, decisions, credentials, chats, tasks, and repository context", async () => {

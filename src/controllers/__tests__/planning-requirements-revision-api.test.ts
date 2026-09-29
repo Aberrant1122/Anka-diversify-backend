@@ -84,18 +84,22 @@ describe("Requirements revision HTTP endpoint", () => {
   });
 
   test.each([
-    ["missing Idempotency-Key", { operation: "DOCUMENT_REVISION", instruction: "Valid" }, undefined],
-    ["blank instruction", { operation: "DOCUMENT_REVISION", instruction: "   " }, "blank"],
-    ["invalid operation", { operation: "SECTION_REVISION", instruction: "Valid" }, "op-sec"],
-    ["initial gen operation", { operation: "INITIAL_GENERATION", instruction: "Valid" }, "op-init"],
-    ["supplied targetSectionKey", { operation: "DOCUMENT_REVISION", instruction: "Valid", targetSectionKey: "usersAndActors" }, "target-key"],
-    ["unknown body key", { operation: "DOCUMENT_REVISION", instruction: "Valid", arbitraryContext: "no" }, "unknown"],
-    ["title in body", { operation: "DOCUMENT_REVISION", instruction: "Valid", title: "Not accepted" }, "title"],
-    ["non-boolean includeMemory", { operation: "DOCUMENT_REVISION", instruction: "Valid", includeMemory: "yes" }, "memory-type"],
-  ])("rejects %s before invoking the service", async (_label, body, key) => {
+    ["missing Idempotency-Key", { operation: "DOCUMENT_REVISION", instruction: "Valid" }, undefined, "PLANNING_ARTIFACT_INVALID"],
+    ["blank instruction", { operation: "DOCUMENT_REVISION", instruction: "   " }, "blank", "PLANNING_ARTIFACT_INVALID"],
+    ["missing section target", { operation: "SECTION_REVISION", instruction: "Valid" }, "op-sec", "PLANNING_INVALID_SECTION"],
+    ["null section target", { operation: "SECTION_REGENERATION", instruction: "Valid", targetSectionKey: null }, "null-sec", "PLANNING_INVALID_SECTION"],
+    ["blank section target", { operation: "SECTION_REVISION", instruction: "Valid", targetSectionKey: "   " }, "blank-sec", "PLANNING_INVALID_SECTION"],
+    ["unknown section target", { operation: "SECTION_REVISION", instruction: "Valid", targetSectionKey: "unknown" }, "unknown-sec", "PLANNING_INVALID_SECTION"],
+    ["initial gen operation", { operation: "INITIAL_GENERATION", instruction: "Valid" }, "op-init", "PLANNING_ARTIFACT_INVALID"],
+    ["target on DOCUMENT_REVISION", { operation: "DOCUMENT_REVISION", instruction: "Valid", targetSectionKey: "usersAndActors" }, "target-key", "PLANNING_INVALID_SECTION"],
+    ["target on FEEDBACK_APPLICATION", { operation: "FEEDBACK_APPLICATION", instruction: "Valid", targetSectionKey: "constraints" }, "feedback-target", "PLANNING_INVALID_SECTION"],
+    ["unknown body key", { operation: "DOCUMENT_REVISION", instruction: "Valid", arbitraryContext: "no" }, "unknown", "PLANNING_ARTIFACT_INVALID"],
+    ["title in body", { operation: "DOCUMENT_REVISION", instruction: "Valid", title: "Not accepted" }, "title", "PLANNING_ARTIFACT_INVALID"],
+    ["non-boolean includeMemory", { operation: "DOCUMENT_REVISION", instruction: "Valid", includeMemory: "yes" }, "memory-type", "PLANNING_ARTIFACT_INVALID"],
+  ])("rejects %s before invoking the service", async (_label, body, key, errorCode) => {
     const response = await post("artifact-v1", body, { idempotencyKey: key });
     expect(response.status).toBe(422);
-    expect(response.json).toMatchObject({ error: "PLANNING_ARTIFACT_INVALID" });
+    expect(response.json).toMatchObject({ error: errorCode });
     expect(revisionSpy).not.toHaveBeenCalled();
   });
 
@@ -119,6 +123,7 @@ describe("Requirements revision HTTP endpoint", () => {
       idempotencyKey: `idem-${status}`,
       operation: "DOCUMENT_REVISION",
       instruction: "Add measurable requirements.",
+      targetSectionKey: null,
       includeMemory: false,
     });
   });
@@ -139,8 +144,24 @@ describe("Requirements revision HTTP endpoint", () => {
       idempotencyKey: "idem-feedback",
       operation: "FEEDBACK_APPLICATION",
       instruction: "Address review notes.",
+      targetSectionKey: null,
       includeMemory: true,
     });
+  });
+
+  test.each(["SECTION_REVISION", "SECTION_REGENERATION"] as const)("accepts %s with a finite target", async (operation) => {
+    revisionSpy.mockResolvedValueOnce(result(201));
+    const response = await post("artifact-v1", {
+      operation,
+      targetSectionKey: "functionalRequirements",
+      instruction: "Update export requirements.",
+    }, { idempotencyKey: `idem-${operation}` });
+
+    expect(response.status).toBe(201);
+    expect(revisionSpy).toHaveBeenCalledWith(expect.objectContaining({
+      operation,
+      targetSectionKey: "functionalRequirements",
+    }));
   });
 
   test("translates PLANNING_REVISION_NO_CHANGES to HTTP 422", async () => {
@@ -167,6 +188,27 @@ describe("Requirements revision HTTP endpoint", () => {
 
     expect(response.status).toBe(409);
     expect(response.json).toMatchObject({ error: "PLANNING_ACTION_LOCKED" });
+  });
+
+  test("returns retry exhaustion as a sanitized stable planning error", async () => {
+    const marker = "RAW_PRISMA_SECRET_MARKER";
+    revisionSpy.mockRejectedValueOnce(new PlanningDomainError(
+      "PLANNING_CONCURRENT_UPDATE",
+      "Requirements changed concurrently; reload the current version and retry.",
+      409,
+    ));
+    const response = await post("artifact-v1", {
+      operation: "DOCUMENT_REVISION",
+      instruction: "Instruction",
+    }, { idempotencyKey: "retry-exhausted" });
+
+    expect(response.status).toBe(409);
+    expect(response.json).toEqual({
+      error: "PLANNING_CONCURRENT_UPDATE",
+      message: "Requirements changed concurrently; reload the current version and retry.",
+    });
+    expect(JSON.stringify(response.json)).not.toContain(marker);
+    expect(response.json).not.toHaveProperty("details");
   });
 
   test("translates unexpected errors to generic 500 error envelope", async () => {

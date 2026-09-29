@@ -1,5 +1,10 @@
 import { Request, Response } from "express";
 import { isPlanningDomainError, PlanningDomainError } from "../planning/planning-errors";
+import { validateRequirementsRevisionTarget } from "../planning/requirements-schema";
+import {
+  RequirementsRevisionOperation,
+  validateRevisionOperation,
+} from "../planning/requirements-revision-policy";
 import { PhaseService } from "../services/phase-service";
 
 const phaseService = new PhaseService();
@@ -84,8 +89,9 @@ function idempotencyKey(req: Request): string {
 }
 
 function revisionBody(req: Request): {
-  operation: "DOCUMENT_REVISION" | "FEEDBACK_APPLICATION";
+  operation: RequirementsRevisionOperation;
   instruction: string;
+  targetSectionKey: string | null;
   includeMemory: boolean;
 } {
   const body = req.body;
@@ -106,23 +112,17 @@ function revisionBody(req: Request): {
       { fields: unknown },
     );
   }
-  if (body.targetSectionKey !== undefined && body.targetSectionKey !== null) {
-    throw new PlanningDomainError(
-      "PLANNING_ARTIFACT_INVALID",
-      "targetSectionKey is not supported for whole-document revision.",
-      422,
-      { field: "targetSectionKey" },
-    );
-  }
   const operation = body.operation;
-  if (operation !== "DOCUMENT_REVISION" && operation !== "FEEDBACK_APPLICATION") {
+  if (typeof operation !== "string") {
     throw new PlanningDomainError(
       "PLANNING_ARTIFACT_INVALID",
-      "operation must be 'DOCUMENT_REVISION' or 'FEEDBACK_APPLICATION'.",
+      "A supported Requirements revision operation is required.",
       422,
       { operation },
     );
   }
+  validateRevisionOperation(operation);
+  const target = validateRequirementsRevisionTarget(operation, body.targetSectionKey);
   const instruction = body.instruction;
   if (typeof instruction !== "string" || !instruction.trim()) {
     throw new PlanningDomainError(
@@ -143,6 +143,7 @@ function revisionBody(req: Request): {
   return {
     operation,
     instruction: instruction.trim(),
+    targetSectionKey: target.targetSectionKey,
     includeMemory: body.includeMemory === true,
   };
 }
@@ -382,6 +383,7 @@ export class PhaseController {
         idempotencyKey: idempotencyKey(req),
         operation: body.operation,
         instruction: body.instruction,
+        targetSectionKey: body.targetSectionKey,
         includeMemory: body.includeMemory,
       });
       const { httpStatus, ...data } = result;

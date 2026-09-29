@@ -519,21 +519,49 @@ describeIsolated("Checkpoint 1C-D1 Whole-Document Requirements Revision + Feedba
 
       const gateway = new FakeRequirementsGateway(invalidContent);
       const { generation } = createServices(gateway);
+      const idempotencyKey = `idemp-${crypto.randomUUID()}`;
+      const request = {
+        projectId,
+        actorId: ownerId,
+        idempotencyKey,
+        baseArtifactId: v1.id,
+        operation: "DOCUMENT_REVISION" as const,
+        instruction: "Rename FR-002 ID to FR-999.",
+        includeMemory: false,
+      };
 
       await expect(
-        generation.reviseRequirements({
-          projectId,
-          actorId: ownerId,
-          idempotencyKey: `idemp-${crypto.randomUUID()}`,
-          baseArtifactId: v1.id,
-          operation: "DOCUMENT_REVISION",
-          instruction: "Rename FR-002 ID to FR-999.",
-          includeMemory: false,
-        }),
+        generation.reviseRequirements(request),
       ).rejects.toMatchObject({
         code: "PLANNING_ARTIFACT_INVALID",
         httpStatus: 422,
       });
+
+      expect(gateway.calls).toBe(1);
+      await expect(prisma.workflowRun.findMany({ where: { projectId } })).resolves.toEqual([
+        expect.objectContaining({
+          status: "failed",
+          errorCode: "PLANNING_ARTIFACT_INVALID",
+          outputArtifactId: null,
+        }),
+      ]);
+      await expect(prisma.phaseArtifact.count({ where: { projectId } })).resolves.toBe(1);
+      await expect(prisma.projectPhaseState.findUniqueOrThrow({
+        where: { projectId_phase: { projectId, phase: "requirements" } },
+      })).resolves.toMatchObject({ currentArtifactId: v1.id, activeRunId: null });
+
+      await expect(generation.reviseRequirements(request)).rejects.toMatchObject({
+        code: "PLANNING_ARTIFACT_INVALID",
+        httpStatus: 422,
+        details: expect.objectContaining({ reused: true }),
+      });
+
+      expect(gateway.calls).toBe(1);
+      await expect(prisma.workflowRun.count({ where: { projectId } })).resolves.toBe(1);
+      await expect(prisma.phaseArtifact.count({ where: { projectId } })).resolves.toBe(1);
+      await expect(prisma.projectPhaseState.findUniqueOrThrow({
+        where: { projectId_phase: { projectId, phase: "requirements" } },
+      })).resolves.toMatchObject({ currentArtifactId: v1.id, activeRunId: null });
     });
 
     test("allows modified same-concept entity to retain ID, and genuine new entity to get new ID", async () => {

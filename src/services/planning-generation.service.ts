@@ -13,7 +13,7 @@ import {
 } from "../ai/prompts/requirements";
 import {
   buildRevisionRequirementsMessages,
-  REQUIREMENTS_REVISION_STRUCTURED_REPAIR_POLICY,
+  buildRevisionRequirementsStructuredRepairPolicy,
 } from "../ai/prompts/requirements-revision";
 import { PlanningDomainError, PlanningErrorCode, isPlanningDomainError } from "../planning/planning-errors";
 import {
@@ -29,14 +29,12 @@ import {
   REQUIREMENTS_INPUT_LIMITS,
   REQUIREMENTS_PROMPT_VERSION,
   REQUIREMENTS_PROVIDER_SCHEMA_VERSION,
-  REQUIREMENTS_REVISION_PROMPT_VERSION,
 } from "../planning/requirements-run-config";
 import { parseRequirementsContent, RequirementsContent } from "../planning/requirements-schema";
 import {
   computeRequirementsDiff,
   isNoOpRequirementsRevision,
   RequirementsDeterministicDiff,
-  validateRevisionStableIds,
 } from "../planning/requirements-revision-policy";
 import { PlanningArtifactService } from "./planning-artifact.service";
 import { PlanningAuthorizationService } from "./planning-authorization.service";
@@ -71,8 +69,9 @@ export interface ReviseRequirementsInput {
   baseArtifactId: string;
   actorId: string;
   idempotencyKey: string;
-  operation: "DOCUMENT_REVISION" | "FEEDBACK_APPLICATION";
+  operation: "DOCUMENT_REVISION" | "FEEDBACK_APPLICATION" | "SECTION_REVISION" | "SECTION_REGENERATION";
   instruction: string;
+  targetSectionKey?: string | null;
   includeMemory?: boolean;
 }
 
@@ -111,7 +110,10 @@ const REPLAY_FAILURES: Readonly<Record<string, { code: PlanningErrorCode; status
   PLANNING_AI_TRUNCATED: { code: "PLANNING_AI_TRUNCATED", status: 502 },
   PLANNING_AI_OUTPUT_TOO_LARGE: { code: "PLANNING_AI_OUTPUT_TOO_LARGE", status: 502 },
   PLANNING_PERSISTENCE_FAILED: { code: "PLANNING_PERSISTENCE_FAILED", status: 503 },
+  PLANNING_ARTIFACT_INVALID: { code: "PLANNING_ARTIFACT_INVALID", status: 422 },
   PLANNING_REVISION_NO_CHANGES: { code: "PLANNING_REVISION_NO_CHANGES", status: 422 },
+  PLANNING_INVALID_SECTION: { code: "PLANNING_INVALID_SECTION", status: 422 },
+  PLANNING_SECTION_SCOPE_VIOLATION: { code: "PLANNING_SECTION_SCOPE_VIOLATION", status: 422 },
 });
 
 function actualLLMError(error: unknown): LLMError | null {
@@ -311,6 +313,7 @@ export class PlanningGenerationService {
         idempotencyKey: input.idempotencyKey,
         baseArtifactId: input.baseArtifactId,
         instruction: input.instruction,
+        targetSectionKey: input.targetSectionKey,
         includeMemory: input.includeMemory === true,
       });
     } catch (error) {
@@ -350,11 +353,13 @@ export class PlanningGenerationService {
       throw failure;
     }
 
+    const revisionContext = started.context.payload as RevisionRequirementsContextPayload;
+    const promptVersion = revisionContext.versions.prompt;
     let completion: LLMCallResult<RequirementsContent>;
     try {
       completion = await this.gateway.callStructured<RequirementsContent>({
         stage: PipelineStages.ROADMAP_PLANNING,
-        messages: buildRevisionRequirementsMessages(started.context.payload as RevisionRequirementsContextPayload),
+        messages: buildRevisionRequirementsMessages(revisionContext),
         schema: {
           name: "anka_requirements_revision",
           description: "Canonical revised Anka OS Requirements artifact",
@@ -362,7 +367,7 @@ export class PlanningGenerationService {
           strict: true,
           validate: validateGeneratedRequirements,
         },
-        structuredRepair: { instructions: REQUIREMENTS_REVISION_STRUCTURED_REPAIR_POLICY },
+        structuredRepair: { instructions: buildRevisionRequirementsStructuredRepairPolicy(revisionContext) },
         maxRetries: 1,
         context: { runId: started.run.id, projectId: input.projectId },
       });
@@ -372,12 +377,12 @@ export class PlanningGenerationService {
         input.projectId,
         started.run.id,
         planningError,
-        this.buildAuditForError(error, REQUIREMENTS_REVISION_PROMPT_VERSION),
+        this.buildAuditForError(error, promptVersion),
       );
       throw planningError;
     }
 
-    const audit = this.buildAudit(completion, REQUIREMENTS_REVISION_PROMPT_VERSION);
+    const audit = this.buildAudit(completion, promptVersion);
     let content: RequirementsContent;
     try {
       content = parseRequirementsContent(completion.content);
@@ -403,7 +408,7 @@ export class PlanningGenerationService {
       throw error;
     }
 
-    const baseContent = (started.context.payload as RevisionRequirementsContextPayload).baseArtifact.content;
+    const baseContent = revisionContext.baseArtifact.content;
     if (isNoOpRequirementsRevision(baseContent, content)) {
       const noChangesError = new PlanningDomainError(
         "PLANNING_REVISION_NO_CHANGES",
@@ -413,16 +418,6 @@ export class PlanningGenerationService {
       );
       await this.tryFailRun(input.projectId, started.run.id, noChangesError, audit);
       throw noChangesError;
-    }
-
-    try {
-      validateRevisionStableIds(baseContent, content);
-    } catch (error) {
-      if (isPlanningDomainError(error)) {
-        await this.tryFailRun(input.projectId, started.run.id, error, audit);
-        throw error;
-      }
-      throw error;
     }
 
     try {
@@ -444,7 +439,12 @@ export class PlanningGenerationService {
         await this.tryCancelRun(input.projectId, started.run.id, audit);
         throw error;
       }
-      if (isPlanningDomainError(error) && error.code === "PLANNING_REVISION_NO_CHANGES") {
+      if (isPlanningDomainError(error) && (
+        error.code === "PLANNING_REVISION_NO_CHANGES" ||
+        error.code === "PLANNING_SECTION_SCOPE_VIOLATION" ||
+        error.code === "PLANNING_INVALID_SECTION" ||
+        error.code === "PLANNING_ARTIFACT_INVALID"
+      )) {
         await this.tryFailRun(input.projectId, started.run.id, error, audit);
         throw error;
       }

@@ -80,6 +80,79 @@ export const REQUIREMENTS_ROOT_FIELDS = [
   "unresolvedQuestions",
 ] as const;
 
+export type RequirementsSectionKey = (typeof REQUIREMENTS_ROOT_FIELDS)[number];
+
+const REQUIREMENTS_SECTION_KEYS = new Set<string>(REQUIREMENTS_ROOT_FIELDS);
+
+export function isRequirementsSectionKey(value: unknown): value is RequirementsSectionKey {
+  return typeof value === "string" && REQUIREMENTS_SECTION_KEYS.has(value);
+}
+
+export function parseRequirementsSectionKey(value: unknown): RequirementsSectionKey {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!isRequirementsSectionKey(normalized)) {
+    throw new PlanningDomainError(
+      "PLANNING_INVALID_SECTION",
+      "targetSectionKey must identify a canonical Requirements root section.",
+      422,
+      { field: "targetSectionKey", allowedSections: REQUIREMENTS_ROOT_FIELDS },
+    );
+  }
+  return normalized;
+}
+
+export const REQUIREMENTS_SECTION_DEPENDENCY_CLOSURE = Object.freeze({
+  projectGoal: ["projectGoal"] as const,
+  problemStatement: ["problemStatement"] as const,
+  usersAndActors: ["usersAndActors", "userStories"] as const,
+  userStories: ["userStories", "acceptanceCriteria"] as const,
+  functionalRequirements: ["functionalRequirements", "acceptanceCriteria", "userStories"] as const,
+  nonFunctionalRequirements: ["nonFunctionalRequirements", "acceptanceCriteria", "userStories"] as const,
+  constraints: ["constraints"] as const,
+  integrations: ["integrations"] as const,
+  assumptions: ["assumptions"] as const,
+  acceptanceCriteria: ["acceptanceCriteria", "userStories"] as const,
+  outOfScope: ["outOfScope"] as const,
+  unresolvedQuestions: ["unresolvedQuestions"] as const,
+}) satisfies Readonly<Record<RequirementsSectionKey, readonly RequirementsSectionKey[]>>;
+
+export interface ValidatedRequirementsRevisionTarget {
+  targetSectionKey: RequirementsSectionKey | null;
+  allowedSectionKeys: readonly RequirementsSectionKey[] | null;
+}
+
+export function validateRequirementsRevisionTarget(
+  operation: string,
+  targetSectionKey: unknown,
+): ValidatedRequirementsRevisionTarget {
+  const isSectionOperation = operation === "SECTION_REVISION" || operation === "SECTION_REGENERATION";
+  const isWholeDocumentOperation = operation === "DOCUMENT_REVISION" || operation === "FEEDBACK_APPLICATION";
+  if (!isSectionOperation && !isWholeDocumentOperation) {
+    throw new PlanningDomainError(
+      "PLANNING_ARTIFACT_INVALID",
+      `Unsupported Requirements revision operation '${operation}'.`,
+      422,
+      { operation },
+    );
+  }
+  if (!isSectionOperation) {
+    if (targetSectionKey !== undefined && targetSectionKey !== null) {
+      throw new PlanningDomainError(
+        "PLANNING_INVALID_SECTION",
+        "targetSectionKey must be absent for a whole-document Requirements revision.",
+        422,
+        { operation, field: "targetSectionKey" },
+      );
+    }
+    return { targetSectionKey: null, allowedSectionKeys: null };
+  }
+  const target = parseRequirementsSectionKey(targetSectionKey);
+  return {
+    targetSectionKey: target,
+    allowedSectionKeys: REQUIREMENTS_SECTION_DEPENDENCY_CLOSURE[target],
+  };
+}
+
 const ROOT_KEYS = REQUIREMENTS_ROOT_FIELDS;
 
 function invalid(path: string, message: string): never {

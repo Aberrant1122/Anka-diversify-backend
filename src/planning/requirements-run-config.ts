@@ -3,6 +3,8 @@ export const REQUIREMENTS_VERSIONS = Object.freeze({
   canonicalSchema: 1,
   prompt: "requirements-initial-generation-v1",
   revisionPrompt: "requirements-revision-v1",
+  sectionRevisionPrompt: "requirements-section-revision-v1",
+  sectionRegenerationPrompt: "requirements-section-regeneration-v1",
   providerSchema: "requirements-provider-schema-v1",
 });
 
@@ -10,6 +12,8 @@ export const REQUIREMENTS_CONTEXT_BUILDER_VERSION = REQUIREMENTS_VERSIONS.contex
 export const REQUIREMENTS_CONTEXT_SCHEMA_VERSION = REQUIREMENTS_VERSIONS.canonicalSchema;
 export const REQUIREMENTS_PROMPT_VERSION = REQUIREMENTS_VERSIONS.prompt;
 export const REQUIREMENTS_REVISION_PROMPT_VERSION = REQUIREMENTS_VERSIONS.revisionPrompt;
+export const REQUIREMENTS_SECTION_REVISION_PROMPT_VERSION = REQUIREMENTS_VERSIONS.sectionRevisionPrompt;
+export const REQUIREMENTS_SECTION_REGENERATION_PROMPT_VERSION = REQUIREMENTS_VERSIONS.sectionRegenerationPrompt;
 export const REQUIREMENTS_PROVIDER_SCHEMA_VERSION = REQUIREMENTS_VERSIONS.providerSchema;
 
 const KIB = 1024;
