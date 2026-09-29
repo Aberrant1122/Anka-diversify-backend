@@ -1,0 +1,64 @@
+export type PlanningErrorCode =
+  | "PLANNING_PROJECT_NOT_FOUND"
+  | "PLANNING_FORBIDDEN"
+  | "PLANNING_OWNER_REQUIRED"
+  | "PLANNING_INVALID_PHASE"
+  | "PLANNING_INVALID_TRANSITION"
+  | "PLANNING_ACTION_LOCKED"
+  | "PLANNING_ARTIFACT_NOT_FOUND"
+  | "PLANNING_ARTIFACT_PROJECT_MISMATCH"
+  | "PLANNING_ARTIFACT_NOT_CURRENT"
+  | "PLANNING_ARTIFACT_NOT_CANDIDATE"
+  | "PLANNING_ARTIFACT_HASH_MISMATCH"
+  | "PLANNING_ARTIFACT_BASE_CHANGED"
+  | "PLANNING_ARTIFACT_INVALID"
+  | "PLANNING_INITIAL_ARTIFACT_EXISTS"
+  | "PLANNING_CONCURRENT_UPDATE"
+  | "PLANNING_COMMENTS_REQUIRED"
+  | "PLANNING_READINESS_BLOCKED"
+  | "PLANNING_BRIEF_REQUIRED"
+  | "PLANNING_INPUT_TOO_LARGE"
+  | "PLANNING_GENERATION_IN_PROGRESS"
+  | "PLANNING_IDEMPOTENCY_CONFLICT"
+  | "PLANNING_CONTEXT_CHANGED"
+  | "PLANNING_RUN_CANCELLED"
+  | "PLANNING_RUN_INVARIANT"
+  | "PLANNING_AI_TIMEOUT"
+  | "PLANNING_AI_NETWORK_ERROR"
+  | "PLANNING_AI_PROVIDER_ERROR"
+  | "PLANNING_AI_RATE_LIMITED"
+  | "PLANNING_AI_BUDGET_EXHAUSTED"
+  | "PLANNING_AI_CONTEXT_TOO_LARGE"
+  | "PLANNING_AI_INVALID_RESPONSE"
+  | "PLANNING_AI_REFUSED"
+  | "PLANNING_AI_CONTENT_FILTERED"
+  | "PLANNING_AI_TRUNCATED"
+  | "PLANNING_AI_OUTPUT_TOO_LARGE"
+  | "PLANNING_AUTHORIZATION_CHANGED"
+  | "PLANNING_PERSISTENCE_FAILED"
+  | "PLANNING_REVISION_NO_CHANGES"
+  | "PLANNING_AI_NOT_IMPLEMENTED"
+  | "PLANNING_ACTION_NOT_IMPLEMENTED";
+
+export class PlanningDomainError extends Error {
+  readonly code: PlanningErrorCode;
+  readonly httpStatus: number;
+  readonly details?: Record<string, unknown>;
+
+  constructor(
+    code: PlanningErrorCode,
+    message: string,
+    httpStatus: number,
+    details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "PlanningDomainError";
+    this.code = code;
+    this.httpStatus = httpStatus;
+    this.details = details;
+  }
+}
+
+export function isPlanningDomainError(error: unknown): error is PlanningDomainError {
+  return error instanceof PlanningDomainError;
+}
