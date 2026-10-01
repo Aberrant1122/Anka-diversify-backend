@@ -6,6 +6,13 @@ import { PlanningApprovalService } from "./planning-approval.service";
 import { PlanningArtifactService } from "./planning-artifact.service";
 import { PlanningAuthorizationService } from "./planning-authorization.service";
 import {
+  GenerateInitialDocumentationInput,
+  PlanningDocumentationGenerationService,
+} from "./planning-documentation-generation.service";
+import { PlanningDocumentationArtifactService } from "./planning-documentation-artifact.service";
+import { PlanningDocumentationReadinessService } from "./planning-documentation-readiness.service";
+import { PlanningDocumentationRunService } from "./planning-documentation-run.service";
+import {
   GenerateInitialRequirementsInput,
   PlanningGenerationService,
   ReviseRequirementsInput,
@@ -33,6 +40,7 @@ export class PhaseService {
   private readonly transitions: PlanningTransitionPolicy;
   private readonly requirementsRuns: PlanningRequirementsRunService;
   private readonly generation: PlanningGenerationService;
+  private readonly documentationGeneration: PlanningDocumentationGenerationService;
   private readonly aiService = AiService.getInstance();
 
   constructor(private readonly prisma: PrismaClient = new PrismaClient()) {
@@ -53,6 +61,19 @@ export class PhaseService {
       artifacts: this.artifacts,
       readiness: this.readiness,
       runs: this.requirementsRuns,
+    });
+    const documentationArtifacts = new PlanningDocumentationArtifactService(prisma, this.authorization);
+    const documentationReadiness = new PlanningDocumentationReadinessService();
+    const documentationRuns = new PlanningDocumentationRunService(prisma, {
+      authorization: this.authorization,
+      artifacts: documentationArtifacts,
+      readiness: documentationReadiness,
+    });
+    this.documentationGeneration = new PlanningDocumentationGenerationService(prisma, {
+      authorization: this.authorization,
+      artifacts: documentationArtifacts,
+      readiness: documentationReadiness,
+      runs: documentationRuns,
     });
   }
 
@@ -260,11 +281,11 @@ export class PhaseService {
 
   async runAutomatedPhase(projectId: string, phase: string, createdBy: string, brief?: string) {
     await this.authorization.assertCanEdit(projectId, createdBy);
-    if (phase === REQUIREMENTS_PHASE) {
+    if (phase === REQUIREMENTS_PHASE || phase === "documentation") {
       throw new PlanningDomainError(
-        "PLANNING_AI_NOT_IMPLEMENTED",
-        "Requirements AI generation begins in Checkpoint 1C.",
-        422,
+        "PLANNING_ACTION_LOCKED",
+        `${phase === REQUIREMENTS_PHASE ? "Requirements" : "Documentation"} uses its dedicated structured generation API.`,
+        409,
       );
     }
 
@@ -331,5 +352,9 @@ export class PhaseService {
 
   async reviseRequirements(input: ReviseRequirementsInput) {
     return this.generation.reviseRequirements(input);
+  }
+
+  async generateInitialDocumentation(input: GenerateInitialDocumentationInput) {
+    return this.documentationGeneration.generateInitial(input);
   }
 }

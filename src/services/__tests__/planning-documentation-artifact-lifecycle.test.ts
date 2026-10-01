@@ -18,6 +18,8 @@ import {
   hashOf,
   requirements,
 } from "./planning-documentation-test-fixtures";
+import { PlanningAuthorizationService } from "../planning-authorization.service";
+import { PlanningDocumentationArtifactService } from "../planning-documentation-artifact.service";
 
 const fixture = new DocumentationLifecycleFixture();
 beforeAll(() => fixture.start());
@@ -57,6 +59,31 @@ async function createInitial(
 }
 
 describe("Checkpoint 1B Documentation artifact persistence", () => {
+  test("authorizes initial creation inside the mutation transaction after membership revocation", async () => {
+    const projectId = await fixture.createProject(true);
+    const source = await fixture.approveRequirements(projectId, "revoked-editor");
+    const input = { projectId, actorId: fixture.memberId, title: "Documentation", structuredContent: documentationContent(source.artifact, source.content) };
+    const authorization = new PlanningAuthorizationService(fixture.prisma);
+    const staleAccess = await authorization.assertCanEdit(projectId, fixture.memberId);
+    const earlierCheck = jest.spyOn(authorization, "assertCanEdit").mockResolvedValue(staleAccess);
+    const transactionalCheck = jest.spyOn(authorization, "assertCanEditInTransaction");
+    const service = new PlanningDocumentationArtifactService(fixture.prisma, authorization);
+    const stateBefore = await fixture.prisma.projectPhaseState.findUniqueOrThrow({ where: { projectId_phase: { projectId, phase: "documentation" } } });
+    await fixture.prisma.projectMember.delete({ where: { projectId_userId: { projectId, userId: fixture.memberId } } });
+
+    await expect(service.createInitialArtifact(input)).rejects.toMatchObject({ code: "PLANNING_PROJECT_NOT_FOUND", httpStatus: 404 });
+    expect(transactionalCheck).toHaveBeenCalledTimes(1);
+    expect(earlierCheck).not.toHaveBeenCalled();
+    await expect(service.createInitialArtifact({ ...input, actorId: fixture.outsiderId })).rejects.toMatchObject({ code: "PLANNING_PROJECT_NOT_FOUND", httpStatus: 404 });
+    expect(await fixture.prisma.phaseArtifact.count({ where: { projectId, phase: "documentation" } })).toBe(0);
+    await expect(fixture.prisma.projectPhaseState.findUniqueOrThrow({ where: { projectId_phase: { projectId, phase: "documentation" } } })).resolves.toMatchObject({
+      currentArtifactId: stateBefore.currentArtifactId,
+      currentApprovedArtifactId: stateBefore.currentApprovedArtifactId,
+      approvalCandidateArtifactId: stateBefore.approvalCandidateArtifactId,
+      stateVersion: stateBefore.stateVersion,
+    });
+  });
+
   test("creates canonical immutable v1 and advances only the current pointer", async () => {
     const projectId = await fixture.createProject();
     const source = await fixture.approveRequirements(projectId, "initial");

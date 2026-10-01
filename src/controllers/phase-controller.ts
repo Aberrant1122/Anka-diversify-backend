@@ -80,12 +80,32 @@ function idempotencyKey(req: Request): string {
   if (!value?.trim()) {
     throw new PlanningDomainError(
       "PLANNING_ARTIFACT_INVALID",
-      "Idempotency-Key is required for Requirements AI operations.",
+      "Idempotency-Key is required for structured planning AI operations.",
       422,
       { field: "Idempotency-Key" },
     );
   }
   return value;
+}
+
+function documentationGenerationBody(req: Request): { includeMemory: boolean } {
+  const body = req.body === undefined ? {} : req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be an object.", 422);
+  }
+  const unknown = Object.keys(body).filter((key) => key !== "includeMemory");
+  if (unknown.length > 0) {
+    throw new PlanningDomainError(
+      "PLANNING_ARTIFACT_INVALID",
+      `Unknown initial Documentation generation fields: ${unknown.join(", ")}.`,
+      422,
+      { fields: unknown },
+    );
+  }
+  if (body.includeMemory !== undefined && typeof body.includeMemory !== "boolean") {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "includeMemory must be a boolean when provided.", 422, { field: "includeMemory" });
+  }
+  return { includeMemory: body.includeMemory === true };
 }
 
 function revisionBody(req: Request): {
@@ -368,6 +388,22 @@ export class PhaseController {
       res.status(httpStatus).json({ success: true, data });
     } catch (error) {
       respondError(res, error, "Failed to generate initial Requirements");
+    }
+  }
+
+  async generateInitialDocumentation(req: Request, res: Response) {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+      const body = documentationGenerationBody(req);
+      const result = await phaseService.generateInitialDocumentation({
+        projectId: param(req, "projectId"), actorId: userId,
+        idempotencyKey: idempotencyKey(req), includeMemory: body.includeMemory,
+      });
+      const { httpStatus, ...data } = result;
+      res.status(httpStatus).json({ success: true, data });
+    } catch (error) {
+      respondError(res, error, "Failed to generate initial Documentation");
     }
   }
 

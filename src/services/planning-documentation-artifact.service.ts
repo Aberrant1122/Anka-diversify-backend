@@ -98,40 +98,7 @@ export class PlanningDocumentationArtifactService {
   async createInitialArtifact(input: CreateInitialDocumentationArtifactInput): Promise<PhaseArtifact> {
     return this.withVersionRetry(() => this.prisma.$transaction(async (tx) => {
       await this.authorization.assertCanEditInTransaction(tx, input.projectId, input.actorId);
-      const content = await this.validateCanonicalContentInTransaction(tx, input.projectId, input.structuredContent);
-      const state = await tx.projectPhaseState.upsert({
-        where: { projectId_phase: { projectId: input.projectId, phase: DOCUMENTATION_PHASE } },
-        update: {},
-        create: { projectId: input.projectId, phase: DOCUMENTATION_PHASE },
-      });
-      this.assertAction(state.status, "create_initial_artifact");
-
-      const existing = await tx.phaseArtifact.findFirst({
-        where: { projectId: input.projectId, phase: DOCUMENTATION_PHASE, type: DOCUMENTATION_ARTIFACT_TYPE },
-        select: { id: true },
-      });
-      if (existing) {
-        throw new PlanningDomainError(
-          "PLANNING_INITIAL_ARTIFACT_EXISTS",
-          "Documentation already has an initial artifact; create a successor version instead.",
-          409,
-          { currentArtifactId: state.currentArtifactId ?? existing.id },
-        );
-      }
-
-      const changeKind = input.changeKind ?? ArtifactChangeKind.INITIAL_GENERATION;
-      this.assertChangeKind(changeKind, INITIAL_CHANGE_KINDS, "initial Documentation artifact");
-      const artifact = await this.createVersion(tx, {
-        projectId: input.projectId,
-        actorId: input.actorId,
-        title: input.title,
-        content,
-        version: 1,
-        previousVersionId: null,
-        basedOnArtifactId: null,
-        createdByType: input.createdByType ?? ArtifactActorType.HUMAN,
-        changeKind,
-      });
+      const { artifact, state } = await this.createInitialArtifactInTransaction(tx, input);
 
       const advanced = await tx.projectPhaseState.updateMany({
         where: { id: state.id, stateVersion: state.stateVersion, status: state.status },
@@ -146,6 +113,46 @@ export class PlanningDocumentationArtifactService {
       await tx.project.update({ where: { id: input.projectId }, data: { currentPhase: DOCUMENTATION_PHASE } });
       return artifact;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+  }
+
+  /** Transaction-aware primitive shared by synchronous creation and WorkflowRun finalization. */
+  async createInitialArtifactInTransaction(
+    tx: Prisma.TransactionClient,
+    input: CreateInitialDocumentationArtifactInput,
+  ): Promise<{ artifact: PhaseArtifact; state: ProjectPhaseState }> {
+    const content = await this.validateCanonicalContentInTransaction(tx, input.projectId, input.structuredContent);
+    const state = await tx.projectPhaseState.upsert({
+      where: { projectId_phase: { projectId: input.projectId, phase: DOCUMENTATION_PHASE } },
+      update: {},
+      create: { projectId: input.projectId, phase: DOCUMENTATION_PHASE },
+    });
+    this.assertAction(state.status, "create_initial_artifact");
+    const existing = await tx.phaseArtifact.findFirst({
+      where: { projectId: input.projectId, phase: DOCUMENTATION_PHASE, type: DOCUMENTATION_ARTIFACT_TYPE },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new PlanningDomainError(
+        "PLANNING_INITIAL_ARTIFACT_EXISTS",
+        "Documentation already has an initial artifact; create a successor version instead.",
+        409,
+        { currentArtifactId: state.currentArtifactId ?? existing.id },
+      );
+    }
+    const changeKind = input.changeKind ?? ArtifactChangeKind.INITIAL_GENERATION;
+    this.assertChangeKind(changeKind, INITIAL_CHANGE_KINDS, "initial Documentation artifact");
+    const artifact = await this.createVersion(tx, {
+      projectId: input.projectId,
+      actorId: input.actorId,
+      title: input.title,
+      content,
+      version: 1,
+      previousVersionId: null,
+      basedOnArtifactId: null,
+      createdByType: input.createdByType ?? ArtifactActorType.HUMAN,
+      changeKind,
+    });
+    return { artifact, state };
   }
 
   async createSuccessorVersion(input: CreateDocumentationSuccessorInput): Promise<PhaseArtifact> {

@@ -31,6 +31,12 @@ router.post(
   phaseController.generateInitialRequirements.bind(phaseController),
 );
 
+// POST   /api/projects/:projectId/phases/documentation/artifacts/generate
+router.post(
+  "/documentation/artifacts/generate",
+  phaseController.generateInitialDocumentation.bind(phaseController),
+);
+
 // POST   /api/projects/:projectId/phases/requirements/artifacts/:artifactId/revisions
 router.post(
   "/requirements/artifacts/:artifactId/revisions",
