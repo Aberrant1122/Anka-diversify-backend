@@ -8,6 +8,7 @@ import { PlanningAuthorizationService } from "./planning-authorization.service";
 import {
   GenerateInitialDocumentationInput,
   PlanningDocumentationGenerationService,
+  ReviseDocumentationInput,
 } from "./planning-documentation-generation.service";
 import { PlanningDocumentationArtifactService } from "./planning-documentation-artifact.service";
 import { PlanningDocumentationReadinessService } from "./planning-documentation-readiness.service";
@@ -356,5 +357,9 @@ export class PhaseService {
 
   async generateInitialDocumentation(input: GenerateInitialDocumentationInput) {
     return this.documentationGeneration.generateInitial(input);
+  }
+
+  async reviseDocumentation(input: ReviseDocumentationInput) {
+    return this.documentationGeneration.reviseDocumentation(input);
   }
 }

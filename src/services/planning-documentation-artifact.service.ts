@@ -158,56 +158,7 @@ export class PlanningDocumentationArtifactService {
   async createSuccessorVersion(input: CreateDocumentationSuccessorInput): Promise<PhaseArtifact> {
     return this.withVersionRetry(() => this.prisma.$transaction(async (tx) => {
       await this.authorization.assertCanEditInTransaction(tx, input.projectId, input.actorId);
-      const content = await this.validateCanonicalContentInTransaction(tx, input.projectId, input.structuredContent);
-      const state = await tx.projectPhaseState.findUnique({
-        where: { projectId_phase: { projectId: input.projectId, phase: DOCUMENTATION_PHASE } },
-      });
-      if (!state) {
-        throw new PlanningDomainError("PLANNING_ARTIFACT_NOT_FOUND", "Documentation has no current artifact to revise.", 404);
-      }
-      this.assertAction(state.status, "create_revision");
-
-      const base = await tx.phaseArtifact.findUnique({ where: { id: input.baseArtifactId } });
-      this.assertDocumentationArtifactScope(base, input.projectId);
-      if (state.currentArtifactId !== base.id || base.contentHash !== input.baseContentHash) {
-        throw new PlanningDomainError(
-          "PLANNING_ARTIFACT_BASE_CHANGED",
-          "The Documentation base artifact is no longer current.",
-          409,
-          { expectedBaseArtifactId: input.baseArtifactId, currentArtifactId: state.currentArtifactId },
-        );
-      }
-      await this.validatePersistedArtifactInTransaction(tx, input.projectId, base, {
-        expectedHash: input.baseContentHash,
-        requireCurrentRequirements: false,
-      });
-      const latest = await tx.phaseArtifact.findFirst({
-        where: { projectId: input.projectId, phase: DOCUMENTATION_PHASE, type: DOCUMENTATION_ARTIFACT_TYPE },
-        orderBy: [{ version: "desc" }, { id: "desc" }],
-        select: { id: true, version: true },
-      });
-      if (!latest || latest.id !== base.id) {
-        throw new PlanningDomainError(
-          "PLANNING_ARTIFACT_BASE_CHANGED",
-          "A newer Documentation version already exists.",
-          409,
-          { expectedBaseArtifactId: base.id, latestArtifactId: latest?.id },
-        );
-      }
-
-      const changeKind = input.changeKind ?? ArtifactChangeKind.MANUAL_EDIT;
-      this.assertChangeKind(changeKind, SUCCESSOR_CHANGE_KINDS, "Documentation successor");
-      const artifact = await this.createVersion(tx, {
-        projectId: input.projectId,
-        actorId: input.actorId,
-        title: input.title ?? base.title,
-        content,
-        version: latest.version + 1,
-        previousVersionId: base.id,
-        basedOnArtifactId: base.id,
-        createdByType: input.createdByType ?? ArtifactActorType.HUMAN,
-        changeKind,
-      });
+      const { artifact, base, state } = await this.createSuccessorVersionInTransaction(tx, input);
 
       const advanced = await tx.projectPhaseState.updateMany({
         where: { id: state.id, stateVersion: state.stateVersion, currentArtifactId: base.id },
@@ -224,6 +175,66 @@ export class PlanningDocumentationArtifactService {
       return artifact;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
   }
+
+  /** Transaction-aware primitive used by manual creation and WorkflowRun revision finalization. */
+  async createSuccessorVersionInTransaction(
+    tx: Prisma.TransactionClient,
+    input: CreateDocumentationSuccessorInput,
+  ): Promise<{ artifact: PhaseArtifact; base: PhaseArtifact; state: ProjectPhaseState; latest: { id: string; version: number } }> {
+    const content = await this.validateCanonicalContentInTransaction(tx, input.projectId, input.structuredContent);
+    const state = await tx.projectPhaseState.findUnique({
+      where: { projectId_phase: { projectId: input.projectId, phase: DOCUMENTATION_PHASE } },
+    });
+    if (!state) {
+      throw new PlanningDomainError("PLANNING_ARTIFACT_NOT_FOUND", "Documentation has no current artifact to revise.", 404);
+    }
+    this.assertAction(state.status, "create_revision");
+
+    const base = await tx.phaseArtifact.findUnique({ where: { id: input.baseArtifactId } });
+    this.assertDocumentationArtifactScope(base, input.projectId);
+    if (state.currentArtifactId !== base.id || base.contentHash !== input.baseContentHash) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_BASE_CHANGED",
+        "The Documentation base artifact is no longer current.",
+        409,
+        { expectedBaseArtifactId: input.baseArtifactId, currentArtifactId: state.currentArtifactId },
+      );
+    }
+    await this.validatePersistedArtifactInTransaction(tx, input.projectId, base, {
+      expectedHash: input.baseContentHash,
+      requireCurrentRequirements: false,
+    });
+    const latest = await tx.phaseArtifact.findFirst({
+      where: { projectId: input.projectId, phase: DOCUMENTATION_PHASE, type: DOCUMENTATION_ARTIFACT_TYPE },
+      orderBy: [{ version: "desc" }, { id: "desc" }],
+      select: { id: true, version: true },
+    });
+    if (!latest || latest.id !== base.id) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_BASE_CHANGED",
+        "A newer Documentation version already exists.",
+        409,
+        { expectedBaseArtifactId: base.id, latestArtifactId: latest?.id },
+      );
+    }
+
+    const changeKind = input.changeKind ?? ArtifactChangeKind.MANUAL_EDIT;
+    this.assertChangeKind(changeKind, SUCCESSOR_CHANGE_KINDS, "Documentation successor");
+    const artifact = await this.createVersion(tx, {
+      projectId: input.projectId,
+      actorId: input.actorId,
+      title: input.title ?? base.title,
+      content,
+      version: latest.version + 1,
+      previousVersionId: base.id,
+      basedOnArtifactId: base.id,
+      createdByType: input.createdByType ?? ArtifactActorType.HUMAN,
+      changeKind,
+    });
+
+    return { artifact, base, state, latest };
+  }
+
 
   async validatePersistedArtifactInTransaction(
     tx: Prisma.TransactionClient,

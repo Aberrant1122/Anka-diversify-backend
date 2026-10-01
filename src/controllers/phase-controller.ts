@@ -5,6 +5,13 @@ import {
   RequirementsRevisionOperation,
   validateRevisionOperation,
 } from "../planning/requirements-revision-policy";
+import {
+  DocumentationRevisionOperation,
+  validateDocumentationRevisionOperation,
+  validateDocumentationRevisionTarget,
+  ValidatedDocumentationRevisionTarget,
+} from "../planning/documentation-revision-policy";
+import { DocumentationProviderRoot, DocumentationValidationError } from "../planning/documentation-schema";
 import { PhaseService } from "../services/phase-service";
 
 const phaseService = new PhaseService();
@@ -107,6 +114,213 @@ function documentationGenerationBody(req: Request): { includeMemory: boolean } {
   }
   return { includeMemory: body.includeMemory === true };
 }
+
+function documentationRevisionBody(req: Request): {
+  operation: DocumentationRevisionOperation;
+  instruction: string;
+  targetSectionKey: DocumentationProviderRoot | null;
+  includeMemory: boolean;
+  rebaseToCurrentRequirements?: boolean;
+} {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new PlanningDomainError(
+      "PLANNING_ARTIFACT_INVALID",
+      "Request body must be a JSON object.",
+      422,
+    );
+  }
+  const allowed = new Set(["operation", "instruction", "includeMemory", "targetSectionKey", "rebaseToCurrentRequirements"]);
+  const unknown = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new PlanningDomainError(
+      "PLANNING_ARTIFACT_INVALID",
+      `Unknown Documentation revision fields: ${unknown.join(", ")}.`,
+      422,
+      { fields: unknown },
+    );
+  }
+  const operation = body.operation;
+  if (typeof operation !== "string") {
+    throw new PlanningDomainError(
+      "PLANNING_ARTIFACT_INVALID",
+      "A supported Documentation revision operation is required.",
+      422,
+      { operation },
+    );
+  }
+  try {
+    validateDocumentationRevisionOperation(operation);
+  } catch (error) {
+    if (error instanceof DocumentationValidationError) {
+      throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", error.message, 422, error.details);
+    }
+    throw error;
+  }
+
+  let target: ValidatedDocumentationRevisionTarget;
+  try {
+    target = validateDocumentationRevisionTarget(operation, body.targetSectionKey);
+  } catch (error) {
+    if (error instanceof DocumentationValidationError) {
+      throw new PlanningDomainError("PLANNING_INVALID_SECTION", error.message, 422, error.details);
+    }
+    throw error;
+  }
+
+  const instruction = body.instruction;
+  if (typeof instruction !== "string" || !instruction.trim()) {
+    throw new PlanningDomainError(
+      "PLANNING_ARTIFACT_INVALID",
+      "Explicit revision instruction is required.",
+      422,
+      { field: "instruction" },
+    );
+  }
+  if (body.includeMemory !== undefined && typeof body.includeMemory !== "boolean") {
+    throw new PlanningDomainError(
+      "PLANNING_ARTIFACT_INVALID",
+      "includeMemory must be a boolean when provided.",
+      422,
+      { field: "includeMemory" },
+    );
+  }
+  if (body.rebaseToCurrentRequirements !== undefined) {
+    if (typeof body.rebaseToCurrentRequirements !== "boolean") {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        "rebaseToCurrentRequirements must be a boolean when provided.",
+        422,
+        { field: "rebaseToCurrentRequirements" },
+      );
+    }
+    if (body.rebaseToCurrentRequirements && operation !== "DOCUMENT_REVISION") {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        "rebaseToCurrentRequirements is only supported for DOCUMENT_REVISION operations.",
+        422,
+        { operation },
+      );
+    }
+  }
+
+  return {
+    operation,
+    instruction: instruction.trim(),
+    targetSectionKey: target.targetSectionKey,
+    includeMemory: body.includeMemory === true,
+    rebaseToCurrentRequirements: body.rebaseToCurrentRequirements === true,
+  };
+}
+
+function documentRevisionOnlyBody(req: Request): {
+  instruction: string;
+  includeMemory: boolean;
+  rebaseToCurrentRequirements?: boolean;
+} {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be a JSON object.", 422);
+  }
+  const allowed = new Set(["instruction", "includeMemory", "rebaseToCurrentRequirements"]);
+  const unknown = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unknown revision fields: ${unknown.join(", ")}.`, 422, { fields: unknown });
+  }
+  const instruction = body.instruction;
+  if (typeof instruction !== "string" || !instruction.trim()) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Explicit revision instruction is required.", 422, { field: "instruction" });
+  }
+  if (body.includeMemory !== undefined && typeof body.includeMemory !== "boolean") {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "includeMemory must be a boolean when provided.", 422, { field: "includeMemory" });
+  }
+  if (body.rebaseToCurrentRequirements !== undefined && typeof body.rebaseToCurrentRequirements !== "boolean") {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "rebaseToCurrentRequirements must be a boolean when provided.", 422, { field: "rebaseToCurrentRequirements" });
+  }
+  return {
+    instruction: instruction.trim(),
+    includeMemory: body.includeMemory === true,
+    rebaseToCurrentRequirements: body.rebaseToCurrentRequirements === true,
+  };
+}
+
+function feedbackBody(req: Request): {
+  instruction: string;
+  includeMemory: boolean;
+} {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be a JSON object.", 422);
+  }
+  const allowed = new Set(["feedback", "instruction", "includeMemory"]);
+  const unknown = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unknown feedback fields: ${unknown.join(", ")}.`, 422, { fields: unknown });
+  }
+  const rawText = body.feedback ?? body.instruction;
+  if (typeof rawText !== "string" || !rawText.trim()) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Feedback instruction is required.", 422, { field: "feedback" });
+  }
+  if (body.includeMemory !== undefined && typeof body.includeMemory !== "boolean") {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "includeMemory must be a boolean when provided.", 422, { field: "includeMemory" });
+  }
+  return {
+    instruction: rawText.trim(),
+    includeMemory: body.includeMemory === true,
+  };
+}
+
+function sectionRevisionBody(req: Request): {
+  instruction: string;
+  includeMemory: boolean;
+} {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be a JSON object.", 422);
+  }
+  const allowed = new Set(["instruction", "includeMemory"]);
+  const unknown = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unknown section revision fields: ${unknown.join(", ")}.`, 422, { fields: unknown });
+  }
+  const instruction = body.instruction;
+  if (typeof instruction !== "string" || !instruction.trim()) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Explicit section revision instruction is required.", 422, { field: "instruction" });
+  }
+  if (body.includeMemory !== undefined && typeof body.includeMemory !== "boolean") {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "includeMemory must be a boolean when provided.", 422, { field: "includeMemory" });
+  }
+  return {
+    instruction: instruction.trim(),
+    includeMemory: body.includeMemory === true,
+  };
+}
+
+function sectionRegenerationBody(req: Request): {
+  instruction?: string;
+  includeMemory: boolean;
+} {
+  const body = req.body === undefined ? {} : req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be a JSON object.", 422);
+  }
+  const allowed = new Set(["instruction", "includeMemory"]);
+  const unknown = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unknown section regeneration fields: ${unknown.join(", ")}.`, 422, { fields: unknown });
+  }
+  if (body.instruction !== undefined && (typeof body.instruction !== "string" || !body.instruction.trim())) {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "instruction must be a non-empty string when provided.", 422, { field: "instruction" });
+  }
+  if (body.includeMemory !== undefined && typeof body.includeMemory !== "boolean") {
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "includeMemory must be a boolean when provided.", 422, { field: "includeMemory" });
+  }
+  return {
+    instruction: body.instruction?.trim(),
+    includeMemory: body.includeMemory === true,
+  };
+}
+
 
 function revisionBody(req: Request): {
   operation: RequirementsRevisionOperation;
@@ -404,6 +618,138 @@ export class PhaseController {
       res.status(httpStatus).json({ success: true, data });
     } catch (error) {
       respondError(res, error, "Failed to generate initial Documentation");
+    }
+  }
+
+  async reviseDocumentation(req: Request, res: Response) {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+      const body = documentationRevisionBody(req);
+      const result = await phaseService.reviseDocumentation({
+        projectId: param(req, "projectId"),
+        baseArtifactId: param(req, "artifactId"),
+        actorId: userId,
+        idempotencyKey: idempotencyKey(req),
+        operation: body.operation,
+        instruction: body.instruction,
+        targetSectionKey: body.targetSectionKey,
+        includeMemory: body.includeMemory,
+        rebaseToCurrentRequirements: body.rebaseToCurrentRequirements,
+      });
+      const { httpStatus, ...data } = result;
+      res.status(httpStatus).json({ success: true, data });
+    } catch (error) {
+      respondError(res, error, "Failed to revise Documentation");
+    }
+  }
+
+  async reviseDocumentationDocument(req: Request, res: Response) {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+      const body = documentRevisionOnlyBody(req);
+      const result = await phaseService.reviseDocumentation({
+        projectId: param(req, "projectId"),
+        baseArtifactId: param(req, "artifactId"),
+        actorId: userId,
+        idempotencyKey: idempotencyKey(req),
+        operation: "DOCUMENT_REVISION",
+        instruction: body.instruction,
+        targetSectionKey: null,
+        includeMemory: body.includeMemory,
+        rebaseToCurrentRequirements: body.rebaseToCurrentRequirements,
+      });
+      const { httpStatus, ...data } = result;
+      res.status(httpStatus).json({ success: true, data });
+    } catch (error) {
+      respondError(res, error, "Failed to revise Documentation document");
+    }
+  }
+
+  async applyDocumentationFeedback(req: Request, res: Response) {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+      const body = feedbackBody(req);
+      const result = await phaseService.reviseDocumentation({
+        projectId: param(req, "projectId"),
+        baseArtifactId: param(req, "artifactId"),
+        actorId: userId,
+        idempotencyKey: idempotencyKey(req),
+        operation: "FEEDBACK_APPLICATION",
+        instruction: body.instruction,
+        targetSectionKey: null,
+        includeMemory: body.includeMemory,
+      });
+      const { httpStatus, ...data } = result;
+      res.status(httpStatus).json({ success: true, data });
+    } catch (error) {
+      respondError(res, error, "Failed to apply Documentation feedback");
+    }
+  }
+
+  async reviseDocumentationSection(req: Request, res: Response) {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+      const sectionKey = param(req, "sectionKey");
+      let target: ValidatedDocumentationRevisionTarget;
+      try {
+        target = validateDocumentationRevisionTarget("SECTION_REVISION", sectionKey);
+      } catch (error) {
+        if (error instanceof DocumentationValidationError) {
+          throw new PlanningDomainError("PLANNING_INVALID_SECTION", error.message, 422, error.details);
+        }
+        throw error;
+      }
+      const body = sectionRevisionBody(req);
+      const result = await phaseService.reviseDocumentation({
+        projectId: param(req, "projectId"),
+        baseArtifactId: param(req, "artifactId"),
+        actorId: userId,
+        idempotencyKey: idempotencyKey(req),
+        operation: "SECTION_REVISION",
+        instruction: body.instruction,
+        targetSectionKey: target.targetSectionKey,
+        includeMemory: body.includeMemory,
+      });
+      const { httpStatus, ...data } = result;
+      res.status(httpStatus).json({ success: true, data });
+    } catch (error) {
+      respondError(res, error, "Failed to revise Documentation section");
+    }
+  }
+
+  async regenerateDocumentationSection(req: Request, res: Response) {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+      const sectionKey = param(req, "sectionKey");
+      let target: ValidatedDocumentationRevisionTarget;
+      try {
+        target = validateDocumentationRevisionTarget("SECTION_REGENERATION", sectionKey);
+      } catch (error) {
+        if (error instanceof DocumentationValidationError) {
+          throw new PlanningDomainError("PLANNING_INVALID_SECTION", error.message, 422, error.details);
+        }
+        throw error;
+      }
+      const body = sectionRegenerationBody(req);
+      const result = await phaseService.reviseDocumentation({
+        projectId: param(req, "projectId"),
+        baseArtifactId: param(req, "artifactId"),
+        actorId: userId,
+        idempotencyKey: idempotencyKey(req),
+        operation: "SECTION_REGENERATION",
+        instruction: body.instruction ?? `Regenerate section ${sectionKey} from authoritative context`,
+        targetSectionKey: target.targetSectionKey,
+        includeMemory: body.includeMemory,
+      });
+      const { httpStatus, ...data } = result;
+      res.status(httpStatus).json({ success: true, data });
+    } catch (error) {
+      respondError(res, error, "Failed to regenerate Documentation section");
     }
   }
 

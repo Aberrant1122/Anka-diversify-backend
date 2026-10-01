@@ -37,6 +37,36 @@ router.post(
   phaseController.generateInitialDocumentation.bind(phaseController),
 );
 
+// POST   /api/projects/:projectId/phases/documentation/artifacts/:artifactId/revisions
+router.post(
+  "/documentation/artifacts/:artifactId/revisions",
+  phaseController.reviseDocumentation.bind(phaseController),
+);
+
+// POST   /api/projects/:projectId/phases/documentation/artifacts/:artifactId/revise
+router.post(
+  "/documentation/artifacts/:artifactId/revise",
+  phaseController.reviseDocumentationDocument.bind(phaseController),
+);
+
+// POST   /api/projects/:projectId/phases/documentation/artifacts/:artifactId/feedback
+router.post(
+  "/documentation/artifacts/:artifactId/feedback",
+  phaseController.applyDocumentationFeedback.bind(phaseController),
+);
+
+// POST   /api/projects/:projectId/phases/documentation/artifacts/:artifactId/sections/:sectionKey/revise
+router.post(
+  "/documentation/artifacts/:artifactId/sections/:sectionKey/revise",
+  phaseController.reviseDocumentationSection.bind(phaseController),
+);
+
+// POST   /api/projects/:projectId/phases/documentation/artifacts/:artifactId/sections/:sectionKey/regenerate
+router.post(
+  "/documentation/artifacts/:artifactId/sections/:sectionKey/regenerate",
+  phaseController.regenerateDocumentationSection.bind(phaseController),
+);
+
 // POST   /api/projects/:projectId/phases/requirements/artifacts/:artifactId/revisions
 router.post(
   "/requirements/artifacts/:artifactId/revisions",
