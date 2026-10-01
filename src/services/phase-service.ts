@@ -21,6 +21,7 @@ import {
 import { PlanningReadinessService } from "./planning-readiness.service";
 import { PlanningRequirementsRunService } from "./planning-requirements-run.service";
 import { PlanningTransitionPolicy } from "./planning-transition-policy";
+import { PlanningArchitectureArtifactService, CreateArchitectureInput } from "./planning-architecture-artifact.service";
 
 export const PHASE_ORDER = [
   "requirements",
@@ -42,6 +43,7 @@ export class PhaseService {
   private readonly requirementsRuns: PlanningRequirementsRunService;
   private readonly generation: PlanningGenerationService;
   private readonly documentationGeneration: PlanningDocumentationGenerationService;
+  private readonly architectureArtifacts: PlanningArchitectureArtifactService;
   private readonly aiService = AiService.getInstance();
 
   constructor(private readonly prisma: PrismaClient = new PrismaClient()) {
@@ -76,6 +78,7 @@ export class PhaseService {
       readiness: documentationReadiness,
       runs: documentationRuns,
     });
+    this.architectureArtifacts = new PlanningArchitectureArtifactService(prisma, this.authorization);
   }
 
   async getPhaseStates(projectId: string, actorId: string) {
@@ -110,10 +113,10 @@ export class PhaseService {
 
   async startPhase(projectId: string, phase: string, actorId: string) {
     await this.authorization.assertCanEdit(projectId, actorId);
-    if (phase === REQUIREMENTS_PHASE) {
+    if (phase === REQUIREMENTS_PHASE || phase === "architecture") {
       throw new PlanningDomainError(
         "PLANNING_ACTION_LOCKED",
-        "Requirements starts only when its first immutable artifact is created.",
+        `${phase === REQUIREMENTS_PHASE ? "Requirements" : "Architecture"} starts only when its first immutable artifact is created.`,
         409,
       );
     }
@@ -136,6 +139,7 @@ export class PhaseService {
     expectedHash: string,
     actorId: string,
   ) {
+    if (phase === "architecture") return this.approvals.requestArchitectureApproval({ projectId, artifactId, expectedHash, actorId });
     return this.approvals.requestApproval({ projectId, phase, artifactId, expectedHash, actorId });
   }
 
@@ -147,6 +151,7 @@ export class PhaseService {
     approvedById: string,
     comments?: string,
   ) {
+    if (phase === "architecture") return this.approvals.approveArchitectureArtifact({ projectId, artifactId, expectedHash, actorId: approvedById, comments });
     return this.approvals.approveArtifact({
       projectId,
       phase,
@@ -165,6 +170,7 @@ export class PhaseService {
     approvedById: string,
     comments: string,
   ) {
+    if (phase === "architecture") return this.approvals.requestArchitectureChanges({ projectId, artifactId, expectedHash, actorId: approvedById, comments });
     return this.approvals.requestChanges({
       projectId,
       phase,
@@ -230,6 +236,14 @@ export class PhaseService {
     return this.readiness.evaluateRequirements({ artifact, expectedHash });
   }
 
+  async createArchitectureArtifact(input: CreateArchitectureInput) {
+    return this.architectureArtifacts.create(input);
+  }
+
+  async getArchitectureReadiness(projectId: string, artifactId: string, actorId: string, expectedHash?: string) {
+    return this.architectureArtifacts.getReadiness(projectId, artifactId, actorId, expectedHash);
+  }
+
   async createArtifact(
     projectId: string,
     data: {
@@ -282,10 +296,10 @@ export class PhaseService {
 
   async runAutomatedPhase(projectId: string, phase: string, createdBy: string, brief?: string) {
     await this.authorization.assertCanEdit(projectId, createdBy);
-    if (phase === REQUIREMENTS_PHASE || phase === "documentation") {
+    if (phase === REQUIREMENTS_PHASE || phase === "documentation" || phase === "architecture") {
       throw new PlanningDomainError(
         "PLANNING_ACTION_LOCKED",
-        `${phase === REQUIREMENTS_PHASE ? "Requirements" : "Documentation"} uses its dedicated structured generation API.`,
+        `${phase === REQUIREMENTS_PHASE ? "Requirements" : phase === "documentation" ? "Documentation" : "Architecture"} uses its dedicated structured workflow.`,
         409,
       );
     }

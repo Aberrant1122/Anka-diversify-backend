@@ -266,10 +266,10 @@ describe("preflightArchitectureHandoff", () => {
       phaseApproval: {
         findFirst: jest.fn().mockImplementation(({ where }) => {
           if (where.phase === "requirements" && where.artifactId === reqId) {
-            return Promise.resolve({ id: "approval-req-1", createdAt: new Date(), approvedById: "owner-1" });
+            return Promise.resolve({ id: "approval-req-1", approvedAt: new Date(), approvedById: "owner-1" });
           }
           if (where.phase === "documentation" && where.artifactId === docId) {
-            return Promise.resolve({ id: "approval-doc-1", createdAt: new Date(), approvedById: "owner-1" });
+            return Promise.resolve({ id: "approval-doc-1", approvedAt: new Date(), approvedById: "owner-1" });
           }
           return Promise.resolve(null);
         }),
@@ -289,6 +289,7 @@ describe("preflightArchitectureHandoff", () => {
     expect(result.documentation.artifact.id).toBe(docId);
     expect(result.documentation.contentHash).toBe(docHash);
     expect(result.documentation.content.sourceRequirements.artifactId).toBe(reqId);
+    expect(mock.phaseApproval.findFirst).toHaveBeenCalledWith(expect.objectContaining({ select: { id: true, approvedAt: true, approvedById: true } }));
   });
 
   test("fails if project is not found", async () => {
@@ -321,6 +322,18 @@ describe("preflightArchitectureHandoff", () => {
       code: "PLANNING_ARTIFACT_INVALID",
       httpStatus: 422,
     });
+  });
+
+  test.each([
+    ["project", { projectId: "other-project" }],
+    ["phase", { phase: "documentation" }],
+    ["type", { type: "legacy_doc" }],
+    ["schema", { schemaVersion: 999 }],
+    ["Markdown", { content: "corrupt" }],
+  ])("rejects approved Requirements with wrong %s", async (_label, change) => {
+    const mock = createValidPrismaMock();
+    mock.phaseArtifact.findUnique.mockImplementation(({ where }) => Promise.resolve(where.id === reqId ? { ...mock.validReqArtifact, ...change } : mock.validDocArtifact));
+    await expect(preflightArchitectureHandoff(mock as any, projectId)).rejects.toMatchObject({ code: "PLANNING_ARTIFACT_INVALID" });
   });
 
   test("fails if Requirements PhaseApproval record is missing", async () => {
@@ -361,6 +374,18 @@ describe("preflightArchitectureHandoff", () => {
     });
   });
 
+  test.each([
+    ["project", { projectId: "other-project" }],
+    ["phase", { phase: "requirements" }],
+    ["type", { type: "legacy_doc" }],
+    ["schema", { schemaVersion: 999 }],
+    ["Markdown", { content: "corrupt" }],
+  ])("rejects approved Documentation with wrong %s", async (_label, change) => {
+    const mock = createValidPrismaMock();
+    mock.phaseArtifact.findUnique.mockImplementation(({ where }) => Promise.resolve(where.id === docId ? { ...mock.validDocArtifact, ...change } : mock.validReqArtifact));
+    await expect(preflightArchitectureHandoff(mock as any, projectId)).rejects.toMatchObject({ code: "PLANNING_ARTIFACT_INVALID" });
+  });
+
   test("fails if Documentation PhaseApproval record is missing", async () => {
     const mock = createValidPrismaMock();
     mock.phaseApproval.findFirst.mockImplementation(({ where }) => {
@@ -372,6 +397,17 @@ describe("preflightArchitectureHandoff", () => {
       code: "PLANNING_ARTIFACT_INVALID",
       httpStatus: 422,
     });
+  });
+
+  test("fails closed on semantically corrupted approved Documentation with matching hash and render", async () => {
+    const mock = createValidPrismaMock();
+    const corrupt = { ...docContent, features: [] };
+    mock.phaseArtifact.findUnique.mockImplementation(({ where }) => Promise.resolve(
+      where.id === docId
+        ? { ...mock.validDocArtifact, structuredContent: corrupt, contentHash: hashDocumentationContent(corrupt), content: renderDocumentationMarkdown(corrupt) }
+        : mock.validReqArtifact,
+    ));
+    await expect(preflightArchitectureHandoff(mock as any, projectId)).rejects.toMatchObject({ code: "PLANNING_ARTIFACT_INVALID", httpStatus: 422 });
   });
 
   test("fails if Documentation.sourceRequirements.artifactId != Requirements.id (stale)", async () => {

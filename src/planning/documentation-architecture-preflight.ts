@@ -17,6 +17,7 @@ import {
 } from "./documentation-schema";
 import { DOCUMENTATION_PHASE } from "./documentation-run-config";
 import { PlanningDomainError } from "./planning-errors";
+import { PlanningDocumentationReadinessService } from "../services/planning-documentation-readiness.service";
 
 export const ARCHITECTURE_PHASE = "architecture" as const;
 export const REQUIREMENTS_PHASE = "requirements" as const;
@@ -135,7 +136,7 @@ export async function preflightArchitectureHandoff(
       decision: "approved",
       legacyUnverified: false,
     },
-    select: { id: true, createdAt: true, approvedById: true },
+    select: { id: true, approvedAt: true, approvedById: true },
   });
   if (!reqApproval) {
     throw new PlanningDomainError(
@@ -218,7 +219,7 @@ export async function preflightArchitectureHandoff(
       decision: "approved",
       legacyUnverified: false,
     },
-    select: { id: true, createdAt: true, approvedById: true },
+    select: { id: true, approvedAt: true, approvedById: true },
   });
   if (!docApproval) {
     throw new PlanningDomainError(
@@ -249,6 +250,36 @@ export async function preflightArchitectureHandoff(
           contentHash: reqArtifact.contentHash,
         },
       },
+    );
+  }
+
+  // Reuse the approval policy, including graph and derived traceability checks.
+  // Approved authority with only valid pointers is not sufficient for handoff.
+  try {
+    const readiness = new PlanningDocumentationReadinessService().evaluateDocumentation({
+      artifact: docArtifact,
+      historicalRequirements: reqContent,
+      currentApprovedRequirements: {
+        artifactId: reqArtifact.id,
+        version: reqArtifact.version,
+        contentHash: reqHash,
+      },
+    });
+    if (!readiness.ready) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        "The approved Documentation authority fails deterministic readiness.",
+        422,
+        { artifactId: docArtifact.id, blockers: readiness.blockers },
+      );
+    }
+  } catch (error) {
+    if (error instanceof PlanningDomainError) throw error;
+    throw new PlanningDomainError(
+      "PLANNING_ARTIFACT_INVALID",
+      "The approved Documentation authority fails deterministic validation.",
+      422,
+      { artifactId: docArtifact.id },
     );
   }
 

@@ -22,6 +22,10 @@ router.get("/artifacts/:artifactId", phaseController.getArtifact.bind(phaseContr
 // GET    /api/projects/:projectId/phases/requirements/artifacts/:artifactId/readiness
 router.get("/requirements/artifacts/:artifactId/readiness", phaseController.getRequirementsReadiness.bind(phaseController));
 
+router.get("/architecture/artifacts/:artifactId/readiness", phaseController.getArchitectureReadiness.bind(phaseController));
+router.post("/architecture/artifacts", phaseController.createArchitectureArtifact.bind(phaseController));
+router.post("/architecture/artifacts/:artifactId/revisions", phaseController.createArchitectureSuccessor.bind(phaseController));
+
 // POST   /api/projects/:projectId/phases/artifacts
 router.post("/artifacts", phaseController.createArtifact.bind(phaseController));
 

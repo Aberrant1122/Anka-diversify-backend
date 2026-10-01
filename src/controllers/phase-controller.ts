@@ -38,6 +38,26 @@ function requiredBodyString(req: Request, key: string): string {
   return value;
 }
 
+function architectureArtifactBody(req: Request, successor: boolean): { title: string; structuredContent: unknown; baseContentHash?: string } {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be an object.", 422);
+  const allowed = successor ? ["title", "structuredContent", "baseContentHash"] : ["title", "structuredContent"];
+  const unknown = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (unknown.length) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unknown Architecture fields: ${unknown.join(", ")}.`, 422, { fields: unknown });
+  if (!body.structuredContent || typeof body.structuredContent !== "object" || Array.isArray(body.structuredContent)) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "structuredContent must be an object.", 422);
+  return { title: requiredBodyString(req, "title"), structuredContent: body.structuredContent, ...(successor ? { baseContentHash: requiredBodyString(req, "baseContentHash") } : {}) };
+}
+
+function validateArchitectureDecisionBody(req: Request, action: "request" | "approve" | "changes"): void {
+  if (param(req, "phase") !== "architecture") return;
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be an object.", 422);
+  const allowed = action === "request" ? ["artifactId", "expectedHash"] : ["artifactId", "expectedHash", "comments"];
+  const unknown = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (unknown.length) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unknown Architecture decision fields: ${unknown.join(", ")}.`, 422, { fields: unknown });
+  if (body.comments !== undefined && (typeof body.comments !== "string" || !body.comments.trim())) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "comments must be a non-empty string when provided.", 422);
+}
+
 function optionalQueryString(req: Request, key: string): string | undefined {
   const value = req.query[key];
   if (value === undefined) return undefined;
@@ -405,6 +425,35 @@ function respondError(res: Response, error: unknown, fallback: string): void {
 }
 
 export class PhaseController {
+  async createArchitectureArtifact(req: Request, res: Response) {
+    try {
+      const actorId = requireUser(req, res);
+      if (!actorId) return;
+      const body = architectureArtifactBody(req, false);
+      const artifact = await phaseService.createArchitectureArtifact({ projectId: param(req, "projectId"), actorId, ...body });
+      res.status(201).json({ success: true, data: artifact });
+    } catch (error) { respondError(res, error, "Failed to create Architecture artifact"); }
+  }
+
+  async createArchitectureSuccessor(req: Request, res: Response) {
+    try {
+      const actorId = requireUser(req, res);
+      if (!actorId) return;
+      const body = architectureArtifactBody(req, true);
+      const artifact = await phaseService.createArchitectureArtifact({ projectId: param(req, "projectId"), actorId, title: body.title, structuredContent: body.structuredContent, baseArtifactId: param(req, "artifactId"), baseContentHash: body.baseContentHash });
+      res.status(201).json({ success: true, data: artifact });
+    } catch (error) { respondError(res, error, "Failed to create Architecture successor"); }
+  }
+
+  async getArchitectureReadiness(req: Request, res: Response) {
+    try {
+      const actorId = requireUser(req, res);
+      if (!actorId) return;
+      const readiness = await phaseService.getArchitectureReadiness(param(req, "projectId"), param(req, "artifactId"), actorId, optionalQueryString(req, "expectedHash"));
+      res.json({ success: true, data: readiness });
+    } catch (error) { respondError(res, error, "Failed to fetch Architecture readiness"); }
+  }
+
   async getPhaseStates(req: Request, res: Response) {
     try {
       const userId = requireUser(req, res);
@@ -442,6 +491,7 @@ export class PhaseController {
     try {
       const userId = requireUser(req, res);
       if (!userId) return;
+      validateArchitectureDecisionBody(req, "request");
       const state = await phaseService.requestApproval(
         param(req, "projectId"),
         param(req, "phase"),
@@ -459,6 +509,7 @@ export class PhaseController {
     try {
       const userId = requireUser(req, res);
       if (!userId) return;
+      validateArchitectureDecisionBody(req, "approve");
       const state = await phaseService.approvePhase(
         param(req, "projectId"),
         param(req, "phase"),
@@ -495,6 +546,7 @@ export class PhaseController {
     try {
       const userId = requireUser(req, res);
       if (!userId) return;
+      validateArchitectureDecisionBody(req, "changes");
       const state = await phaseService.requestChanges(
         param(req, "projectId"),
         param(req, "phase"),
