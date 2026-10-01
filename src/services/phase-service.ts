@@ -22,6 +22,8 @@ import { PlanningReadinessService } from "./planning-readiness.service";
 import { PlanningRequirementsRunService } from "./planning-requirements-run.service";
 import { PlanningTransitionPolicy } from "./planning-transition-policy";
 import { PlanningArchitectureArtifactService, CreateArchitectureInput } from "./planning-architecture-artifact.service";
+import { GenerateInitialArchitectureInput, PlanningArchitectureGenerationService } from "./planning-architecture-generation.service";
+import { PlanningArchitectureRunService } from "./planning-architecture-run.service";
 
 export const PHASE_ORDER = [
   "requirements",
@@ -44,6 +46,8 @@ export class PhaseService {
   private readonly generation: PlanningGenerationService;
   private readonly documentationGeneration: PlanningDocumentationGenerationService;
   private readonly architectureArtifacts: PlanningArchitectureArtifactService;
+  private readonly architectureGeneration: PlanningArchitectureGenerationService;
+  private readonly architectureRuns: PlanningArchitectureRunService;
   private readonly aiService = AiService.getInstance();
 
   constructor(private readonly prisma: PrismaClient = new PrismaClient()) {
@@ -79,6 +83,10 @@ export class PhaseService {
       runs: documentationRuns,
     });
     this.architectureArtifacts = new PlanningArchitectureArtifactService(prisma, this.authorization);
+    this.architectureRuns = new PlanningArchitectureRunService(prisma, {
+      authorization: this.authorization, artifacts: this.architectureArtifacts,
+    });
+    this.architectureGeneration = new PlanningArchitectureGenerationService(prisma, { runs: this.architectureRuns });
   }
 
   async getPhaseStates(projectId: string, actorId: string) {
@@ -371,6 +379,14 @@ export class PhaseService {
 
   async generateInitialDocumentation(input: GenerateInitialDocumentationInput) {
     return this.documentationGeneration.generateInitial(input);
+  }
+
+  async generateInitialArchitecture(input: GenerateInitialArchitectureInput) {
+    return this.architectureGeneration.generateInitial(input);
+  }
+
+  async getArchitectureRun(projectId: string, runId: string, actorId: string) {
+    return this.architectureRuns.getRun(projectId, runId, actorId);
   }
 
   async reviseDocumentation(input: ReviseDocumentationInput) {

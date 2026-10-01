@@ -1,6 +1,6 @@
 import {
   ArtifactActorType, ArtifactChangeKind, ArtifactLifecycleStatus,
-  PhaseArtifact, Prisma, PrismaClient,
+  PhaseArtifact, Prisma, PrismaClient, ProjectPhaseState,
 } from "@prisma/client";
 import { architectureTraceabilityMatches, assembleArchitectureContent } from "../planning/architecture-assembly";
 import {
@@ -86,6 +86,35 @@ export class PlanningArchitectureArtifactService {
       if (expectedHash && artifact.contentHash !== expectedHash) throw new PlanningDomainError("PLANNING_ARTIFACT_HASH_MISMATCH", "Architecture hash does not match.", 409);
       return this.readiness.evaluateArchitecture(artifact, authority);
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  async createInitialAIInTransaction(tx: Prisma.TransactionClient, input: {
+    projectId: string; actorId: string; structuredContent: unknown;
+    authority: ArchitectureHandoffAuthority; runId: string;
+  }): Promise<{ artifact: PhaseArtifact; state: ProjectPhaseState }> {
+    const state = await tx.projectPhaseState.findUnique({
+      where: { projectId_phase: { projectId: input.projectId, phase: ARCHITECTURE_PHASE } },
+    });
+    if (!state || state.status !== "not_started" || state.currentArtifactId ||
+      state.currentApprovedArtifactId || state.approvalCandidateArtifactId || state.activeRunId !== input.runId) {
+      this.locked("Architecture initial artifact slot changed during generation.");
+    }
+    const existing = await tx.phaseArtifact.findFirst({
+      where: { projectId: input.projectId, phase: ARCHITECTURE_PHASE, type: ARCHITECTURE_ARTIFACT_TYPE },
+      select: { id: true },
+    });
+    if (existing) this.locked("Architecture already has an initial artifact.");
+    const content = this.assemble(input.structuredContent, input.authority);
+    this.assertSize(content);
+    const artifact = await tx.phaseArtifact.create({ data: {
+      projectId: input.projectId, phase: ARCHITECTURE_PHASE, type: ARCHITECTURE_ARTIFACT_TYPE,
+      title: "Architecture v1", content: renderArchitectureMarkdown(content),
+      structuredContent: content as unknown as Prisma.InputJsonValue,
+      schemaVersion: ARCHITECTURE_SCHEMA_VERSION, contentHash: hashArchitectureContent(content), version: 1,
+      changeKind: ArtifactChangeKind.INITIAL_GENERATION, createdBy: input.actorId,
+      createdByType: ArtifactActorType.AI, lifecycleStatus: ArtifactLifecycleStatus.DRAFT, approved: false,
+    } });
+    return { artifact, state };
   }
 
   validatePersisted(artifact: PhaseArtifact, authority: ArchitectureHandoffAuthority, expectedHash?: string): ArchitectureContent {

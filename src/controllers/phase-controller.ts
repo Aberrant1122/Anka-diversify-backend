@@ -115,7 +115,7 @@ function idempotencyKey(req: Request): string {
   return value;
 }
 
-function documentationGenerationBody(req: Request): { includeMemory: boolean } {
+function documentationGenerationBody(req: Request, phase: "Documentation" | "Architecture" = "Documentation"): { includeMemory: boolean } {
   const body = req.body === undefined ? {} : req.body;
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be an object.", 422);
@@ -124,7 +124,7 @@ function documentationGenerationBody(req: Request): { includeMemory: boolean } {
   if (unknown.length > 0) {
     throw new PlanningDomainError(
       "PLANNING_ARTIFACT_INVALID",
-      `Unknown initial Documentation generation fields: ${unknown.join(", ")}.`,
+      `Unknown initial ${phase} generation fields: ${unknown.join(", ")}.`,
       422,
       { fields: unknown },
     );
@@ -433,6 +433,29 @@ export class PhaseController {
       const artifact = await phaseService.createArchitectureArtifact({ projectId: param(req, "projectId"), actorId, ...body });
       res.status(201).json({ success: true, data: artifact });
     } catch (error) { respondError(res, error, "Failed to create Architecture artifact"); }
+  }
+
+  async generateInitialArchitecture(req: Request, res: Response) {
+    try {
+      const actorId = requireUser(req, res);
+      if (!actorId) return;
+      const body = documentationGenerationBody(req, "Architecture");
+      const result = await phaseService.generateInitialArchitecture({
+        projectId: param(req, "projectId"), actorId,
+        idempotencyKey: idempotencyKey(req), includeMemory: body.includeMemory,
+      });
+      const { httpStatus, ...data } = result;
+      res.status(httpStatus).json({ success: true, data });
+    } catch (error) { respondError(res, error, "Failed to generate initial Architecture"); }
+  }
+
+  async getArchitectureRun(req: Request, res: Response) {
+    try {
+      const actorId = requireUser(req, res);
+      if (!actorId) return;
+      const run = await phaseService.getArchitectureRun(param(req, "projectId"), param(req, "runId"), actorId);
+      res.json({ success: true, data: run });
+    } catch (error) { respondError(res, error, "Failed to fetch Architecture run"); }
   }
 
   async createArchitectureSuccessor(req: Request, res: Response) {
