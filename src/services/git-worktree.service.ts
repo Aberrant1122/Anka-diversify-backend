@@ -138,6 +138,7 @@ export interface RunIsolatedAgentOptions {
   authorizedCapabilities?: readonly CapabilityGrant[];
   taskRuntime?: TaskRuntime;
   shipping?: RepositoryShippingPolicy;
+  shippingApprovalUserId?: string;
   implementationAuthority?: import("../planning/implementation-authority-preflight").ImplementationAuthority;
   revalidateAuthority?: () => Promise<void>;
   onProgress?: (event: AgentProgressEvent) => void;
@@ -239,6 +240,21 @@ export class GitWorktreeService {
     const pending = this.pendingShippingApprovals.get(approvalId);
     if (!pending || pending.userId !== userId || pending.projectId !== projectId) return undefined;
     return pending.repositoryId;
+  }
+
+  /** Read-only availability check; never reconstructs or exposes authority objects. */
+  public static inspectShippingApproval(
+    approvalId: string,
+    userId: string,
+    projectId: string,
+  ): { expiresAt: Date; repositoryId?: string; state: "AVAILABLE" | "SHIPPING" } | null {
+    const pending = this.pendingShippingApprovals.get(approvalId);
+    if (!pending || pending.userId !== userId || pending.projectId !== projectId) return null;
+    return {
+      expiresAt: new Date(pending.approval.expiresAt),
+      ...(pending.repositoryId ? { repositoryId: pending.repositoryId } : {}),
+      state: pending.state,
+    };
   }
 
   /** Ships only the server-retained, fingerprint-verified worktree selected by the approval id. */
@@ -1269,7 +1285,7 @@ export class GitWorktreeService {
           });
         });
         shippingApproval = this.retainVerifiedRunForApproval({
-          userId,
+          userId: options.shippingApprovalUserId ?? userId,
           projectId,
           ...(request.repositoryId ? { repositoryId: request.repositoryId } : {}),
           prepared,

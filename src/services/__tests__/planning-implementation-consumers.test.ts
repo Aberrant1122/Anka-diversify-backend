@@ -31,8 +31,8 @@ async function setup(label: string, approved: boolean) {
   return { projectId, req, doc, arch, draft };
 }
 
-const proposal = { content: { stages: [{ title: "Build", order: 0, tasks: [{ title: "Implement", description: "Implement design",
-  acceptanceCriteria: ["Verified"], targetFiles: ["src/index.ts"] }] }] } };
+const proposal = { content: { stages: [{ title: "Build", order: 0, tasks: [{ key: "TASK-IMPLEMENT", title: "Implement", description: "Implement design",
+  acceptanceCriteria: ["Verified"], targetFiles: ["src/index.ts"], architectureComponentIds: ["ARCH-COMP-API"], dependencyKeys: [] }] }] } };
 const noOpSummary: RepositoryRunSummary = { runId: "mock", branchName: "mock", baseCommitSha: "a".repeat(40),
   worktreePath: "unused", changedFiles: [], diffSummary: "", validationPassed: true, validationCommands: [],
   agentResponse: { explanation: "Verified", changes: [], commitMessage: "", sessionId: "mock", buildVerified: true, successfulNoOp: true } };

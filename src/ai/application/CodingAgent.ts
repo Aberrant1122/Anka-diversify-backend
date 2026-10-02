@@ -33,6 +33,8 @@ export interface CodingAgentInternalOptions {
    */
   /** Trusted backend shipping policy; never read from ChatRequest/model output. */
   shipping?: RepositoryShippingPolicy;
+  /** Trusted reviewer identity for a later retained Git approval. */
+  shippingApprovalUserId?: string;
 }
 
 export class CodingAgent {
@@ -198,6 +200,7 @@ export class CodingAgent {
           implementationAuthority: acceptedAuthority,
           revalidateAuthority,
           shipping: internalOptions?.shipping,
+          shippingApprovalUserId: internalOptions?.shippingApprovalUserId,
           onProgress,
         })
       );
@@ -246,6 +249,8 @@ export class CodingAgent {
 
     return {
       ...summary.agentResponse,
+      changedFiles: summary.changedFiles,
+      diffSummary: summary.diffSummary,
       visualVerification: summary.visualVerification || summary.agentResponse?.visualVerification,
       taskRuntime: runtime.snapshot(),
       ...(summary.shipping ? { gitShipping: summary.shipping } : {}),

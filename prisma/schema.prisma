@@ -86,6 +86,7 @@ model Project {
   contextSnapshots ContextSnapshot[]
   architectureDriftRecords ArchitectureDriftRecord[]
   fileReservations FileReservation[]
+  implementationTaskExecutions ImplementationTaskExecution[]
 
   @@map("projects")
 }
@@ -121,6 +122,8 @@ model ProjectRepository {
 
   project  Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
   snapshot RepositorySnapshot?
+  implementationTasks KanbanTask[]
+  implementationTaskExecutions ImplementationTaskExecution[]
 
   @@index([projectId])
   @@map("project_repositories")
@@ -815,12 +818,97 @@ model KanbanTask {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
+  // Controlled Implementation lifecycle. Null/false preserves legacy Kanban tasks.
+  implementationEligible Boolean @default(false)
+  implementationState String?
+  stateVersion        Int      @default(0)
+  architectureArtifactId String?
+  architectureVersion Int?
+  architectureContentHash String?
+  architectureApprovalId String?
+  planningAuthorityFingerprint String?
+  architectureComponentIds Json @default("[]")
+  repositoryId       String?
+  approvedVersion    Int?
+  approvedById       String?
+  approvedAt         DateTime?
+  approvedTaskFingerprint String?
+
   stage         KanbanStage       @relation(fields: [stageId], references: [id], onDelete: Cascade)
   clarifications ClarificationQA[]
+  repository    ProjectRepository? @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  dependencies  ImplementationTaskDependency[] @relation("ImplementationTaskDependencies")
+  dependents    ImplementationTaskDependency[] @relation("ImplementationTaskDependents")
+  executions    ImplementationTaskExecution[]
 
   @@index([stageId, order])
   @@index([status])
+  @@index([implementationEligible, implementationState])
+  @@index([repositoryId])
   @@map("kanban_tasks")
+}
+
+model ImplementationTaskDependency {
+  taskId           String
+  dependencyTaskId String
+  createdAt        DateTime @default(now())
+
+  task           KanbanTask @relation("ImplementationTaskDependencies", fields: [taskId], references: [id], onDelete: Cascade)
+  dependencyTask KanbanTask @relation("ImplementationTaskDependents", fields: [dependencyTaskId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, dependencyTaskId])
+  @@index([dependencyTaskId])
+  @@map("implementation_task_dependencies")
+}
+
+model ImplementationTaskExecution {
+  id                   String   @id @default(cuid())
+  projectId            String
+  taskId               String
+  repositoryId         String
+  initiatedById        String
+  idempotencyKey       String
+  requestIdentity      String
+  approvedTaskVersion  Int
+  taskSnapshot         Json
+  planningAuthority    Json
+  authorityFingerprint String
+  state                String
+  startedAt            DateTime @default(now())
+  heartbeatAt          DateTime @default(now())
+  leaseExpiresAt       DateTime
+  completedAt          DateTime?
+  reviewedAt           DateTime?
+  reviewedById         String?
+  reviewComments       String?  @db.Text
+  sessionId            String?
+  runId                String?
+  worktreePath         String?
+  branchName           String?
+  baseCommitSha        String?
+  changedFiles         Json     @default("[]")
+  diffSummary          String?  @db.Text
+  validationEvidence   Json?
+  gitApprovalId        String?
+  gitApprovalExpiresAt DateTime?
+  commitSha            String?
+  pushed               Boolean?
+  remote               String?
+  reviewId             String?
+  reviewUrl            String?
+  failureCategory      String?
+  failureDiagnostic    String?  @db.Text
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task       KanbanTask        @relation(fields: [taskId], references: [id], onDelete: NoAction)
+  repository ProjectRepository @relation(fields: [repositoryId], references: [id], onDelete: NoAction)
+
+  @@unique([taskId, idempotencyKey])
+  @@index([projectId, taskId, createdAt])
+  @@index([state, leaseExpiresAt])
+  @@map("implementation_task_executions")
 }
 
 model ClarificationQA {

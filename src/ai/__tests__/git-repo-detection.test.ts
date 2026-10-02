@@ -18,6 +18,11 @@ jest.mock("../../services/database", () => ({
   },
 }));
 
+jest.mock("../../planning/implementation-authority-preflight", () => ({
+  currentImplementationAuthority: jest.fn().mockResolvedValue({ projectId: "proj-1", actorId: "user-1", fingerprint: "test-authority" }),
+  assertImplementationAuthorityCurrent: jest.fn().mockResolvedValue({ projectId: "proj-1", actorId: "user-1", fingerprint: "test-authority" }),
+}));
+
 describe("AI Step 13C & Safety Fix — Fail-Closed Git Repository Detection & No User Bypass", () => {
   let mainRepoDir: string;
   let subDir: string;

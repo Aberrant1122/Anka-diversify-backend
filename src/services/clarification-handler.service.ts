@@ -1,6 +1,9 @@
 import { PrismaClient } from "@prisma/client";
+import { PlanningAuthorizationService } from "./planning-authorization.service";
+import { PlanningDomainError } from "../planning/planning-errors";
 
 const prisma = new PrismaClient();
+const authorization = new PlanningAuthorizationService(prisma);
 
 export interface ClarificationOption {
   id: string;
@@ -10,6 +13,8 @@ export interface ClarificationOption {
 }
 
 export interface CreateClarificationRequest {
+  projectId: string;
+  actorId: string;
   taskId: string;
   question: string;
   options: ClarificationOption[];
@@ -21,21 +26,15 @@ export class ClarificationHandlerService {
    * Pauses the task by setting status to 'needs_clarification' and creates a ClarificationQA record.
    */
   async requestClarification(req: CreateClarificationRequest) {
-    const qa = await prisma.clarificationQA.create({
-      data: {
-        taskId: req.taskId,
-        question: req.question,
-        options: req.options as unknown as object[],
-        resolved: false,
-      },
+    return prisma.$transaction(async (tx) => {
+      await authorization.assertCanEditInTransaction(tx, req.projectId, req.actorId);
+      const task = await tx.kanbanTask.findFirst({ where: { id: req.taskId, stage: { board: { projectId: req.projectId } } }, select: { id: true, implementationEligible: true } });
+      if (!task) throw new PlanningDomainError("PLANNING_PROJECT_NOT_FOUND", "Task was not found in this project.", 404);
+      if (task.implementationEligible) throw new PlanningDomainError("PLANNING_ACTION_LOCKED", "Controlled implementation tasks cannot be mutated through legacy clarification routes.", 409);
+      const qa = await tx.clarificationQA.create({ data: { taskId: task.id, question: req.question, options: req.options as unknown as object[], resolved: false } });
+      await tx.kanbanTask.update({ where: { id: task.id }, data: { status: "needs_clarification" } });
+      return qa;
     });
-
-    await prisma.kanbanTask.update({
-      where: { id: req.taskId },
-      data: { status: "needs_clarification" },
-    });
-
-    return qa;
   }
 
   /**

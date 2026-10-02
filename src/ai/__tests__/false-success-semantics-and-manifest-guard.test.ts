@@ -19,6 +19,11 @@ import { AgentWorkspaceState } from "../runtime/AgentWorkspaceState";
 import { TaskRuntime } from "../runtime/TaskRuntime";
 import { WorkingPlan } from "../runtime/WorkingPlan";
 
+jest.mock("../../planning/implementation-authority-preflight", () => ({
+  currentImplementationAuthority: jest.fn().mockResolvedValue({ projectId: "p1", actorId: "u1", fingerprint: "test-authority" }),
+  assertImplementationAuthorityCurrent: jest.fn().mockResolvedValue({ projectId: "p1", actorId: "u1", fingerprint: "test-authority" }),
+}));
+
 describe("False Success Semantics & Manifest Failure Guard Regressions", () => {
   let tempDir: string;
 

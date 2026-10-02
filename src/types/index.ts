@@ -569,6 +569,8 @@ export interface AgentResponse {
     status: "VERIFIED" | "ROLLED_BACK";
   }>;
   baseCommitSha?: string;
+  changedFiles?: string[];
+  diffSummary?: string;
   validationCommands?: string[];
   dependencyPreparationAttempted?: boolean;
   dependencyPreparationSucceeded?: boolean;
