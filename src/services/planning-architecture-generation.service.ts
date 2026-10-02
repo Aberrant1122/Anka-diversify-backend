@@ -32,6 +32,8 @@ export interface ReviseArchitectureResult extends GenerateInitialArchitectureRes
 const MODEL_RATES: Readonly<Record<string, { prompt: number; completion: number }>> = Object.freeze({
   "gpt-4o": { prompt: 2.5 / 1_000_000, completion: 10 / 1_000_000 },
   "gpt-4o-mini": { prompt: 0.15 / 1_000_000, completion: 0.6 / 1_000_000 },
+  "gpt-6-astra": { prompt: 10 / 1_000_000, completion: 50 / 1_000_000 },
+  "gpt-6.1-sol": { prompt: 2 / 1_000_000, completion: 10 / 1_000_000 },
 });
 function actualLLMError(error: unknown): LLMError | null {
   if (error instanceof LLMRetryExhaustedError && error.lastError instanceof LLMError) return error.lastError;
@@ -78,7 +80,7 @@ export class PlanningArchitectureGenerationService {
     try {
       assertArchitectureCapacity(messages, ARCHITECTURE_PROVIDER_JSON_SCHEMA, ARCHITECTURE_STRUCTURED_REPAIR_POLICY);
       completion = await this.gateway.callStructured<ArchitectureAuthoredDraft>({
-        stage: PipelineStages.ARCHITECTURE_PLANNING,
+        stage: PipelineStages.ARCHITECTURE_GENERATION,
         messages,
         schema: { name: "anka_initial_architecture", description: "Initial Anka OS Architecture provider draft",
           schema: ARCHITECTURE_PROVIDER_JSON_SCHEMA, strict: true, validate: validateGeneratedArchitecture },
@@ -146,9 +148,9 @@ export class PlanningArchitectureGenerationService {
     let completion: LLMCallResult<ArchitectureAuthoredDraft>;
     try {
       const messages = buildRevisionArchitectureMessages(payload);
-      assertArchitectureCapacity(messages, ARCHITECTURE_PROVIDER_JSON_SCHEMA, ARCHITECTURE_REVISION_REPAIR_POLICY, undefined, format);
+      assertArchitectureCapacity(messages, ARCHITECTURE_PROVIDER_JSON_SCHEMA, ARCHITECTURE_REVISION_REPAIR_POLICY, undefined, format, PipelineStages.ARCHITECTURE_REVISION);
       completion = await this.gateway.callStructured<ArchitectureAuthoredDraft>({
-        stage: PipelineStages.ARCHITECTURE_PLANNING, messages,
+        stage: PipelineStages.ARCHITECTURE_REVISION, messages,
         schema: { ...format, schema: ARCHITECTURE_PROVIDER_JSON_SCHEMA, strict: true, validate: validateGeneratedArchitecture },
         structuredRepair: { instructions: ARCHITECTURE_REVISION_REPAIR_POLICY },
         maxTokens: ARCHITECTURE_MAX_OUTPUT_TOKENS, maxRetries: 1,
@@ -244,6 +246,8 @@ export class PlanningArchitectureGenerationService {
       usageSource: complete ? "provider" : provider.length ? "partial_provider" : "unavailable",
       providerUsageAttemptCount: provider.length, attempts: attempts as unknown as Prisma.InputJsonArray,
       attemptCount: attempts.length, finishReason: final?.finishReason ?? null,
+      routeId: final?.routeId ?? null, reasoningEffort: final?.reasoningEffort ?? null,
+      configuredMaxOutputTokens: final?.maxOutputTokens ?? null,
       promptVersion, schemaVersion: ARCHITECTURE_PROVIDER_SCHEMA_VERSION,
     };
     const costUSD = complete && attempts.every((attempt) => Boolean(MODEL_RATES[attempt.model]))

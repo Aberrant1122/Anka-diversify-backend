@@ -2,6 +2,7 @@ import { LLMRoutingError } from "./LLMError";
 import { PipelineStage, PipelineStages, isValidPipelineStage } from "./PipelineStage";
 
 export type ModelTier = "FAST" | "STANDARD" | "REASONING";
+export type ModelReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
 export interface ModelRoutingMetadata {
   taskComplexity?: "SMALL" | "MEDIUM" | "COMPLEX";
@@ -14,6 +15,13 @@ export interface ModelRouterConfig {
   standardModel: string;
   reasoningModel: string;
   fallbackModel: string;
+  requirementsGenerationModel: string;
+  requirementsRevisionModel: string;
+  documentationGenerationModel: string;
+  documentationRevisionModel: string;
+  architectureModel: string;
+  implementationPlanningModel: string;
+  codeGenerationModel: string;
 }
 
 export interface ModelRoutePolicy {
@@ -32,6 +40,7 @@ export interface ModelRoutingDecision extends ModelRoutePolicy {
   stage: PipelineStage;
   primaryModel: string;
   fallbackModels: string[];
+  reasoningEffort: ModelReasoningEffort | null;
   consideredMetadata: ModelRoutingMetadata;
 }
 
@@ -43,14 +52,21 @@ const STAGE_POLICIES: Record<PipelineStage, ModelRoutePolicy> = {
   [PipelineStages.MANIFEST_GENERATION]: standardPolicy(8_000),
   [PipelineStages.MANIFEST_CORRECTION]: standardPolicy(8_000),
   [PipelineStages.ROADMAP_PLANNING]: standardPolicy(4_000),
+  [PipelineStages.REQUIREMENTS_GENERATION]: reasoningPolicy(32_000, 32_000),
+  [PipelineStages.REQUIREMENTS_REVISION]: reasoningPolicy(32_000, 32_000),
   [PipelineStages.DOCUMENTATION_PLANNING]: standardPolicy(8_000),
+  [PipelineStages.DOCUMENTATION_GENERATION]: reasoningPolicy(32_000, 32_000),
+  [PipelineStages.DOCUMENTATION_REVISION]: reasoningPolicy(32_000, 32_000),
   [PipelineStages.ARCHITECTURE_PLANNING]: {
     tier: "STANDARD", contextWindowTokens: 64_000 + 12_000 + 512,
     maxInputTokens: 64_000, defaultMaxOutputTokens: 12_000,
     maxOutputTokens: 12_000, defaultTemperature: 0.2,
     maxTemperature: 0.7, maxRetries: 1,
   },
-  [PipelineStages.CODE_GENERATION]: reasoningPolicy(12_000),
+  [PipelineStages.ARCHITECTURE_GENERATION]: reasoningPolicy(32_000, 32_000),
+  [PipelineStages.ARCHITECTURE_REVISION]: reasoningPolicy(32_000, 32_000),
+  [PipelineStages.IMPLEMENTATION_PLANNING]: reasoningPolicy(32_000, 32_000),
+  [PipelineStages.CODE_GENERATION]: reasoningPolicy(32_000, 32_000),
   [PipelineStages.CODE_CORRECTION]: reasoningPolicy(12_000),
   [PipelineStages.REPAIR]: reasoningPolicy(12_000),
   [PipelineStages.STATIC_REVIEW]: standardPolicy(4_000),
@@ -86,12 +102,12 @@ function standardPolicy(maxOutputTokens: number): ModelRoutePolicy {
   };
 }
 
-function reasoningPolicy(maxOutputTokens: number): ModelRoutePolicy {
+function reasoningPolicy(maxOutputTokens: number, defaultMaxOutputTokens = Math.min(8_000, maxOutputTokens)): ModelRoutePolicy {
   return {
     tier: "REASONING",
     contextWindowTokens: 64_000 + maxOutputTokens + 512,
     maxInputTokens: 64_000,
-    defaultMaxOutputTokens: Math.min(8_000, maxOutputTokens),
+    defaultMaxOutputTokens,
     maxOutputTokens,
     defaultTemperature: 0.1,
     maxTemperature: 0.4,
@@ -106,6 +122,26 @@ function configuredModel(value: string | undefined, fallback: string, name: stri
   }
   return model;
 }
+
+function configuredAllowedModel(
+  value: string | undefined,
+  fallback: string,
+  name: string,
+  allowed: readonly string[],
+): string {
+  const model = configuredModel(value, fallback, name);
+  if (!allowed.includes(model)) {
+    throw new LLMRoutingError(`Unsupported ${name} model configuration`, {
+      configuration: name,
+      model,
+      allowedModels: [...allowed],
+    });
+  }
+  return model;
+}
+
+const SOL_MODEL = "gpt-6.1-sol";
+const ASTRA_MODEL = "gpt-6-astra";
 
 /**
  * Deterministic backend model policy. It selects configuration only and never
@@ -125,6 +161,23 @@ export class ModelRouter {
       standardModel,
       reasoningModel: configuredModel(config.reasoningModel ?? process.env.OPENAI_REASONING_MODEL, standardModel, "reasoning"),
       fallbackModel: configuredModel(config.fallbackModel ?? process.env.OPENAI_FALLBACK_MODEL, "gpt-4o-mini", "fallback"),
+      requirementsGenerationModel: configuredAllowedModel(config.requirementsGenerationModel, SOL_MODEL, "Requirements generation", [SOL_MODEL]),
+      requirementsRevisionModel: configuredAllowedModel(config.requirementsRevisionModel, SOL_MODEL, "Requirements revision", [SOL_MODEL]),
+      documentationGenerationModel: configuredAllowedModel(config.documentationGenerationModel, SOL_MODEL, "Documentation generation", [SOL_MODEL]),
+      documentationRevisionModel: configuredAllowedModel(config.documentationRevisionModel, SOL_MODEL, "Documentation revision", [SOL_MODEL]),
+      architectureModel: configuredAllowedModel(
+        config.architectureModel ?? process.env.OPENAI_ARCHITECTURE_MODEL,
+        ASTRA_MODEL,
+        "Architecture",
+        [ASTRA_MODEL, SOL_MODEL],
+      ),
+      implementationPlanningModel: configuredAllowedModel(config.implementationPlanningModel, SOL_MODEL, "Implementation planning", [SOL_MODEL]),
+      codeGenerationModel: configuredAllowedModel(
+        config.codeGenerationModel ?? config.reasoningModel,
+        SOL_MODEL,
+        "Code generation",
+        config.reasoningModel ? [SOL_MODEL, config.reasoningModel] : [SOL_MODEL],
+      ),
     };
   }
 
@@ -141,8 +194,11 @@ export class ModelRouter {
     }
 
     const tier = base.tier;
-    const primaryModel = this.modelForTier(tier);
-    const fallbackModels = [this.config.fallbackModel].filter((model) => model !== primaryModel);
+    const operationRoute = this.operationRoute(stage);
+    const primaryModel = operationRoute?.model ?? this.modelForTier(tier);
+    const fallbackModels = operationRoute
+      ? []
+      : [this.config.fallbackModel].filter((model) => model !== primaryModel);
 
     return {
       ...base,
@@ -151,6 +207,7 @@ export class ModelRouter {
       stage,
       primaryModel,
       fallbackModels,
+      reasoningEffort: operationRoute?.reasoningEffort ?? null,
       consideredMetadata: {},
     };
   }
@@ -170,6 +227,28 @@ export class ModelRouter {
     if (tier === "FAST") return this.config.fastModel;
     if (tier === "STANDARD") return this.config.standardModel;
     return this.config.reasoningModel;
+  }
+
+  private operationRoute(stage: PipelineStage): { model: string; reasoningEffort: ModelReasoningEffort } | null {
+    switch (stage) {
+      case PipelineStages.REQUIREMENTS_GENERATION:
+        return { model: this.config.requirementsGenerationModel, reasoningEffort: "high" };
+      case PipelineStages.REQUIREMENTS_REVISION:
+        return { model: this.config.requirementsRevisionModel, reasoningEffort: "medium" };
+      case PipelineStages.DOCUMENTATION_GENERATION:
+        return { model: this.config.documentationGenerationModel, reasoningEffort: "medium" };
+      case PipelineStages.DOCUMENTATION_REVISION:
+        return { model: this.config.documentationRevisionModel, reasoningEffort: "medium" };
+      case PipelineStages.ARCHITECTURE_GENERATION:
+      case PipelineStages.ARCHITECTURE_REVISION:
+        return { model: this.config.architectureModel, reasoningEffort: "high" };
+      case PipelineStages.IMPLEMENTATION_PLANNING:
+        return { model: this.config.implementationPlanningModel, reasoningEffort: "high" };
+      case PipelineStages.CODE_GENERATION:
+        return { model: this.config.codeGenerationModel, reasoningEffort: "high" };
+      default:
+        return null;
+    }
   }
 
 }

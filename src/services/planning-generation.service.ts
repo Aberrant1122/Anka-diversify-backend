@@ -104,6 +104,7 @@ interface PlanningGenerationDependencies {
 const KNOWN_MODEL_RATES: Readonly<Record<string, { prompt: number; completion: number }>> = Object.freeze({
   "gpt-4o": { prompt: 2.5 / 1_000_000, completion: 10 / 1_000_000 },
   "gpt-4o-mini": { prompt: 0.15 / 1_000_000, completion: 0.6 / 1_000_000 },
+  "gpt-6.1-sol": { prompt: 2 / 1_000_000, completion: 10 / 1_000_000 },
 });
 
 interface ReplayMapping {
@@ -304,7 +305,7 @@ export class PlanningGenerationService {
     let completion: LLMCallResult<RequirementsContent>;
     try {
       completion = await this.gateway.callStructured<RequirementsContent>({
-        stage: PipelineStages.ROADMAP_PLANNING,
+        stage: PipelineStages.REQUIREMENTS_GENERATION,
         messages: buildInitialRequirementsMessages(started.context.payload as InitialRequirementsContextPayload),
         schema: {
           name: "anka_initial_requirements",
@@ -420,7 +421,7 @@ export class PlanningGenerationService {
     let completion: LLMCallResult<RequirementsContent>;
     try {
       completion = await this.gateway.callStructured<RequirementsContent>({
-        stage: PipelineStages.ROADMAP_PLANNING,
+        stage: PipelineStages.REQUIREMENTS_REVISION,
         messages: buildRevisionRequirementsMessages(revisionContext),
         schema: {
           name: "anka_requirements_revision",
@@ -683,6 +684,9 @@ export class PlanningGenerationService {
       latencyScope: "final_attempt",
       attemptCount: attempts.length,
       finishReason: finalAttempt?.finishReason ?? null,
+      routeId: finalAttempt?.routeId ?? null,
+      reasoningEffort: finalAttempt?.reasoningEffort ?? null,
+      configuredMaxOutputTokens: finalAttempt?.maxOutputTokens ?? null,
       promptVersion,
       schemaVersion: REQUIREMENTS_PROVIDER_SCHEMA_VERSION,
     };

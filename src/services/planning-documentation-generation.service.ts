@@ -85,6 +85,7 @@ export interface ReviseDocumentationResult {
 const MODEL_RATES: Readonly<Record<string, { prompt: number; completion: number }>> = Object.freeze({
   "gpt-4o": { prompt: 2.5 / 1_000_000, completion: 10 / 1_000_000 },
   "gpt-4o-mini": { prompt: 0.15 / 1_000_000, completion: 0.6 / 1_000_000 },
+  "gpt-6.1-sol": { prompt: 2 / 1_000_000, completion: 10 / 1_000_000 },
 });
 
 function actualLLMError(error: unknown): LLMError | null {
@@ -154,7 +155,7 @@ export class PlanningDocumentationGenerationService {
     let completion: LLMCallResult<DocumentationProviderDraft>;
     try {
       completion = await this.gateway.callStructured<DocumentationProviderDraft>({
-        stage: PipelineStages.DOCUMENTATION_PLANNING,
+        stage: PipelineStages.DOCUMENTATION_GENERATION,
         messages: buildInitialDocumentationMessages(initialContext.payload as any),
         schema: {
           name: "anka_initial_documentation", description: "Initial Anka OS Documentation & Specs provider draft",
@@ -232,7 +233,7 @@ export class PlanningDocumentationGenerationService {
     let completion: LLMCallResult<DocumentationProviderDraft>;
     try {
       completion = await this.gateway.callStructured<DocumentationProviderDraft>({
-        stage: PipelineStages.DOCUMENTATION_PLANNING,
+        stage: PipelineStages.DOCUMENTATION_REVISION,
         messages: buildRevisionDocumentationMessages(revisionContext.payload),
         schema: {
           name: "anka_revise_documentation",
@@ -414,6 +415,8 @@ export class PlanningDocumentationGenerationService {
       usageSource: complete ? "provider" : provider.length ? "partial_provider" : "unavailable",
       providerUsageAttemptCount: provider.length, attempts: attempts as unknown as Prisma.InputJsonArray,
       attemptCount: attempts.length, finishReason: final?.finishReason ?? null,
+      routeId: final?.routeId ?? null, reasoningEffort: final?.reasoningEffort ?? null,
+      configuredMaxOutputTokens: final?.maxOutputTokens ?? null,
       promptVersion, schemaVersion: DOCUMENTATION_PROVIDER_SCHEMA_VERSION,
     };
     const costUSD = complete && attempts.every((attempt) => Boolean(MODEL_RATES[attempt.model]))

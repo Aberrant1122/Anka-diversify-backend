@@ -526,7 +526,7 @@ Respond ONLY with valid JSON:
         { role: "user", content: userMessage },
       ],
       temperature: 0.2,
-      maxTokens: 8000,
+      maxTokens: 32_000,
       schema: {
         name: "ExecuteChangesSchema",
         strict: false,
@@ -603,7 +603,7 @@ Respond ONLY with valid JSON:
     if ((!isDeleteTask || manifestHasCreateOrModify) && !isStandaloneWeb) {
       try {
         const roadmapRes = await gateway.callStructured<{ roadmap: RoadmapStep[] }>({
-          stage: PipelineStages.ROADMAP_PLANNING,
+          stage: PipelineStages.IMPLEMENTATION_PLANNING,
           messages: [
             { role: "system", content: IMPLEMENTATION_PLANNER_PROMPT },
             { role: "user", content: `REQUEST: ${message}\nINTENT: ${intentResult.intent}${buildPriorVerifiedTargetSection(priorVerifiedTargets)}` },
@@ -827,7 +827,7 @@ When using an existing local component, conform to its authoritative exported pr
         { role: "user", content: userPrompt },
       ],
       temperature: 0.2,
-      maxTokens: 16000,
+      maxTokens: 32_000,
       repositoryEvidence,
       schema: codeGenerationSchema("PrimaryCodeGenerationSchema", Boolean(hasManifest || isDeleteTask)),
     });

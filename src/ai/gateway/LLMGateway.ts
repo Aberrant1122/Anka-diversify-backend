@@ -27,7 +27,7 @@ import {
 } from "./LLMError";
 import { LLMTelemetry, LLMTelemetryContext } from "./LLMTelemetry";
 import { BudgetManager, BudgetReservation } from "./BudgetManager";
-import { ModelRouter } from "./ModelRouter";
+import { ModelReasoningEffort, ModelRouter } from "./ModelRouter";
 import { getActiveTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
 
 export const MAX_GATEWAY_RETRIES = 5;
@@ -124,6 +124,9 @@ export interface LLMProviderAttempt {
   totalTokens: number | null;
   usageSource: "provider" | "unavailable";
   latencyMs: number;
+  routeId?: string;
+  reasoningEffort?: ModelReasoningEffort | null;
+  maxOutputTokens?: number;
 }
 
 export interface LLMCallResult<T = string> {
@@ -140,6 +143,12 @@ export interface LLMCallResult<T = string> {
   stage: PipelineStage;
   attemptCount?: number;
   providerAttempts?: LLMProviderAttempt[];
+  routing?: {
+    routeId: string;
+    model: string;
+    reasoningEffort: ModelReasoningEffort | null;
+    maxOutputTokens: number;
+  };
 }
 
 export interface LLMGatewayComponents {
@@ -283,6 +292,7 @@ export class LLMGateway {
       contextWindowTokens: route.contextWindowTokens,
       maxOutputTokens: maxTokens,
       maxRetries,
+      reasoningEffort: route.reasoningEffort,
     });
     this.telemetry.emit("llm.context", {
       ...effectiveContext,
@@ -345,10 +355,22 @@ export class LLMGateway {
             reservation,
             managedContext.estimatedTokens,
             attemptKind,
+            route.routeId,
+            route.reasoningEffort,
+            maxTokens,
             (providerAttempt) => providerAttempts.push(providerAttempt),
           );
           this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
-          return { ...result, providerAttempts: [...providerAttempts] };
+          return {
+            ...result,
+            providerAttempts: [...providerAttempts],
+            routing: {
+              routeId: route.routeId,
+              model,
+              reasoningEffort: route.reasoningEffort,
+              maxOutputTokens: maxTokens,
+            },
+          };
         } catch (err: unknown) {
           if (providerAttempts.length === attemptsBeforeCall) {
             providerAttempts.push({
@@ -363,6 +385,9 @@ export class LLMGateway {
               totalTokens: null,
               usageSource: "unavailable",
               latencyMs: Date.now() - startTime,
+              routeId: route.routeId,
+              reasoningEffort: route.reasoningEffort,
+              maxOutputTokens: maxTokens,
             });
           }
           const failedSettlement = this.budgetManager.failAttempt(reservation);
@@ -510,6 +535,9 @@ export class LLMGateway {
     reservation: BudgetReservation,
     estimatedInputTokens: number,
     attemptKind: LLMProviderAttemptKind,
+    routeId: string,
+    reasoningEffort: ModelReasoningEffort | null,
+    maxOutputTokens: number,
     recordProviderAttempt: (attempt: LLMProviderAttempt) => void,
   ): Promise<LLMCallResult<T>> {
     const controller = new AbortController();
@@ -519,12 +547,15 @@ export class LLMGateway {
       const requestPayload: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
         model,
         messages: options.messages,
-        temperature: typeof options.temperature === "number" ? options.temperature : 0.2,
       };
 
       if (typeof options.maxTokens === "number") {
-        requestPayload.max_tokens = options.maxTokens;
+        if (reasoningEffort) requestPayload.max_completion_tokens = options.maxTokens;
+        else requestPayload.max_tokens = options.maxTokens;
       }
+
+      if (reasoningEffort) requestPayload.reasoning_effort = reasoningEffort;
+      else requestPayload.temperature = typeof options.temperature === "number" ? options.temperature : 0.2;
 
       if (mode === "tools") {
         const toolOptions = options as LLMToolCallOptions;
@@ -560,6 +591,9 @@ export class LLMGateway {
         totalTokens: this.providerUsageValue(providerUsage?.total_tokens),
         usageSource: providerUsage ? "provider" : "unavailable",
         latencyMs,
+        routeId,
+        reasoningEffort,
+        maxOutputTokens,
       });
       if (!choice) {
         throw new LLMProviderError("Provider returned empty choices array", {

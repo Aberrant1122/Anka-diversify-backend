@@ -148,7 +148,7 @@ class FakeRequirementsGateway {
       usage: { promptTokens: 999, completionTokens: 999, totalTokens: 1_998 },
       latencyMs: 12,
       model,
-      stage: PipelineStages.ROADMAP_PLANNING,
+      stage: options.stage,
       attemptCount: 1,
       ...(this.options.providerAttempts ? { providerAttempts: this.options.providerAttempts } : {}),
     };
@@ -285,7 +285,12 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
   test("completed replay returns the stored artifact without another gateway call", async () => {
     const projectId = await createProject();
     const gateway = new FakeRequirementsGateway(requirements("replay"), {
-      usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+      providerAttempts: [{
+        attemptNumber: 1, kind: "initial", providerResponseId: "response-sol", providerRequestId: "request-sol",
+        model: "gpt-6.1-sol", finishReason: "stop", promptTokens: 10, completionTokens: 10, totalTokens: 20,
+        usageSource: "provider", latencyMs: 1, routeId: "REQUIREMENTS_GENERATION:REASONING",
+        reasoningEffort: "high", maxOutputTokens: 32_000,
+      }],
     });
     const generation = service(gateway);
     const input = { projectId, actorId: ownerId, idempotencyKey: "replay", brief: "Replay exactly." };
@@ -293,6 +298,13 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
     const replay = await generation.generateInitialRequirements(input);
     expect(replay).toMatchObject({ reused: true, httpStatus: 200, artifact: { id: first.artifact?.id } });
     expect(gateway.calls).toBe(1);
+    expect(first.run.modelUsage).toMatchObject({
+      model: "gpt-6.1-sol",
+      routeId: "REQUIREMENTS_GENERATION:REASONING",
+      reasoningEffort: "high",
+      configuredMaxOutputTokens: 32_000,
+    });
+    expect(replay.run.modelUsage).toEqual(first.run.modelUsage);
   });
 
   test("missing provider usage stays null and an unknown model is not priced", async () => {

@@ -9,4 +9,6 @@ export const ARCHITECTURE_PROVIDER_SCHEMA_VERSION = "architecture-provider-schem
 export const ARCHITECTURE_ACTIVE_RUN_STALE_MS = 15 * 60 * 1000;
 export const ARCHITECTURE_MEMORY_MAX_BYTES = 16 * 1024;
 export const ARCHITECTURE_MAX_INPUT_TOKENS = 64_000;
-export const ARCHITECTURE_MAX_OUTPUT_TOKENS = 12_000;
+// Reasoning tokens share the provider output budget. 32k preserves meaningful
+// room for the canonical artifact while remaining far below the 128k model cap.
+export const ARCHITECTURE_MAX_OUTPUT_TOKENS = 32_000;

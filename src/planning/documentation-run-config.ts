@@ -15,4 +15,5 @@ export const DOCUMENTATION_PROVIDER_SCHEMA_VERSION = "documentation-provider-sch
 export const DOCUMENTATION_ACTIVE_RUN_STALE_MS = 15 * 60 * 1000;
 export const DOCUMENTATION_INPUT_LIMITS = REQUIREMENTS_INPUT_LIMITS;
 export const DOCUMENTATION_MEMORY_MAX_BYTES = REQUIREMENTS_INPUT_LIMITS.memorySummaryBytes;
-export const DOCUMENTATION_MAX_OUTPUT_TOKENS = 8_000;
+// Reasoning tokens and visible JSON share this limit for current reasoning models.
+export const DOCUMENTATION_MAX_OUTPUT_TOKENS = 32_000;
