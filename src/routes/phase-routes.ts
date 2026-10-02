@@ -27,6 +27,7 @@ router.post("/architecture/artifacts/generate", phaseController.generateInitialA
 router.get("/architecture/runs/:runId", phaseController.getArchitectureRun.bind(phaseController));
 router.post("/architecture/artifacts", phaseController.createArchitectureArtifact.bind(phaseController));
 router.post("/architecture/artifacts/:artifactId/revisions", phaseController.createArchitectureSuccessor.bind(phaseController));
+router.post("/architecture/artifacts/:artifactId/revisions/ai", phaseController.reviseArchitectureAI.bind(phaseController));
 
 // POST   /api/projects/:projectId/phases/artifacts
 router.post("/artifacts", phaseController.createArtifact.bind(phaseController));

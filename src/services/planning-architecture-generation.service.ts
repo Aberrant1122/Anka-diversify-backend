@@ -6,8 +6,10 @@ import {
   ARCHITECTURE_PROVIDER_JSON_SCHEMA, ARCHITECTURE_STRUCTURED_REPAIR_POLICY,
   buildInitialArchitectureMessages, validateGeneratedArchitecture,
 } from "../ai/prompts/architecture";
+import { ARCHITECTURE_REVISION_REPAIR_POLICY, buildRevisionArchitectureMessages } from "../ai/prompts/architecture-revision";
 import { assertArchitectureCapacity } from "../planning/architecture-capacity";
 import { ArchitectureAuthoredDraft, ArchitectureValidationError } from "../planning/architecture-schema";
+import { ArchitectureDeterministicDiff, ArchitectureRevisionOperation, ComponentRetirement, IdentityRetirement } from "../planning/architecture-revision-policy";
 import { ARCHITECTURE_MAX_OUTPUT_TOKENS, ARCHITECTURE_PROVIDER_SCHEMA_VERSION } from "../planning/architecture-run-config";
 import { PlanningDomainError, PlanningErrorCode } from "../planning/planning-errors";
 import { ArchitectureReadiness } from "./planning-architecture-readiness.service";
@@ -21,6 +23,12 @@ export interface GenerateInitialArchitectureResult {
   run: WorkflowRun; artifact: PhaseArtifact | null; readiness: ArchitectureReadiness | null;
   reused: boolean; httpStatus: 200 | 201 | 202;
 }
+export interface ReviseArchitectureInput {
+  projectId: string; actorId: string; idempotencyKey: string; operation: ArchitectureRevisionOperation;
+  baseArtifactId: string; baseVersion: number; baseContentHash: string; instruction: string;
+  includeMemory?: boolean; rebaseToCurrentAuthorities?: boolean; componentRetirements?: ComponentRetirement[]; identityRetirements?: IdentityRetirement[];
+}
+export interface ReviseArchitectureResult extends GenerateInitialArchitectureResult { diff: ArchitectureDeterministicDiff | null }
 const MODEL_RATES: Readonly<Record<string, { prompt: number; completion: number }>> = Object.freeze({
   "gpt-4o": { prompt: 2.5 / 1_000_000, completion: 10 / 1_000_000 },
   "gpt-4o-mini": { prompt: 0.15 / 1_000_000, completion: 0.6 / 1_000_000 },
@@ -115,6 +123,67 @@ export class PlanningArchitectureGenerationService {
     }
   }
 
+  async reviseArchitecture(input: ReviseArchitectureInput): Promise<ReviseArchitectureResult> {
+    let started: Awaited<ReturnType<PlanningArchitectureRunService["startRevision"]>>;
+    try {
+      started = await this.runs.startRevision({ ...input, includeMemory: input.includeMemory === true,
+        rebaseToCurrentAuthorities: input.rebaseToCurrentAuthorities === true });
+    } catch (error) {
+      if (error instanceof PlanningDomainError) throw error;
+      throw new PlanningDomainError("PLANNING_PERSISTENCE_FAILED", "Planning state could not be persisted. Please retry.", 503);
+    }
+    if (started.reused) {
+      if (started.run.status === "running") return { run: started.run, artifact: null, readiness: null, diff: null, reused: true, httpStatus: 202 };
+      if (started.run.status === "completed") {
+        const result = await this.runs.historicalRevisionResult(input.projectId, started.run);
+        return { ...result, reused: true, httpStatus: 200 };
+      }
+      await this.replay(input, started.run);
+      throw new PlanningDomainError("PLANNING_RUN_INVARIANT", "Stored Architecture revision cannot be replayed safely.", 500);
+    }
+    const { payload, manifest } = started.context;
+    const format = { name: "anka_revise_architecture", description: "Anka OS Architecture revision provider draft" };
+    let completion: LLMCallResult<ArchitectureAuthoredDraft>;
+    try {
+      const messages = buildRevisionArchitectureMessages(payload);
+      assertArchitectureCapacity(messages, ARCHITECTURE_PROVIDER_JSON_SCHEMA, ARCHITECTURE_REVISION_REPAIR_POLICY, undefined, format);
+      completion = await this.gateway.callStructured<ArchitectureAuthoredDraft>({
+        stage: PipelineStages.ARCHITECTURE_PLANNING, messages,
+        schema: { ...format, schema: ARCHITECTURE_PROVIDER_JSON_SCHEMA, strict: true, validate: validateGeneratedArchitecture },
+        structuredRepair: { instructions: ARCHITECTURE_REVISION_REPAIR_POLICY },
+        maxTokens: ARCHITECTURE_MAX_OUTPUT_TOKENS, maxRetries: 1,
+        context: { runId: started.run.id, projectId: input.projectId },
+      });
+    } catch (error) {
+      const mapped = error instanceof PlanningDomainError ? error : providerError(error);
+      await this.tryFinish(input.projectId, started.run.id, "failed", mapped, this.auditForError(error, manifest.promptVersion));
+      throw mapped;
+    }
+    const baseAudit = this.audit(this.attempts(completion), manifest.promptVersion);
+    const audit = { ...baseAudit, modelUsage: { ...baseAudit.modelUsage,
+      componentRetirements: manifest.componentRetirements as unknown as Prisma.InputJsonArray,
+      identityRetirements: manifest.identityRetirements as unknown as Prisma.InputJsonArray } };
+    const validation = validateGeneratedArchitecture(completion.content);
+    if (!validation.valid || !validation.data || completion.finishReason === "length") {
+      const mapped = new PlanningDomainError(completion.finishReason === "length" ? "PLANNING_AI_TRUNCATED" : "PLANNING_AI_INVALID_RESPONSE",
+        completion.finishReason === "length" ? "The Architecture response was truncated." : "The model returned invalid Architecture content.", 502);
+      await this.tryFinish(input.projectId, started.run.id, "failed", mapped, audit);
+      throw mapped;
+    }
+    try {
+      const result = await this.runs.finalizeRevision({ projectId: input.projectId, runId: started.run.id,
+        actorId: input.actorId, structuredContent: validation.data, audit });
+      return { ...result, reused: false, httpStatus: 201 };
+    } catch (error) {
+      const mapped = error instanceof PlanningDomainError ? error :
+        new PlanningDomainError("PLANNING_PERSISTENCE_FAILED", "Revised Architecture could not be persisted atomically.", 503);
+      const status = mapped.code === "PLANNING_CONTEXT_CHANGED" || mapped.code === "PLANNING_CONCURRENT_UPDATE" ||
+        mapped.code === "PLANNING_ACTION_LOCKED" ? "conflicted" : mapped.code === "PLANNING_PROJECT_NOT_FOUND" ? "cancelled" : "failed";
+      await this.tryFinish(input.projectId, started.run.id, status, mapped, audit);
+      throw mapped;
+    }
+  }
+
   private async replay(input: GenerateInitialArchitectureInput, run: WorkflowRun): Promise<GenerateInitialArchitectureResult> {
     if (run.status === "running") return { run, artifact: null, readiness: null, reused: true, httpStatus: 202 };
     if (run.status === "completed") {
@@ -127,6 +196,7 @@ export class PlanningArchitectureGenerationService {
       PLANNING_AI_CONTEXT_TOO_LARGE: 413, PLANNING_AI_INVALID_RESPONSE: 502,
       PLANNING_AI_REFUSED: 422, PLANNING_AI_CONTENT_FILTERED: 422,
       PLANNING_AI_TRUNCATED: 502, PLANNING_AI_OUTPUT_TOO_LARGE: 502,
+      PLANNING_REVISION_NO_CHANGES: 422,
       PLANNING_PERSISTENCE_FAILED: 503, PLANNING_CONTEXT_CHANGED: 409,
       PLANNING_CONCURRENT_UPDATE: 409, PLANNING_STALE_RUN_RECOVERED: 409,
       PLANNING_AUTHORIZATION_CHANGED: 409, PLANNING_ACTION_LOCKED: 409,

@@ -17,6 +17,7 @@ export function assertArchitectureCapacity(
   schema: Record<string, unknown>,
   repairInstructions: string,
   router: ModelRouter = new ModelRouter(),
+  responseFormat: { name: string; description: string } = { name: "anka_initial_architecture", description: "Initial Anka OS Architecture provider draft" },
 ): void {
   const route = router.route(PipelineStages.ARCHITECTURE_PLANNING);
   if (route.maxInputTokens !== ARCHITECTURE_MAX_INPUT_TOKENS || route.maxOutputTokens < ARCHITECTURE_MAX_OUTPUT_TOKENS) {
@@ -35,7 +36,7 @@ export function assertArchitectureCapacity(
       reservedOutputTokens: ARCHITECTURE_MAX_OUTPUT_TOKENS,
       requiredRequestPayloads: [
         { id: "structured-response-format", value: { type: "json_schema", json_schema: {
-          name: "anka_initial_architecture", description: "Initial Anka OS Architecture provider draft",
+          name: responseFormat.name, description: responseFormat.description,
           schema, strict: true,
         } } },
         { id: "structured-repair-instructions", value: repairInstructions },

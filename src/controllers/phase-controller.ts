@@ -12,6 +12,8 @@ import {
   ValidatedDocumentationRevisionTarget,
 } from "../planning/documentation-revision-policy";
 import { DocumentationProviderRoot, DocumentationValidationError } from "../planning/documentation-schema";
+import { ArchitectureRevisionOperation, ARCHITECTURE_REVISION_OPERATIONS, ComponentRetirement, IdentityRetirement, normalizeComponentRetirements, normalizeIdentityRetirements } from "../planning/architecture-revision-policy";
+import { ArchitectureValidationError } from "../planning/architecture-schema";
 import { PhaseService } from "../services/phase-service";
 
 const phaseService = new PhaseService();
@@ -46,6 +48,45 @@ function architectureArtifactBody(req: Request, successor: boolean): { title: st
   if (unknown.length) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unknown Architecture fields: ${unknown.join(", ")}.`, 422, { fields: unknown });
   if (!body.structuredContent || typeof body.structuredContent !== "object" || Array.isArray(body.structuredContent)) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "structuredContent must be an object.", 422);
   return { title: requiredBodyString(req, "title"), structuredContent: body.structuredContent, ...(successor ? { baseContentHash: requiredBodyString(req, "baseContentHash") } : {}) };
+}
+
+function architectureRevisionBody(req: Request): { operation: ArchitectureRevisionOperation; baseVersion: number;
+  baseContentHash: string; instruction: string; includeMemory: boolean; rebaseToCurrentAuthorities: boolean; componentRetirements: ComponentRetirement[]; identityRetirements: IdentityRetirement[] } {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body))
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Request body must be a JSON object.", 422);
+  if (!ARCHITECTURE_REVISION_OPERATIONS.includes(body.operation))
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "A supported Architecture revision operation is required.", 422);
+  const operation = body.operation as ArchitectureRevisionOperation;
+  const contentField = operation === "DOCUMENT_REVISION" ? "instruction" : "feedback";
+  const allowed = new Set(["operation", "baseVersion", "baseContentHash", contentField, "includeMemory", "rebaseToCurrentAuthorities", "componentRetirements", "identityRetirements"]);
+  const unknown = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unknown.length) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unknown Architecture revision fields: ${unknown.join(", ")}.`, 422, { fields: unknown });
+  const instruction = body[contentField];
+  if (typeof instruction !== "string" || !instruction.trim() || Buffer.byteLength(instruction, "utf8") > 8192)
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `${contentField} must be non-empty and at most 8192 UTF-8 bytes.`, 422);
+  if (!Number.isSafeInteger(body.baseVersion) || body.baseVersion < 1 ||
+      typeof body.baseContentHash !== "string" || !/^[a-f0-9]{64}$/.test(body.baseContentHash))
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Exact baseVersion and baseContentHash are required.", 422);
+  if (body.includeMemory !== undefined && typeof body.includeMemory !== "boolean")
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "includeMemory must be a boolean.", 422);
+  if (body.rebaseToCurrentAuthorities !== undefined && typeof body.rebaseToCurrentAuthorities !== "boolean")
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "rebaseToCurrentAuthorities must be a boolean.", 422);
+  if (body.rebaseToCurrentAuthorities && operation !== "DOCUMENT_REVISION")
+    throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Explicit rebase requires DOCUMENT_REVISION.", 422);
+  let componentRetirements: ComponentRetirement[];
+  let identityRetirements: IdentityRetirement[];
+  try {
+    componentRetirements = normalizeComponentRetirements(body.componentRetirements);
+    identityRetirements = normalizeIdentityRetirements(body.identityRetirements);
+  }
+  catch (error) {
+    if (error instanceof ArchitectureValidationError) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", error.message, 422, { path: error.path });
+    throw error;
+  }
+  return { operation, baseVersion: body.baseVersion, baseContentHash: body.baseContentHash,
+    instruction: instruction.trim().replace(/\r\n?/g, "\n"), includeMemory: body.includeMemory === true,
+    rebaseToCurrentAuthorities: body.rebaseToCurrentAuthorities === true, componentRetirements, identityRetirements };
 }
 
 function validateArchitectureDecisionBody(req: Request, action: "request" | "approve" | "changes"): void {
@@ -466,6 +507,18 @@ export class PhaseController {
       const artifact = await phaseService.createArchitectureArtifact({ projectId: param(req, "projectId"), actorId, title: body.title, structuredContent: body.structuredContent, baseArtifactId: param(req, "artifactId"), baseContentHash: body.baseContentHash });
       res.status(201).json({ success: true, data: artifact });
     } catch (error) { respondError(res, error, "Failed to create Architecture successor"); }
+  }
+
+  async reviseArchitectureAI(req: Request, res: Response) {
+    try {
+      const actorId = requireUser(req, res);
+      if (!actorId) return;
+      const body = architectureRevisionBody(req);
+      const result = await phaseService.reviseArchitecture({ projectId: param(req, "projectId"), actorId,
+        idempotencyKey: idempotencyKey(req), baseArtifactId: param(req, "artifactId"), ...body });
+      const { httpStatus, ...data } = result;
+      res.status(httpStatus).json({ success: true, data });
+    } catch (error) { respondError(res, error, "Failed to revise Architecture with AI"); }
   }
 
   async getArchitectureReadiness(req: Request, res: Response) {

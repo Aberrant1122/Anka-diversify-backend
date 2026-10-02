@@ -22,7 +22,7 @@ import { PlanningReadinessService } from "./planning-readiness.service";
 import { PlanningRequirementsRunService } from "./planning-requirements-run.service";
 import { PlanningTransitionPolicy } from "./planning-transition-policy";
 import { PlanningArchitectureArtifactService, CreateArchitectureInput } from "./planning-architecture-artifact.service";
-import { GenerateInitialArchitectureInput, PlanningArchitectureGenerationService } from "./planning-architecture-generation.service";
+import { GenerateInitialArchitectureInput, PlanningArchitectureGenerationService, ReviseArchitectureInput } from "./planning-architecture-generation.service";
 import { PlanningArchitectureRunService } from "./planning-architecture-run.service";
 
 export const PHASE_ORDER = [
@@ -383,6 +383,10 @@ export class PhaseService {
 
   async generateInitialArchitecture(input: GenerateInitialArchitectureInput) {
     return this.architectureGeneration.generateInitial(input);
+  }
+
+  async reviseArchitecture(input: ReviseArchitectureInput) {
+    return this.architectureGeneration.reviseArchitecture(input);
   }
 
   async getArchitectureRun(projectId: string, runId: string, actorId: string) {
