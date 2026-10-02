@@ -19,17 +19,27 @@ import {
   RequirementsRevisionOperation,
   RevisionRequirementsContextPayload,
 } from "../planning/requirements-context";
-import { PlanningDomainError } from "../planning/planning-errors";
+import {
+  isPlanningDomainError,
+  PlanningDomainError,
+  RequirementsRunCancelledCode,
+  RequirementsRunConflictCode,
+  RequirementsRunFailedCode,
+  RequirementsRunPersistedFailureCode,
+} from "../planning/planning-errors";
 import {
   parseRequirementsContent,
+  isRequirementsSectionKey,
   REQUIREMENTS_ARTIFACT_TYPE,
   REQUIREMENTS_PHASE,
+  validateRequirementsRevisionTarget,
 } from "../planning/requirements-schema";
 import { REQUIREMENTS_ACTIVE_RUN_STALE_MS } from "../planning/requirements-run-config";
 import {
   computeRequirementsDiff,
   isNoOpRequirementsRevision,
   RequirementsDeterministicDiff,
+  validateRequirementsSectionScope,
   validateRevisionStableIds,
 } from "../planning/requirements-revision-policy";
 import { PlanningArtifactService } from "./planning-artifact.service";
@@ -41,8 +51,10 @@ const MAX_TRANSACTION_ATTEMPTS = 3;
 const TERMINAL_STATUSES = ["completed", "failed", "conflicted", "cancelled"] as const;
 export type RequirementsRunTerminalStatus = (typeof TERMINAL_STATUSES)[number];
 
-export interface RequirementsRunFailure {
-  code: string;
+export interface RequirementsRunFailure<
+  Code extends RequirementsRunPersistedFailureCode = RequirementsRunPersistedFailureCode,
+> {
+  code: Code;
   message: string;
   details?: Record<string, unknown>;
 }
@@ -63,7 +75,7 @@ export type StartRequirementsRunInput =
       idempotencyKey: string;
       baseArtifactId: string;
       instruction: string;
-      targetSectionKey?: string;
+      targetSectionKey?: string | null;
       includeMemory?: boolean;
     };
 
@@ -173,9 +185,34 @@ function requestFingerprint(input: StartRequirementsRunInput, context: PreparedR
       baseVersion: context.manifest.baseArtifact?.version,
       baseContentHash: context.manifest.baseArtifact?.hash,
       instruction: context.manifest.instruction?.normalizedText,
-      targetSectionKey: null,
+      targetSectionKey: context.manifest.targetSectionKey ?? null,
       includeMemory: input.includeMemory === true,
     });
+}
+
+function manifestContextHash(manifest: PersistedManifest): string {
+  const { contextHash: _contextHash, requestFingerprint: _requestFingerprint, ...unsigned } = manifest;
+  return hashCanonical(unsigned);
+}
+
+function revisionChangeKind(operation: WorkflowOperation): ArtifactChangeKind {
+  switch (operation) {
+    case WorkflowOperation.DOCUMENT_REVISION:
+      return ArtifactChangeKind.AI_DOCUMENT_REVISION;
+    case WorkflowOperation.FEEDBACK_APPLICATION:
+      return ArtifactChangeKind.FEEDBACK_APPLICATION;
+    case WorkflowOperation.SECTION_REVISION:
+      return ArtifactChangeKind.AI_SECTION_REVISION;
+    case WorkflowOperation.SECTION_REGENERATION:
+      return ArtifactChangeKind.AI_SECTION_REGENERATION;
+    default:
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        `Invalid operation '${operation}' for Requirements revision finalization.`,
+        422,
+        { operation },
+      );
+  }
 }
 
 export class PlanningRequirementsRunService {
@@ -209,18 +246,9 @@ export class PlanningRequirementsRunService {
         { operation: input.operation },
       );
     }
-    if (
-      (input.operation === WorkflowOperation.DOCUMENT_REVISION ||
-        input.operation === WorkflowOperation.FEEDBACK_APPLICATION) &&
-      input.targetSectionKey
-    ) {
-      throw new PlanningDomainError(
-        "PLANNING_ARTIFACT_INVALID",
-        "targetSectionKey is not supported for whole-document revision.",
-        422,
-        { field: "targetSectionKey" },
-      );
-    }
+    const revisionTarget = input.operation === WorkflowOperation.INITIAL_GENERATION
+      ? null
+      : validateRequirementsRevisionTarget(input.operation, input.targetSectionKey);
     await this.authorization.assertCanEdit(input.projectId, input.actorId);
     const key = normalizeIdempotencyKey(input.idempotencyKey);
     const context: PreparedRequirementsContext = input.operation === WorkflowOperation.INITIAL_GENERATION
@@ -236,7 +264,7 @@ export class PlanningRequirementsRunService {
         operation: input.operation,
         baseArtifactId: input.baseArtifactId,
         instruction: input.instruction,
-        targetSectionKey: input.targetSectionKey,
+        targetSectionKey: revisionTarget?.targetSectionKey,
         includeMemory: input.includeMemory,
       });
     const fingerprint = requestFingerprint(input, context);
@@ -293,9 +321,7 @@ export class PlanningRequirementsRunService {
               inputArtifactId: input.operation === WorkflowOperation.INITIAL_GENERATION ? null : input.baseArtifactId,
               contextManifest: persistedManifest as unknown as Prisma.InputJsonValue,
               contextHash: context.contextHash,
-              targetSectionKey: input.operation === WorkflowOperation.INITIAL_GENERATION
-                ? null
-                : input.targetSectionKey?.trim() || null,
+              targetSectionKey: revisionTarget?.targetSectionKey ?? null,
               initiatedById: input.actorId,
               initiatedByType: ArtifactActorType.HUMAN,
               idempotencyKey: persistedKey,
@@ -316,8 +342,10 @@ export class PlanningRequirementsRunService {
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         return { ...result, context };
       } catch (error) {
-        if (isRetryable(error) && attempt < MAX_TRANSACTION_ATTEMPTS) continue;
-        throw error;
+        if (isPlanningDomainError(error)) throw error;
+        if (!isRetryable(error)) throw error;
+        if (attempt < MAX_TRANSACTION_ATTEMPTS) continue;
+        break;
       }
     }
     throw new PlanningDomainError("PLANNING_CONCURRENT_UPDATE", "Could not acquire the Requirements run lease.", 409);
@@ -330,7 +358,7 @@ export class PlanningRequirementsRunService {
   async failRequirementsRun(
     projectId: string,
     runId: string,
-    failure: RequirementsRunFailure,
+    failure: RequirementsRunFailure<RequirementsRunFailedCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<WorkflowRun> {
     return this.finish(projectId, runId, "failed", failure, audit);
@@ -339,7 +367,7 @@ export class PlanningRequirementsRunService {
   async markRequirementsRunConflicted(
     projectId: string,
     runId: string,
-    failure: RequirementsRunFailure,
+    failure: RequirementsRunFailure<RequirementsRunConflictCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<WorkflowRun> {
     return this.finish(projectId, runId, "conflicted", failure, audit);
@@ -348,7 +376,7 @@ export class PlanningRequirementsRunService {
   async cancelRequirementsRun(
     projectId: string,
     runId: string,
-    failure?: RequirementsRunFailure,
+    failure: RequirementsRunFailure<RequirementsRunCancelledCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<WorkflowRun> {
     return this.finish(projectId, runId, "cancelled", failure, audit);
@@ -382,6 +410,21 @@ export class PlanningRequirementsRunService {
     const manifest = manifestFrom(run);
     if (!state || state.activeRunId !== run.id || !project || !manifest) {
       throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Requirements run context is no longer current.", 409, { runId });
+    }
+    if (
+      run.operation !== manifest.operation || run.contextHash !== manifest.contextHash ||
+      manifest.contextHash !== manifestContextHash(manifest)
+    ) {
+      throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Requirements run authority is inconsistent.", 409, { runId });
+    }
+    if (run.operation !== WorkflowOperation.INITIAL_GENERATION) {
+      const target = validateRequirementsRevisionTarget(run.operation!, run.targetSectionKey);
+      if (
+        (target.targetSectionKey ?? null) !== (manifest.targetSectionKey ?? null) ||
+        (run.targetSectionKey ?? null) !== (manifest.targetSectionKey ?? null)
+      ) {
+        throw new PlanningDomainError("PLANNING_INVALID_SECTION", "Requirements run target authority is inconsistent.", 422, { runId });
+      }
     }
     if (run.operation !== WorkflowOperation.INITIAL_GENERATION) {
       if (state.status === "awaiting_approval" || state.approvalCandidateArtifactId !== null) {
@@ -591,14 +634,16 @@ export class PlanningRequirementsRunService {
           return { run: completedRun, artifact, readiness };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       } catch (error) {
-        if (isRetryable(error) && attempt < MAX_TRANSACTION_ATTEMPTS) continue;
-        throw error;
+        if (isPlanningDomainError(error)) throw error;
+        if (!isRetryable(error)) throw error;
+        if (attempt < MAX_TRANSACTION_ATTEMPTS) continue;
+        break;
       }
     }
     throw new PlanningDomainError(
-      "PLANNING_PERSISTENCE_FAILED",
-      "Initial Requirements generation could not be finalized.",
-      503,
+      "PLANNING_CONCURRENT_UPDATE",
+      "Initial Requirements generation could not be finalized because planning state changed concurrently.",
+      409,
     );
   }
 
@@ -624,17 +669,7 @@ export class PlanningRequirementsRunService {
               { runId: input.runId },
             );
           }
-          if (
-            run.operation !== WorkflowOperation.DOCUMENT_REVISION &&
-            run.operation !== WorkflowOperation.FEEDBACK_APPLICATION
-          ) {
-            throw new PlanningDomainError(
-              "PLANNING_ARTIFACT_INVALID",
-              `Invalid operation '${run.operation}' for whole-document revision finalization.`,
-              422,
-              { runId: run.id, operation: run.operation },
-            );
-          }
+          const target = validateRequirementsRevisionTarget(run.operation ?? "", run.targetSectionKey);
 
           const manifest = manifestFrom(run);
           const [state, project] = await Promise.all([
@@ -648,9 +683,10 @@ export class PlanningRequirementsRunService {
           ]);
 
           if (
-            !manifest || manifest.target !== "requirements" ||
+            !manifest || manifest.target !== "requirements" || manifest.operation !== run.operation ||
             !manifest.baseArtifact || manifest.initiator.id !== input.actorId ||
             run.initiatedById !== input.actorId || run.contextHash !== manifest.contextHash ||
+            manifest.contextHash !== manifestContextHash(manifest) ||
             !state || !project || state.activeRunId !== run.id ||
             state.currentArtifactId !== run.baseArtifactId
           ) {
@@ -659,6 +695,39 @@ export class PlanningRequirementsRunService {
               "Requirements context changed before revision could be persisted.",
               409,
               { runId: run.id, currentArtifactId: state?.currentArtifactId ?? null },
+            );
+          }
+
+          const manifestTarget = manifest.targetSectionKey ?? null;
+          if (target.targetSectionKey !== manifestTarget || (run.targetSectionKey ?? null) !== manifestTarget) {
+            throw new PlanningDomainError(
+              "PLANNING_INVALID_SECTION",
+              "Requirements run target does not match its authoritative manifest.",
+              422,
+              { runId: run.id },
+            );
+          }
+          const allowedSectionKeys = manifest.allowedSectionKeys;
+          if (target.targetSectionKey) {
+            if (
+              !Array.isArray(allowedSectionKeys) || allowedSectionKeys.length === 0 ||
+              allowedSectionKeys[0] !== target.targetSectionKey ||
+              new Set(allowedSectionKeys).size !== allowedSectionKeys.length ||
+              !allowedSectionKeys.every(isRequirementsSectionKey)
+            ) {
+              throw new PlanningDomainError(
+                "PLANNING_INVALID_SECTION",
+                "Requirements section policy snapshot is invalid.",
+                422,
+                { runId: run.id, targetSectionKey: target.targetSectionKey },
+              );
+            }
+          } else if (allowedSectionKeys !== undefined) {
+            throw new PlanningDomainError(
+              "PLANNING_INVALID_SECTION",
+              "Whole-document Requirements revision cannot carry a section policy snapshot.",
+              422,
+              { runId: run.id },
             );
           }
 
@@ -733,12 +802,13 @@ export class PlanningRequirementsRunService {
             );
           }
 
-          validateRevisionStableIds(baseContent, newContent);
           const diff = computeRequirementsDiff(baseContent, newContent);
+          if (target.targetSectionKey) {
+            validateRequirementsSectionScope(target.targetSectionKey, allowedSectionKeys!, diff.changedRootSections);
+          }
+          validateRevisionStableIds(baseContent, newContent);
 
-          const changeKind = run.operation === WorkflowOperation.DOCUMENT_REVISION
-            ? ArtifactChangeKind.AI_DOCUMENT_REVISION
-            : ArtifactChangeKind.FEEDBACK_APPLICATION;
+          const changeKind = revisionChangeKind(run.operation!);
 
           const { artifact } = await this.artifacts.createSuccessorVersionInTransaction(tx, {
             projectId: input.projectId,
@@ -807,14 +877,16 @@ export class PlanningRequirementsRunService {
           return { run: completedRun, artifact, readiness, diff };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       } catch (error) {
-        if (isRetryable(error) && attempt < MAX_TRANSACTION_ATTEMPTS) continue;
-        throw error;
+        if (isPlanningDomainError(error)) throw error;
+        if (!isRetryable(error)) throw error;
+        if (attempt < MAX_TRANSACTION_ATTEMPTS) continue;
+        break;
       }
     }
     throw new PlanningDomainError(
-      "PLANNING_PERSISTENCE_FAILED",
-      "Requirements revision could not be finalized.",
-      503,
+      "PLANNING_CONCURRENT_UPDATE",
+      "Requirements revision could not be finalized because planning state changed concurrently.",
+      409,
     );
   }
 

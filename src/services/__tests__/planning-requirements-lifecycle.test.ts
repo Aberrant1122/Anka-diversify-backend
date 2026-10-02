@@ -1,5 +1,8 @@
 import crypto from "crypto";
-import { ArtifactActorType, ArtifactChangeKind, PhaseArtifact, PrismaClient } from "@prisma/client";
+import { ArtifactActorType, ArtifactChangeKind, PhaseArtifact, Prisma, PrismaClient } from "@prisma/client";
+import { PlanningDomainError } from "../../planning/planning-errors";
+import { canonicalJson } from "../../planning/requirements-context";
+import { REQUIREMENTS_INPUT_LIMITS } from "../../planning/requirements-run-config";
 import { RequirementsContent } from "../../planning/requirements-schema";
 import { PlanningApprovalService } from "../planning-approval.service";
 import { PlanningArtifactService } from "../planning-artifact.service";
@@ -46,6 +49,18 @@ function requirements(label: string): RequirementsContent {
     outOfScope: [{ id: `out-${safe}`, description: "Documentation generation." }],
     unresolvedQuestions: [],
   };
+}
+
+function requirementsWithCanonicalBytes(targetBytes: number): RequirementsContent {
+  const content = requirements("canonical-size-boundary");
+  const fixedBytes = Buffer.byteLength(canonicalJson({ ...content, projectGoal: "" }), "utf8");
+  const projectGoalBytes = targetBytes - fixedBytes;
+  if (projectGoalBytes < 1) throw new Error("Canonical Requirements target is too small for valid test content.");
+  content.projectGoal = `${"é".repeat(Math.floor(projectGoalBytes / 2))}${"a".repeat(projectGoalBytes % 2)}`;
+  if (Buffer.byteLength(canonicalJson(content), "utf8") !== targetBytes) {
+    throw new Error("Canonical Requirements byte fixture did not reach its exact target.");
+  }
+  return content;
 }
 
 function hashOf(artifact: PhaseArtifact): string {
@@ -345,5 +360,120 @@ describe("Checkpoint 1B Requirements lifecycle", () => {
         comments: "Add measurable outcomes.",
       }),
     ]);
+  });
+
+  test("17. direct initial creation rejects canonical JSON one UTF-8 byte above the limit without persistence", async () => {
+    const projectId = await createProject();
+    const maxBytes = REQUIREMENTS_INPUT_LIMITS.canonicalArtifactJsonBytes;
+
+    await expect(artifactService.createInitialArtifact({
+      projectId,
+      actorId: ownerId,
+      title: "Oversized Requirements",
+      structuredContent: requirementsWithCanonicalBytes(maxBytes + 1),
+    })).rejects.toMatchObject({
+      code: "PLANNING_INPUT_TOO_LARGE",
+      httpStatus: 413,
+      details: { input: "canonicalArtifactJson", byteLength: maxBytes + 1, maxBytes },
+    });
+
+    await expect(prisma.phaseArtifact.count({ where: { projectId } })).resolves.toBe(0);
+    await expect(prisma.projectPhaseState.findUnique({
+      where: { projectId_phase: { projectId, phase: "requirements" } },
+    })).resolves.toBeNull();
+  });
+
+  test("18. direct initial creation accepts canonical JSON exactly at the UTF-8 byte limit", async () => {
+    const projectId = await createProject();
+    const maxBytes = REQUIREMENTS_INPUT_LIMITS.canonicalArtifactJsonBytes;
+    const content = requirementsWithCanonicalBytes(maxBytes);
+
+    const artifact = await artifactService.createInitialArtifact({
+      projectId,
+      actorId: ownerId,
+      title: "Boundary Requirements",
+      structuredContent: content,
+    });
+
+    expect(Buffer.byteLength(canonicalJson(artifact.structuredContent), "utf8")).toBe(maxBytes);
+    await expect(prisma.phaseArtifact.count({ where: { projectId } })).resolves.toBe(1);
+  });
+
+  test("19. oversized manual successor leaves artifact and approval authority unchanged", async () => {
+    const projectId = await createProject();
+    const approvedV1 = await initial(projectId);
+    await submit(projectId, approvedV1);
+    await approve(projectId, approvedV1);
+    const stateBefore = await prisma.projectPhaseState.findUniqueOrThrow({
+      where: { projectId_phase: { projectId, phase: "requirements" } },
+    });
+    const maxBytes = REQUIREMENTS_INPUT_LIMITS.canonicalArtifactJsonBytes;
+
+    await expect(artifactService.createManualRevision({
+      projectId,
+      actorId: ownerId,
+      baseArtifactId: approvedV1.id,
+      baseContentHash: hashOf(approvedV1),
+      structuredContent: requirementsWithCanonicalBytes(maxBytes + 1),
+    })).rejects.toMatchObject({ code: "PLANNING_INPUT_TOO_LARGE", httpStatus: 413 });
+
+    await expect(prisma.phaseArtifact.count({ where: { projectId } })).resolves.toBe(1);
+    const stateAfter = await prisma.projectPhaseState.findUniqueOrThrow({
+      where: { projectId_phase: { projectId, phase: "requirements" } },
+    });
+    expect(stateAfter).toMatchObject({
+      status: stateBefore.status,
+      currentArtifactId: approvedV1.id,
+      currentApprovedArtifactId: approvedV1.id,
+      approvalCandidateArtifactId: null,
+      stateVersion: stateBefore.stateVersion,
+    });
+  });
+
+  test("20. retry exhaustion returns a sanitized concurrent-update error and preserves state", async () => {
+    const projectId = await createProject();
+    const v1 = await initial(projectId);
+    const marker = "RAW_PRISMA_SECRET_MARKER";
+    const retryableError = new Prisma.PrismaClientKnownRequestError(marker, {
+      code: "P2034",
+      clientVersion: "5.22.0",
+    });
+    const transactionSpy = jest.spyOn(prisma, "$transaction").mockRejectedValue(retryableError);
+    let caught: unknown;
+    let transactionCalls = 0;
+    try {
+      await artifactService.createManualRevision({
+        projectId,
+        actorId: ownerId,
+        baseArtifactId: v1.id,
+        baseContentHash: hashOf(v1),
+        structuredContent: requirements("retry-exhaustion"),
+      });
+    } catch (error) {
+      caught = error;
+    } finally {
+      transactionCalls = transactionSpy.mock.calls.length;
+      transactionSpy.mockRestore();
+    }
+
+    expect(caught).toBeInstanceOf(PlanningDomainError);
+    if (!(caught instanceof PlanningDomainError)) throw new Error("Expected a PlanningDomainError.");
+    expect(caught).toMatchObject({
+      code: "PLANNING_CONCURRENT_UPDATE",
+      httpStatus: 409,
+      message: "Requirements changed concurrently; reload the current version and retry.",
+    });
+    expect(caught.message).not.toContain(marker);
+    expect(caught.details).toBeUndefined();
+    expect(transactionCalls).toBe(3);
+    await expect(prisma.phaseArtifact.count({ where: { projectId } })).resolves.toBe(1);
+    await expect(prisma.projectPhaseState.findUniqueOrThrow({
+      where: { projectId_phase: { projectId, phase: "requirements" } },
+    })).resolves.toMatchObject({
+      currentArtifactId: v1.id,
+      currentApprovedArtifactId: null,
+      approvalCandidateArtifactId: null,
+      activeRunId: null,
+    });
   });
 });

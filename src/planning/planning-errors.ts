@@ -23,6 +23,7 @@ export type PlanningErrorCode =
   | "PLANNING_CONTEXT_CHANGED"
   | "PLANNING_RUN_CANCELLED"
   | "PLANNING_RUN_INVARIANT"
+  | "PLANNING_STALE_RUN_RECOVERED"
   | "PLANNING_AI_TIMEOUT"
   | "PLANNING_AI_NETWORK_ERROR"
   | "PLANNING_AI_PROVIDER_ERROR"
@@ -37,8 +38,53 @@ export type PlanningErrorCode =
   | "PLANNING_AUTHORIZATION_CHANGED"
   | "PLANNING_PERSISTENCE_FAILED"
   | "PLANNING_REVISION_NO_CHANGES"
+  | "PLANNING_INVALID_SECTION"
+  | "PLANNING_SECTION_SCOPE_VIOLATION"
   | "PLANNING_AI_NOT_IMPLEMENTED"
   | "PLANNING_ACTION_NOT_IMPLEMENTED";
+
+export const REQUIREMENTS_RUN_FAILED_CODES = [
+  "PLANNING_AI_TIMEOUT",
+  "PLANNING_AI_NETWORK_ERROR",
+  "PLANNING_AI_PROVIDER_ERROR",
+  "PLANNING_AI_RATE_LIMITED",
+  "PLANNING_AI_BUDGET_EXHAUSTED",
+  "PLANNING_AI_CONTEXT_TOO_LARGE",
+  "PLANNING_AI_INVALID_RESPONSE",
+  "PLANNING_AI_REFUSED",
+  "PLANNING_AI_CONTENT_FILTERED",
+  "PLANNING_AI_TRUNCATED",
+  "PLANNING_AI_OUTPUT_TOO_LARGE",
+  "PLANNING_PERSISTENCE_FAILED",
+  "PLANNING_ARTIFACT_INVALID",
+  "PLANNING_REVISION_NO_CHANGES",
+  "PLANNING_INVALID_SECTION",
+  "PLANNING_SECTION_SCOPE_VIOLATION",
+  "PLANNING_STALE_RUN_RECOVERED",
+] as const satisfies readonly PlanningErrorCode[];
+
+export const REQUIREMENTS_RUN_CONFLICT_CODES = [
+  "PLANNING_CONTEXT_CHANGED",
+  "PLANNING_CONCURRENT_UPDATE",
+] as const satisfies readonly PlanningErrorCode[];
+
+export const REQUIREMENTS_RUN_CANCELLED_CODES = [
+  "PLANNING_AUTHORIZATION_CHANGED",
+] as const satisfies readonly PlanningErrorCode[];
+
+export type RequirementsRunFailedCode = (typeof REQUIREMENTS_RUN_FAILED_CODES)[number];
+export type RequirementsRunConflictCode = (typeof REQUIREMENTS_RUN_CONFLICT_CODES)[number];
+export type RequirementsRunCancelledCode = (typeof REQUIREMENTS_RUN_CANCELLED_CODES)[number];
+export type RequirementsRunPersistedFailureCode =
+  | RequirementsRunFailedCode
+  | RequirementsRunConflictCode
+  | RequirementsRunCancelledCode;
+
+const REQUIREMENTS_RUN_FAILED_CODE_SET = new Set<PlanningErrorCode>(REQUIREMENTS_RUN_FAILED_CODES);
+
+export function isRequirementsRunFailedCode(code: PlanningErrorCode): code is RequirementsRunFailedCode {
+  return REQUIREMENTS_RUN_FAILED_CODE_SET.has(code);
+}
 
 export class PlanningDomainError extends Error {
   readonly code: PlanningErrorCode;

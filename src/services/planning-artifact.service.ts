@@ -8,6 +8,8 @@ import {
   PrismaClient,
 } from "@prisma/client";
 import { PlanningDomainError } from "../planning/planning-errors";
+import { canonicalJson } from "../planning/requirements-context";
+import { REQUIREMENTS_INPUT_LIMITS } from "../planning/requirements-run-config";
 import {
   hashRequirementsContent,
   parseRequirementsContent,
@@ -266,6 +268,20 @@ export class PlanningArtifactService {
       changeKind: ArtifactChangeKind;
     },
   ): Promise<PhaseArtifact> {
+    const canonicalContent = canonicalJson(input.content);
+    const canonicalContentBytes = Buffer.byteLength(canonicalContent, "utf8");
+    if (canonicalContentBytes > REQUIREMENTS_INPUT_LIMITS.canonicalArtifactJsonBytes) {
+      throw new PlanningDomainError(
+        "PLANNING_INPUT_TOO_LARGE",
+        "Canonical Requirements JSON exceeds the configured UTF-8 byte limit.",
+        413,
+        {
+          input: "canonicalArtifactJson",
+          byteLength: canonicalContentBytes,
+          maxBytes: REQUIREMENTS_INPUT_LIMITS.canonicalArtifactJsonBytes,
+        },
+      );
+    }
     const markdown = renderRequirementsMarkdown(input.content);
     const contentHash = hashRequirementsContent(input.content);
     return tx.phaseArtifact.create({
@@ -307,20 +323,17 @@ export class PlanningArtifactService {
   }
 
   private async withVersionRetry<T>(operation: () => Promise<T>): Promise<T> {
-    let lastError: unknown;
     for (let attempt = 1; attempt <= MAX_TRANSACTION_ATTEMPTS; attempt += 1) {
       try {
         return await operation();
       } catch (error) {
         if (error instanceof PlanningDomainError || !isRetryableTransactionError(error)) throw error;
-        lastError = error;
       }
     }
     throw new PlanningDomainError(
       "PLANNING_CONCURRENT_UPDATE",
       "Requirements changed concurrently; reload the current version and retry.",
       409,
-      { cause: lastError instanceof Error ? lastError.message : "concurrent transaction" },
     );
   }
 

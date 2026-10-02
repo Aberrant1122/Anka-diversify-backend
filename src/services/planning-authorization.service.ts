@@ -80,6 +80,19 @@ export class PlanningAuthorizationService {
 
   async assertOwner(projectId: string, userId: string): Promise<PlanningProjectAccess> {
     const access = await this.resolve(projectId, userId);
+    return this.assertOwnerAccess(access, userId);
+  }
+
+  async assertOwnerInTransaction(
+    tx: Prisma.TransactionClient,
+    projectId: string,
+    userId: string,
+  ): Promise<PlanningProjectAccess> {
+    const access = await this.resolve(projectId, userId, tx);
+    return this.assertOwnerAccess(access, userId);
+  }
+
+  private assertOwnerAccess(access: PlanningProjectAccess, userId: string): PlanningProjectAccess {
     if (access.userId === userId) return access;
 
     if (access.isMember || access.isSystemAdmin) {

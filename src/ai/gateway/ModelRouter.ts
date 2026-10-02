@@ -43,6 +43,13 @@ const STAGE_POLICIES: Record<PipelineStage, ModelRoutePolicy> = {
   [PipelineStages.MANIFEST_GENERATION]: standardPolicy(8_000),
   [PipelineStages.MANIFEST_CORRECTION]: standardPolicy(8_000),
   [PipelineStages.ROADMAP_PLANNING]: standardPolicy(4_000),
+  [PipelineStages.DOCUMENTATION_PLANNING]: standardPolicy(8_000),
+  [PipelineStages.ARCHITECTURE_PLANNING]: {
+    tier: "STANDARD", contextWindowTokens: 64_000 + 12_000 + 512,
+    maxInputTokens: 64_000, defaultMaxOutputTokens: 12_000,
+    maxOutputTokens: 12_000, defaultTemperature: 0.2,
+    maxTemperature: 0.7, maxRetries: 1,
+  },
   [PipelineStages.CODE_GENERATION]: reasoningPolicy(12_000),
   [PipelineStages.CODE_CORRECTION]: reasoningPolicy(12_000),
   [PipelineStages.REPAIR]: reasoningPolicy(12_000),

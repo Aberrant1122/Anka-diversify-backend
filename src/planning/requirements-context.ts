@@ -6,6 +6,8 @@ import {
   REQUIREMENTS_ARTIFACT_TYPE,
   REQUIREMENTS_PHASE,
   RequirementsContent,
+  RequirementsSectionKey,
+  validateRequirementsRevisionTarget,
 } from "./requirements-schema";
 import {
   REQUIREMENTS_CONTEXT_BUILDER_VERSION,
@@ -14,6 +16,8 @@ import {
   REQUIREMENTS_PROMPT_VERSION,
   REQUIREMENTS_PROVIDER_SCHEMA_VERSION,
   REQUIREMENTS_REVISION_PROMPT_VERSION,
+  REQUIREMENTS_SECTION_REGENERATION_PROMPT_VERSION,
+  REQUIREMENTS_SECTION_REVISION_PROMPT_VERSION,
 } from "./requirements-run-config";
 
 export type RequirementsRunOperation =
@@ -58,7 +62,8 @@ export interface RequirementsContextManifest {
   baseArtifact?: { id: string; version: number; hash: string };
   instruction?: { normalizedText: string; byteLength: number; hash: string; source: "submitted_feedback" };
   memory?: RequirementsMemoryContext;
-  targetSectionKey?: string;
+  targetSectionKey?: RequirementsSectionKey;
+  allowedSectionKeys?: readonly RequirementsSectionKey[];
   builderVersion: string;
   schemaVersion: number;
   promptVersion: string;
@@ -84,7 +89,8 @@ export interface RevisionRequirementsContextPayload {
   instruction: string;
   initiator: { id: string; type: "HUMAN" };
   memory?: RequirementsMemoryContext;
-  targetSectionKey?: string;
+  targetSectionKey?: RequirementsSectionKey;
+  allowedSectionKeys?: readonly RequirementsSectionKey[];
   versions: { builder: string; schema: number; prompt: string; providerSchema: string };
 }
 
@@ -197,23 +203,11 @@ export class PlanningRequirementsContextBuilder {
     operation: RequirementsRevisionOperation;
     baseArtifactId: string;
     instruction: string;
-    targetSectionKey?: string;
+    targetSectionKey?: string | null;
     includeMemory?: boolean;
   }): Promise<BuiltRequirementsContext<RevisionRequirementsContextPayload>> {
     const instruction = boundedText(input.instruction, "feedback");
-    const targetSectionKey = input.targetSectionKey ? normalizeText(input.targetSectionKey) : undefined;
-    if (
-      (input.operation === WorkflowOperation.SECTION_REVISION ||
-        input.operation === WorkflowOperation.SECTION_REGENERATION) &&
-      !targetSectionKey
-    ) {
-      throw new PlanningDomainError(
-        "PLANNING_ARTIFACT_INVALID",
-        "targetSectionKey is required for a section-scoped Requirements operation.",
-        422,
-        { field: "targetSectionKey" },
-      );
-    }
+    const target = validateRequirementsRevisionTarget(input.operation, input.targetSectionKey);
     const [{ project, memory }, artifact] = await Promise.all([
       this.loadProject(input.projectId, input.includeMemory === true),
       this.prisma.phaseArtifact.findUnique({ where: { id: input.baseArtifactId } }),
@@ -256,7 +250,10 @@ export class PlanningRequirementsContextBuilder {
       instruction,
       initiator,
       ...(memory ? { memory } : {}),
-      ...(targetSectionKey ? { targetSectionKey } : {}),
+      ...(target.targetSectionKey ? {
+        targetSectionKey: target.targetSectionKey,
+        allowedSectionKeys: target.allowedSectionKeys!,
+      } : {}),
       versions,
     };
     const unsigned = {
@@ -272,7 +269,10 @@ export class PlanningRequirementsContextBuilder {
         source: "submitted_feedback" as const,
       },
       ...(memory ? { memory } : {}),
-      ...(targetSectionKey ? { targetSectionKey } : {}),
+      ...(target.targetSectionKey ? {
+        targetSectionKey: target.targetSectionKey,
+        allowedSectionKeys: target.allowedSectionKeys!,
+      } : {}),
       builderVersion: versions.builder,
       schemaVersion: versions.schema,
       promptVersion: versions.prompt,
@@ -285,9 +285,13 @@ export class PlanningRequirementsContextBuilder {
     return {
       builder: REQUIREMENTS_CONTEXT_BUILDER_VERSION,
       schema: REQUIREMENTS_CONTEXT_SCHEMA_VERSION,
-      prompt: operation !== WorkflowOperation.INITIAL_GENERATION
-        ? REQUIREMENTS_REVISION_PROMPT_VERSION
-        : REQUIREMENTS_PROMPT_VERSION,
+      prompt: operation === WorkflowOperation.SECTION_REVISION
+        ? REQUIREMENTS_SECTION_REVISION_PROMPT_VERSION
+        : operation === WorkflowOperation.SECTION_REGENERATION
+          ? REQUIREMENTS_SECTION_REGENERATION_PROMPT_VERSION
+          : operation !== WorkflowOperation.INITIAL_GENERATION
+            ? REQUIREMENTS_REVISION_PROMPT_VERSION
+            : REQUIREMENTS_PROMPT_VERSION,
       providerSchema: REQUIREMENTS_PROVIDER_SCHEMA_VERSION,
     };
   }

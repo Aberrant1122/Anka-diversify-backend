@@ -85,7 +85,7 @@ describeIsolated("Checkpoint 1C-B Requirements run lifecycle", () => {
       idempotencyKey: "initial-2", brief: "Competing brief",
     })).rejects.toMatchObject({ code: "PLANNING_GENERATION_IN_PROGRESS", httpStatus: 409 });
 
-    await runs.failRequirementsRun(projectId, first.run.id, { code: "SIMULATED_FAILURE", message: "No LLM was called." });
+    await runs.failRequirementsRun(projectId, first.run.id, { code: "PLANNING_PERSISTENCE_FAILED", message: "No LLM was called." });
     await expect(prisma.projectPhaseState.findUniqueOrThrow({
       where: { projectId_phase: { projectId, phase: "requirements" } },
     })).resolves.toMatchObject({ activeRunId: null });
@@ -95,7 +95,9 @@ describeIsolated("Checkpoint 1C-B Requirements run lifecycle", () => {
     });
     expect(next.run.id).not.toBe(first.run.id);
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(before);
-    await runs.cancelRequirementsRun(projectId, next.run.id);
+    await runs.cancelRequirementsRun(projectId, next.run.id, {
+      code: "PLANNING_AUTHORIZATION_CHANGED", message: "Test cleanup cancellation.",
+    });
     await expect(prisma.projectPhaseState.findUniqueOrThrow({
       where: { projectId_phase: { projectId, phase: "requirements" } },
     })).resolves.toMatchObject({ activeRunId: null });
@@ -113,7 +115,9 @@ describeIsolated("Checkpoint 1C-B Requirements run lifecycle", () => {
       id: started.run.id,
       status: "running",
     });
-    await runs.cancelRequirementsRun(projectId, started.run.id);
+    await runs.cancelRequirementsRun(projectId, started.run.id, {
+      code: "PLANNING_AUTHORIZATION_CHANGED", message: "Test cleanup cancellation.",
+    });
   });
 
   test("initial-generation currentness rejects a manually created v1 without moving artifact or approval pointers", async () => {
@@ -173,7 +177,7 @@ describeIsolated("Checkpoint 1C-B Requirements run lifecycle", () => {
       idempotencyKey: terminal, brief: `Run ${terminal}`,
     });
     if (terminal === "completed") await runs.completeRequirementsRun(projectId, started.run.id);
-    else await runs.markRequirementsRunConflicted(projectId, started.run.id, { code: "TEST_CONFLICT", message: "Simulated." });
+    else await runs.markRequirementsRunConflicted(projectId, started.run.id, { code: "PLANNING_CONTEXT_CHANGED", message: "Simulated." });
     await expect(prisma.projectPhaseState.findUniqueOrThrow({
       where: { projectId_phase: { projectId, phase: "requirements" } },
     })).resolves.toMatchObject({ activeRunId: null });
@@ -201,7 +205,9 @@ describeIsolated("Checkpoint 1C-B Requirements run lifecycle", () => {
     await expect(runs.getRequirementsRun(otherProjectId, started.run.id, ownerId)).rejects.toMatchObject({
       code: "PLANNING_PROJECT_NOT_FOUND", httpStatus: 404,
     });
-    await runs.cancelRequirementsRun(projectId, started.run.id);
+    await runs.cancelRequirementsRun(projectId, started.run.id, {
+      code: "PLANNING_AUTHORIZATION_CHANGED", message: "Test cleanup cancellation.",
+    });
   });
 
   test("oversized UTF-8 brief is rejected before a run or phase state is created", async () => {
@@ -231,7 +237,7 @@ describeIsolated("Checkpoint 1C-B Requirements run lifecycle", () => {
     });
     expect(started.run).toMatchObject({ baseArtifactId: v3.id, inputArtifactId: v3.id, targetSectionKey: "usersAndActors" });
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(count);
-    await runs.failRequirementsRun(projectId, started.run.id, { code: "SIMULATED", message: "Stop before 1C-C." });
+    await runs.failRequirementsRun(projectId, started.run.id, { code: "PLANNING_PERSISTENCE_FAILED", message: "Stop before 1C-C." });
 
     await artifacts.createManualRevision({
       projectId,
@@ -273,6 +279,8 @@ describeIsolated("Checkpoint 1C-B Requirements run lifecycle", () => {
       errorCode: "PLANNING_STALE_RUN_RECOVERED",
     });
     expect(recovered.run.status).toBe("running");
-    await runs.cancelRequirementsRun(projectId, recovered.run.id);
+    await runs.cancelRequirementsRun(projectId, recovered.run.id, {
+      code: "PLANNING_AUTHORIZATION_CHANGED", message: "Test cleanup cancellation.",
+    });
   });
 });

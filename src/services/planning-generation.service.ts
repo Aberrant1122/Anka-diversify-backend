@@ -13,9 +13,18 @@ import {
 } from "../ai/prompts/requirements";
 import {
   buildRevisionRequirementsMessages,
-  REQUIREMENTS_REVISION_STRUCTURED_REPAIR_POLICY,
+  buildRevisionRequirementsStructuredRepairPolicy,
 } from "../ai/prompts/requirements-revision";
-import { PlanningDomainError, PlanningErrorCode, isPlanningDomainError } from "../planning/planning-errors";
+import {
+  isPlanningDomainError,
+  isRequirementsRunFailedCode,
+  PlanningDomainError,
+  PlanningErrorCode,
+  RequirementsRunCancelledCode,
+  RequirementsRunConflictCode,
+  RequirementsRunFailedCode,
+  RequirementsRunPersistedFailureCode,
+} from "../planning/planning-errors";
 import {
   REQUIREMENTS_PROVIDER_JSON_SCHEMA,
   validateGeneratedRequirements,
@@ -29,14 +38,12 @@ import {
   REQUIREMENTS_INPUT_LIMITS,
   REQUIREMENTS_PROMPT_VERSION,
   REQUIREMENTS_PROVIDER_SCHEMA_VERSION,
-  REQUIREMENTS_REVISION_PROMPT_VERSION,
 } from "../planning/requirements-run-config";
 import { parseRequirementsContent, RequirementsContent } from "../planning/requirements-schema";
 import {
   computeRequirementsDiff,
   isNoOpRequirementsRevision,
   RequirementsDeterministicDiff,
-  validateRevisionStableIds,
 } from "../planning/requirements-revision-policy";
 import { PlanningArtifactService } from "./planning-artifact.service";
 import { PlanningAuthorizationService } from "./planning-authorization.service";
@@ -71,8 +78,9 @@ export interface ReviseRequirementsInput {
   baseArtifactId: string;
   actorId: string;
   idempotencyKey: string;
-  operation: "DOCUMENT_REVISION" | "FEEDBACK_APPLICATION";
+  operation: "DOCUMENT_REVISION" | "FEEDBACK_APPLICATION" | "SECTION_REVISION" | "SECTION_REGENERATION";
   instruction: string;
+  targetSectionKey?: string | null;
   includeMemory?: boolean;
 }
 
@@ -98,21 +106,93 @@ const KNOWN_MODEL_RATES: Readonly<Record<string, { prompt: number; completion: n
   "gpt-4o-mini": { prompt: 0.15 / 1_000_000, completion: 0.6 / 1_000_000 },
 });
 
-const REPLAY_FAILURES: Readonly<Record<string, { code: PlanningErrorCode; status: number }>> = Object.freeze({
-  PLANNING_AI_TIMEOUT: { code: "PLANNING_AI_TIMEOUT", status: 504 },
-  PLANNING_AI_NETWORK_ERROR: { code: "PLANNING_AI_NETWORK_ERROR", status: 503 },
-  PLANNING_AI_PROVIDER_ERROR: { code: "PLANNING_AI_PROVIDER_ERROR", status: 502 },
-  PLANNING_AI_RATE_LIMITED: { code: "PLANNING_AI_RATE_LIMITED", status: 429 },
-  PLANNING_AI_BUDGET_EXHAUSTED: { code: "PLANNING_AI_BUDGET_EXHAUSTED", status: 429 },
-  PLANNING_AI_CONTEXT_TOO_LARGE: { code: "PLANNING_AI_CONTEXT_TOO_LARGE", status: 413 },
-  PLANNING_AI_INVALID_RESPONSE: { code: "PLANNING_AI_INVALID_RESPONSE", status: 502 },
-  PLANNING_AI_REFUSED: { code: "PLANNING_AI_REFUSED", status: 422 },
-  PLANNING_AI_CONTENT_FILTERED: { code: "PLANNING_AI_CONTENT_FILTERED", status: 422 },
-  PLANNING_AI_TRUNCATED: { code: "PLANNING_AI_TRUNCATED", status: 502 },
-  PLANNING_AI_OUTPUT_TOO_LARGE: { code: "PLANNING_AI_OUTPUT_TOO_LARGE", status: 502 },
-  PLANNING_PERSISTENCE_FAILED: { code: "PLANNING_PERSISTENCE_FAILED", status: 503 },
-  PLANNING_REVISION_NO_CHANGES: { code: "PLANNING_REVISION_NO_CHANGES", status: 422 },
-});
+interface ReplayMapping {
+  terminalStatus: "failed" | "conflicted" | "cancelled";
+  code: PlanningErrorCode;
+  httpStatus: number;
+}
+
+const REPLAY_FAILURES = Object.freeze({
+  PLANNING_AI_TIMEOUT: { terminalStatus: "failed", code: "PLANNING_AI_TIMEOUT", httpStatus: 504 },
+  PLANNING_AI_NETWORK_ERROR: { terminalStatus: "failed", code: "PLANNING_AI_NETWORK_ERROR", httpStatus: 503 },
+  PLANNING_AI_PROVIDER_ERROR: { terminalStatus: "failed", code: "PLANNING_AI_PROVIDER_ERROR", httpStatus: 502 },
+  PLANNING_AI_RATE_LIMITED: { terminalStatus: "failed", code: "PLANNING_AI_RATE_LIMITED", httpStatus: 429 },
+  PLANNING_AI_BUDGET_EXHAUSTED: { terminalStatus: "failed", code: "PLANNING_AI_BUDGET_EXHAUSTED", httpStatus: 429 },
+  PLANNING_AI_CONTEXT_TOO_LARGE: { terminalStatus: "failed", code: "PLANNING_AI_CONTEXT_TOO_LARGE", httpStatus: 413 },
+  PLANNING_AI_INVALID_RESPONSE: { terminalStatus: "failed", code: "PLANNING_AI_INVALID_RESPONSE", httpStatus: 502 },
+  PLANNING_AI_REFUSED: { terminalStatus: "failed", code: "PLANNING_AI_REFUSED", httpStatus: 422 },
+  PLANNING_AI_CONTENT_FILTERED: { terminalStatus: "failed", code: "PLANNING_AI_CONTENT_FILTERED", httpStatus: 422 },
+  PLANNING_AI_TRUNCATED: { terminalStatus: "failed", code: "PLANNING_AI_TRUNCATED", httpStatus: 502 },
+  PLANNING_AI_OUTPUT_TOO_LARGE: { terminalStatus: "failed", code: "PLANNING_AI_OUTPUT_TOO_LARGE", httpStatus: 502 },
+  PLANNING_PERSISTENCE_FAILED: { terminalStatus: "failed", code: "PLANNING_PERSISTENCE_FAILED", httpStatus: 503 },
+  PLANNING_ARTIFACT_INVALID: { terminalStatus: "failed", code: "PLANNING_ARTIFACT_INVALID", httpStatus: 422 },
+  PLANNING_REVISION_NO_CHANGES: { terminalStatus: "failed", code: "PLANNING_REVISION_NO_CHANGES", httpStatus: 422 },
+  PLANNING_INVALID_SECTION: { terminalStatus: "failed", code: "PLANNING_INVALID_SECTION", httpStatus: 422 },
+  PLANNING_SECTION_SCOPE_VIOLATION: { terminalStatus: "failed", code: "PLANNING_SECTION_SCOPE_VIOLATION", httpStatus: 422 },
+  PLANNING_STALE_RUN_RECOVERED: { terminalStatus: "failed", code: "PLANNING_STALE_RUN_RECOVERED", httpStatus: 409 },
+  PLANNING_CONTEXT_CHANGED: { terminalStatus: "conflicted", code: "PLANNING_CONTEXT_CHANGED", httpStatus: 409 },
+  PLANNING_CONCURRENT_UPDATE: { terminalStatus: "conflicted", code: "PLANNING_CONCURRENT_UPDATE", httpStatus: 409 },
+  PLANNING_AUTHORIZATION_CHANGED: { terminalStatus: "cancelled", code: "PLANNING_RUN_CANCELLED", httpStatus: 409 },
+} satisfies Readonly<Record<RequirementsRunPersistedFailureCode, ReplayMapping>>);
+
+type FinalizationClassification =
+  | {
+      action: "conflict";
+      error: PlanningDomainError;
+      failure: RequirementsRunFailure<RequirementsRunConflictCode>;
+    }
+  | {
+      action: "cancel";
+      error: PlanningDomainError;
+      failure: RequirementsRunFailure<RequirementsRunCancelledCode>;
+    }
+  | {
+      action: "fail";
+      error: PlanningDomainError;
+      failure: RequirementsRunFailure<RequirementsRunFailedCode>;
+    };
+
+function persistedFailure<Code extends RequirementsRunPersistedFailureCode>(
+  code: Code,
+  error: PlanningDomainError,
+): RequirementsRunFailure<Code> {
+  return { code, message: error.message, details: error.details };
+}
+
+function classifyFinalizationError(error: unknown, persistenceMessage: string): FinalizationClassification {
+  if (isPlanningDomainError(error)) {
+    switch (error.code) {
+      case "PLANNING_CONTEXT_CHANGED":
+      case "PLANNING_CONCURRENT_UPDATE":
+        return { action: "conflict", error, failure: persistedFailure(error.code, error) };
+      case "PLANNING_PROJECT_NOT_FOUND":
+        return {
+          action: "cancel",
+          error,
+          failure: {
+            code: "PLANNING_AUTHORIZATION_CHANGED",
+            message: "Requirements generation authorization changed before persistence.",
+          },
+        };
+      case "PLANNING_ARTIFACT_INVALID":
+      case "PLANNING_REVISION_NO_CHANGES":
+      case "PLANNING_INVALID_SECTION":
+      case "PLANNING_SECTION_SCOPE_VIOLATION":
+      case "PLANNING_PERSISTENCE_FAILED":
+        return { action: "fail", error, failure: persistedFailure(error.code, error) };
+    }
+  }
+  const persistenceError = new PlanningDomainError(
+    "PLANNING_PERSISTENCE_FAILED",
+    persistenceMessage,
+    503,
+  );
+  return {
+    action: "fail",
+    error: persistenceError,
+    failure: persistedFailure("PLANNING_PERSISTENCE_FAILED", persistenceError),
+  };
+}
 
 function actualLLMError(error: unknown): LLMError | null {
   if (error instanceof LLMRetryExhaustedError && error.lastError instanceof LLMError) return error.lastError;
@@ -239,7 +319,12 @@ export class PlanningGenerationService {
       });
     } catch (error) {
       const planningError = planningFailureFor(error);
-      await this.tryFailRun(input.projectId, started.run.id, planningError, this.buildAuditForError(error));
+      await this.tryFailRun(
+        input.projectId,
+        started.run.id,
+        this.failedFailure(planningError),
+        this.buildAuditForError(error),
+      );
       throw planningError;
     }
 
@@ -253,7 +338,7 @@ export class PlanningGenerationService {
         "The model returned invalid canonical Requirements content.",
         502,
       );
-      await this.tryFailRun(input.projectId, started.run.id, invalidResponse, audit);
+      await this.tryFailRun(input.projectId, started.run.id, this.failedFailure(invalidResponse), audit);
       throw invalidResponse;
     }
     const outputBytes = Buffer.byteLength(canonicalJson(content), "utf8");
@@ -264,7 +349,7 @@ export class PlanningGenerationService {
         502,
         { byteLength: outputBytes, maxBytes: REQUIREMENTS_INPUT_LIMITS.canonicalArtifactJsonBytes },
       );
-      await this.tryFailRun(input.projectId, started.run.id, error, audit);
+      await this.tryFailRun(input.projectId, started.run.id, this.failedFailure(error), audit);
       throw error;
     }
 
@@ -279,23 +364,13 @@ export class PlanningGenerationService {
       });
       return { ...finalized, reused: false, httpStatus: 201 };
     } catch (error) {
-      if (isPlanningDomainError(error) && error.code === "PLANNING_CONTEXT_CHANGED") {
-        await this.tryConflictRun(input.projectId, started.run.id, error, audit);
-        throw error;
-      }
-      if (isPlanningDomainError(error) && error.code === "PLANNING_PROJECT_NOT_FOUND") {
-        await this.tryCancelRun(input.projectId, started.run.id, audit);
-        throw error;
-      }
-      const persistenceError = isPlanningDomainError(error) && error.code === "PLANNING_PERSISTENCE_FAILED"
-        ? error
-        : new PlanningDomainError(
-          "PLANNING_PERSISTENCE_FAILED",
-          "Generated Requirements could not be persisted atomically.",
-          503,
-        );
-      await this.tryFailRun(input.projectId, started.run.id, persistenceError, audit);
-      throw persistenceError;
+      throw await this.terminalizeFinalizationError(
+        input.projectId,
+        started.run.id,
+        error,
+        "Generated Requirements could not be persisted atomically.",
+        audit,
+      );
     }
   }
 
@@ -311,6 +386,7 @@ export class PlanningGenerationService {
         idempotencyKey: input.idempotencyKey,
         baseArtifactId: input.baseArtifactId,
         instruction: input.instruction,
+        targetSectionKey: input.targetSectionKey,
         includeMemory: input.includeMemory === true,
       });
     } catch (error) {
@@ -331,30 +407,21 @@ export class PlanningGenerationService {
       await this.runs.assertRequirementsRunCurrent(input.projectId, started.run.id, input.actorId);
     } catch (error) {
       // Transaction A already committed the run and its lease; terminalize before rethrowing.
-      if (isPlanningDomainError(error) && error.code === "PLANNING_CONTEXT_CHANGED") {
-        await this.tryConflictRun(input.projectId, started.run.id, error);
-        throw error;
-      }
-      if (isPlanningDomainError(error) && error.code === "PLANNING_PROJECT_NOT_FOUND") {
-        await this.tryCancelRun(input.projectId, started.run.id);
-        throw error;
-      }
-      const failure = isPlanningDomainError(error)
-        ? error
-        : new PlanningDomainError(
-          "PLANNING_PERSISTENCE_FAILED",
-          "Requirements revision context could not be verified. Please retry.",
-          503,
-        );
-      await this.tryFailRun(input.projectId, started.run.id, failure);
-      throw failure;
+      throw await this.terminalizeFinalizationError(
+        input.projectId,
+        started.run.id,
+        error,
+        "Requirements revision context could not be verified. Please retry.",
+      );
     }
 
+    const revisionContext = started.context.payload as RevisionRequirementsContextPayload;
+    const promptVersion = revisionContext.versions.prompt;
     let completion: LLMCallResult<RequirementsContent>;
     try {
       completion = await this.gateway.callStructured<RequirementsContent>({
         stage: PipelineStages.ROADMAP_PLANNING,
-        messages: buildRevisionRequirementsMessages(started.context.payload as RevisionRequirementsContextPayload),
+        messages: buildRevisionRequirementsMessages(revisionContext),
         schema: {
           name: "anka_requirements_revision",
           description: "Canonical revised Anka OS Requirements artifact",
@@ -362,7 +429,7 @@ export class PlanningGenerationService {
           strict: true,
           validate: validateGeneratedRequirements,
         },
-        structuredRepair: { instructions: REQUIREMENTS_REVISION_STRUCTURED_REPAIR_POLICY },
+        structuredRepair: { instructions: buildRevisionRequirementsStructuredRepairPolicy(revisionContext) },
         maxRetries: 1,
         context: { runId: started.run.id, projectId: input.projectId },
       });
@@ -371,13 +438,13 @@ export class PlanningGenerationService {
       await this.tryFailRun(
         input.projectId,
         started.run.id,
-        planningError,
-        this.buildAuditForError(error, REQUIREMENTS_REVISION_PROMPT_VERSION),
+        this.failedFailure(planningError),
+        this.buildAuditForError(error, promptVersion),
       );
       throw planningError;
     }
 
-    const audit = this.buildAudit(completion, REQUIREMENTS_REVISION_PROMPT_VERSION);
+    const audit = this.buildAudit(completion, promptVersion);
     let content: RequirementsContent;
     try {
       content = parseRequirementsContent(completion.content);
@@ -387,7 +454,7 @@ export class PlanningGenerationService {
         "The model returned invalid canonical Requirements content.",
         502,
       );
-      await this.tryFailRun(input.projectId, started.run.id, invalidResponse, audit);
+      await this.tryFailRun(input.projectId, started.run.id, this.failedFailure(invalidResponse), audit);
       throw invalidResponse;
     }
 
@@ -399,11 +466,11 @@ export class PlanningGenerationService {
         502,
         { byteLength: outputBytes, maxBytes: REQUIREMENTS_INPUT_LIMITS.canonicalArtifactJsonBytes },
       );
-      await this.tryFailRun(input.projectId, started.run.id, error, audit);
+      await this.tryFailRun(input.projectId, started.run.id, this.failedFailure(error), audit);
       throw error;
     }
 
-    const baseContent = (started.context.payload as RevisionRequirementsContextPayload).baseArtifact.content;
+    const baseContent = revisionContext.baseArtifact.content;
     if (isNoOpRequirementsRevision(baseContent, content)) {
       const noChangesError = new PlanningDomainError(
         "PLANNING_REVISION_NO_CHANGES",
@@ -411,18 +478,8 @@ export class PlanningGenerationService {
         422,
         { runId: started.run.id },
       );
-      await this.tryFailRun(input.projectId, started.run.id, noChangesError, audit);
+      await this.tryFailRun(input.projectId, started.run.id, this.failedFailure(noChangesError), audit);
       throw noChangesError;
-    }
-
-    try {
-      validateRevisionStableIds(baseContent, content);
-    } catch (error) {
-      if (isPlanningDomainError(error)) {
-        await this.tryFailRun(input.projectId, started.run.id, error, audit);
-        throw error;
-      }
-      throw error;
     }
 
     try {
@@ -436,27 +493,13 @@ export class PlanningGenerationService {
       });
       return { ...finalized, reused: false, httpStatus: 201 };
     } catch (error) {
-      if (isPlanningDomainError(error) && error.code === "PLANNING_CONTEXT_CHANGED") {
-        await this.tryConflictRun(input.projectId, started.run.id, error, audit);
-        throw error;
-      }
-      if (isPlanningDomainError(error) && error.code === "PLANNING_PROJECT_NOT_FOUND") {
-        await this.tryCancelRun(input.projectId, started.run.id, audit);
-        throw error;
-      }
-      if (isPlanningDomainError(error) && error.code === "PLANNING_REVISION_NO_CHANGES") {
-        await this.tryFailRun(input.projectId, started.run.id, error, audit);
-        throw error;
-      }
-      const persistenceError = isPlanningDomainError(error) && error.code === "PLANNING_PERSISTENCE_FAILED"
-        ? error
-        : new PlanningDomainError(
-          "PLANNING_PERSISTENCE_FAILED",
-          "Revised Requirements could not be persisted atomically.",
-          503,
-        );
-      await this.tryFailRun(input.projectId, started.run.id, persistenceError, audit);
-      throw persistenceError;
+      throw await this.terminalizeFinalizationError(
+        input.projectId,
+        started.run.id,
+        error,
+        "Revised Requirements could not be persisted atomically.",
+        audit,
+      );
     }
   }
 
@@ -498,29 +541,7 @@ export class PlanningGenerationService {
         httpStatus: 200,
       };
     }
-    if (run.status === "conflicted") {
-      throw new PlanningDomainError(
-        "PLANNING_CONTEXT_CHANGED",
-        storedFailureMessage(run),
-        409,
-        { runId: run.id, reused: true },
-      );
-    }
-    if (run.status === "cancelled") {
-      throw new PlanningDomainError(
-        "PLANNING_RUN_CANCELLED",
-        storedFailureMessage(run),
-        409,
-        { runId: run.id, reused: true },
-      );
-    }
-    const mapping = run.errorCode ? REPLAY_FAILURES[run.errorCode] : undefined;
-    throw new PlanningDomainError(
-      mapping?.code ?? "PLANNING_AI_PROVIDER_ERROR",
-      storedFailureMessage(run),
-      mapping?.status ?? 502,
-      { runId: run.id, reused: true },
-    );
+    return this.replayTerminalFailure(run);
   }
 
   private async replayRevision(
@@ -577,27 +598,31 @@ export class PlanningGenerationService {
         httpStatus: 200,
       };
     }
-    if (run.status === "conflicted") {
+    return this.replayTerminalFailure(run);
+  }
+
+  private replayTerminalFailure(run: WorkflowRun): never {
+    const storedCode = run.errorCode;
+    const mapping = storedCode && Object.prototype.hasOwnProperty.call(REPLAY_FAILURES, storedCode)
+      ? REPLAY_FAILURES[storedCode as RequirementsRunPersistedFailureCode]
+      : undefined;
+    if (!mapping || mapping.terminalStatus !== run.status) {
+      console.error("Requirements run terminal replay invariant violated", {
+        runId: run.id,
+        storedCode,
+        terminalStatus: run.status,
+      });
       throw new PlanningDomainError(
-        "PLANNING_CONTEXT_CHANGED",
-        storedFailureMessage(run),
-        409,
+        "PLANNING_RUN_INVARIANT",
+        "The stored Requirements run cannot be replayed safely.",
+        500,
         { runId: run.id, reused: true },
       );
     }
-    if (run.status === "cancelled") {
-      throw new PlanningDomainError(
-        "PLANNING_RUN_CANCELLED",
-        storedFailureMessage(run),
-        409,
-        { runId: run.id, reused: true },
-      );
-    }
-    const mapping = run.errorCode ? REPLAY_FAILURES[run.errorCode] : undefined;
     throw new PlanningDomainError(
-      mapping?.code ?? "PLANNING_AI_PROVIDER_ERROR",
+      mapping.code,
       storedFailureMessage(run),
-      mapping?.status ?? 502,
+      mapping.httpStatus,
       { runId: run.id, reused: true },
     );
   }
@@ -699,18 +724,47 @@ export class PlanningGenerationService {
     return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
   }
 
-  private failure(error: PlanningDomainError): RequirementsRunFailure {
-    return { code: error.code, message: error.message, details: error.details };
+  private failedFailure(error: PlanningDomainError): RequirementsRunFailure<RequirementsRunFailedCode> {
+    if (!isRequirementsRunFailedCode(error.code)) {
+      throw new PlanningDomainError(
+        "PLANNING_RUN_INVARIANT",
+        "A non-failure Requirements code reached failed-run persistence.",
+        500,
+      );
+    }
+    return persistedFailure(error.code, error);
+  }
+
+  private async terminalizeFinalizationError(
+    projectId: string,
+    runId: string,
+    error: unknown,
+    persistenceMessage: string,
+    audit?: RequirementsGenerationAudit,
+  ): Promise<PlanningDomainError> {
+    const classification = classifyFinalizationError(error, persistenceMessage);
+    switch (classification.action) {
+      case "conflict":
+        await this.tryConflictRun(projectId, runId, classification.failure, audit);
+        break;
+      case "cancel":
+        await this.tryCancelRun(projectId, runId, classification.failure, audit);
+        break;
+      case "fail":
+        await this.tryFailRun(projectId, runId, classification.failure, audit);
+        break;
+    }
+    return classification.error;
   }
 
   private async tryFailRun(
     projectId: string,
     runId: string,
-    error: PlanningDomainError,
+    failure: RequirementsRunFailure<RequirementsRunFailedCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<void> {
     try {
-      await this.runs.failRequirementsRun(projectId, runId, this.failure(error), audit);
+      await this.runs.failRequirementsRun(projectId, runId, failure, audit);
     } catch (cleanupError) {
       console.error("Failed to record Requirements generation failure; stale-run recovery may be required", {
         projectId,
@@ -723,11 +777,11 @@ export class PlanningGenerationService {
   private async tryConflictRun(
     projectId: string,
     runId: string,
-    error: PlanningDomainError,
+    failure: RequirementsRunFailure<RequirementsRunConflictCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<void> {
     try {
-      await this.runs.markRequirementsRunConflicted(projectId, runId, this.failure(error), audit);
+      await this.runs.markRequirementsRunConflicted(projectId, runId, failure, audit);
     } catch (cleanupError) {
       console.error("Failed to record Requirements generation conflict; stale-run recovery may be required", {
         projectId,
@@ -740,13 +794,11 @@ export class PlanningGenerationService {
   private async tryCancelRun(
     projectId: string,
     runId: string,
+    failure: RequirementsRunFailure<RequirementsRunCancelledCode>,
     audit?: RequirementsGenerationAudit,
   ): Promise<void> {
     try {
-      await this.runs.cancelRequirementsRun(projectId, runId, {
-        code: "PLANNING_AUTHORIZATION_CHANGED",
-        message: "Requirements generation authorization changed before persistence.",
-      }, audit);
+      await this.runs.cancelRequirementsRun(projectId, runId, failure, audit);
     } catch (cleanupError) {
       console.error("Failed to cancel Requirements generation after authorization changed", {
         projectId,

@@ -3,14 +3,22 @@ import { canonicalJson } from "./requirements-context";
 import {
   REQUIREMENTS_ROOT_FIELDS,
   RequirementsContent,
+  RequirementsSectionKey,
 } from "./requirements-schema";
 
-export const D1_REVISION_OPERATIONS = Object.freeze([
+export {
+  REQUIREMENTS_SECTION_DEPENDENCY_CLOSURE,
+  validateRequirementsRevisionTarget,
+} from "./requirements-schema";
+
+export const REQUIREMENTS_REVISION_OPERATIONS = Object.freeze([
   "DOCUMENT_REVISION",
   "FEEDBACK_APPLICATION",
+  "SECTION_REVISION",
+  "SECTION_REGENERATION",
 ] as const);
 
-export type D1RevisionOperation = (typeof D1_REVISION_OPERATIONS)[number];
+export type RequirementsRevisionOperation = (typeof REQUIREMENTS_REVISION_OPERATIONS)[number];
 
 export const ID_BEARING_REQUIREMENTS_FIELDS = Object.freeze([
   "usersAndActors",
@@ -67,13 +75,34 @@ function extractIdEntries(content: RequirementsContent): Map<string, ItemEntry> 
   return entries;
 }
 
-export function validateRevisionOperation(operation: string): asserts operation is D1RevisionOperation {
-  if (!D1_REVISION_OPERATIONS.includes(operation as D1RevisionOperation)) {
+export function validateRevisionOperation(operation: string): asserts operation is RequirementsRevisionOperation {
+  if (!REQUIREMENTS_REVISION_OPERATIONS.includes(operation as RequirementsRevisionOperation)) {
     throw new PlanningDomainError(
       "PLANNING_ARTIFACT_INVALID",
-      `Unsupported revision operation '${operation}'. Only whole-document revision operations are supported in Checkpoint 1C-D1.`,
+      `Unsupported Requirements revision operation '${operation}'.`,
       422,
-      { operation, allowed: D1_REVISION_OPERATIONS },
+      { operation, allowed: REQUIREMENTS_REVISION_OPERATIONS },
+    );
+  }
+}
+
+export function validateRequirementsSectionScope(
+  targetSectionKey: RequirementsSectionKey,
+  allowedSectionKeys: readonly RequirementsSectionKey[],
+  changedRootSections: readonly string[],
+): void {
+  const allowed = new Set<string>(allowedSectionKeys);
+  const forbidden = changedRootSections.filter((section) => !allowed.has(section));
+  if (forbidden.length > 0) {
+    throw new PlanningDomainError(
+      "PLANNING_SECTION_SCOPE_VIOLATION",
+      "The Requirements section operation changed a root section outside its authoritative dependency closure.",
+      422,
+      {
+        targetSectionKey,
+        allowedSections: [...allowedSectionKeys],
+        changedSections: [...changedRootSections],
+      },
     );
   }
 }

@@ -1,6 +1,9 @@
 import {
   computeRequirementsDiff,
   isNoOpRequirementsRevision,
+  REQUIREMENTS_SECTION_DEPENDENCY_CLOSURE,
+  validateRequirementsRevisionTarget,
+  validateRequirementsSectionScope,
   validateRevisionOperation,
   validateRevisionStableIds,
 } from "../requirements-revision-policy";
@@ -45,21 +48,82 @@ function baseContent(): RequirementsContent {
 
 describe("requirements-revision-policy", () => {
   describe("validateRevisionOperation", () => {
-    test("accepts DOCUMENT_REVISION and FEEDBACK_APPLICATION", () => {
+    test("accepts all four Requirements revision operations", () => {
       expect(() => validateRevisionOperation("DOCUMENT_REVISION")).not.toThrow();
       expect(() => validateRevisionOperation("FEEDBACK_APPLICATION")).not.toThrow();
+      expect(() => validateRevisionOperation("SECTION_REVISION")).not.toThrow();
+      expect(() => validateRevisionOperation("SECTION_REGENERATION")).not.toThrow();
     });
 
-    test("rejects unsupported or D2-scoped operations", () => {
-      expect(() => validateRevisionOperation("SECTION_REVISION")).toThrow(
-        expect.objectContaining({ code: "PLANNING_ARTIFACT_INVALID", httpStatus: 422 }),
-      );
-      expect(() => validateRevisionOperation("SECTION_REGENERATION")).toThrow(
-        expect.objectContaining({ code: "PLANNING_ARTIFACT_INVALID", httpStatus: 422 }),
-      );
+    test("rejects non-revision operations", () => {
       expect(() => validateRevisionOperation("INITIAL_GENERATION")).toThrow(
         expect.objectContaining({ code: "PLANNING_ARTIFACT_INVALID", httpStatus: 422 }),
       );
+    });
+  });
+
+  describe("section authority", () => {
+    test("defines the exact asymmetric dependency closure", () => {
+      expect(REQUIREMENTS_SECTION_DEPENDENCY_CLOSURE).toEqual({
+        projectGoal: ["projectGoal"],
+        problemStatement: ["problemStatement"],
+        usersAndActors: ["usersAndActors", "userStories"],
+        userStories: ["userStories", "acceptanceCriteria"],
+        functionalRequirements: ["functionalRequirements", "acceptanceCriteria", "userStories"],
+        nonFunctionalRequirements: ["nonFunctionalRequirements", "acceptanceCriteria", "userStories"],
+        constraints: ["constraints"],
+        integrations: ["integrations"],
+        assumptions: ["assumptions"],
+        acceptanceCriteria: ["acceptanceCriteria", "userStories"],
+        outOfScope: ["outOfScope"],
+        unresolvedQuestions: ["unresolvedQuestions"],
+      });
+    });
+
+    test.each([undefined, null, "", "   ", "unknownSection"])(
+      "rejects invalid section target %p",
+      (targetSectionKey) => {
+        expect(() => validateRequirementsRevisionTarget("SECTION_REVISION", targetSectionKey)).toThrow(
+          expect.objectContaining({ code: "PLANNING_INVALID_SECTION", httpStatus: 422 }),
+        );
+      },
+    );
+
+    test.each(["DOCUMENT_REVISION", "FEEDBACK_APPLICATION"])(
+      "rejects a target supplied to %s",
+      (operation) => {
+        expect(() => validateRequirementsRevisionTarget(operation, "constraints")).toThrow(
+          expect.objectContaining({ code: "PLANNING_INVALID_SECTION", httpStatus: 422 }),
+        );
+      },
+    );
+
+    test("returns a normalized finite target and its closure", () => {
+      expect(validateRequirementsRevisionTarget("SECTION_REGENERATION", " functionalRequirements ")).toEqual({
+        targetSectionKey: "functionalRequirements",
+        allowedSectionKeys: ["functionalRequirements", "acceptanceCriteria", "userStories"],
+      });
+    });
+
+    test("permits only changed roots inside the snapshotted closure", () => {
+      expect(() => validateRequirementsSectionScope(
+        "functionalRequirements",
+        ["functionalRequirements", "acceptanceCriteria", "userStories"],
+        ["functionalRequirements", "acceptanceCriteria", "userStories"],
+      )).not.toThrow();
+      expect(() => validateRequirementsSectionScope(
+        "acceptanceCriteria",
+        ["acceptanceCriteria", "userStories"],
+        ["acceptanceCriteria", "functionalRequirements"],
+      )).toThrow(expect.objectContaining({
+        code: "PLANNING_SECTION_SCOPE_VIOLATION",
+        httpStatus: 422,
+        details: {
+          targetSectionKey: "acceptanceCriteria",
+          allowedSections: ["acceptanceCriteria", "userStories"],
+          changedSections: ["acceptanceCriteria", "functionalRequirements"],
+        },
+      }));
     });
   });
 
