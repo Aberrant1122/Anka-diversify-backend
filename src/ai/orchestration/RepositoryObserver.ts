@@ -21,6 +21,7 @@ import { ContextPackerResult, packFileContext } from "../context/ContextPacker";
 import { loadPersistedRevision, savePersistedRevision } from "../repository/RepositorySnapshot";
 import { CodeGenerator } from "../generation/CodeGenerator";
 import { formatMs } from "../shared/utils";
+import type { ImplementationAuthority } from "../../planning/implementation-authority-preflight";
 
 const prisma = new PrismaClient();
 
@@ -36,6 +37,12 @@ export interface RepositoryProjectFacts {
     githubToken: string | null;
   } | null;
   approvedArchitecture: { content: string } | null;
+  architectureAuthority?: Pick<ImplementationAuthority, "fingerprint"> & {
+    artifactId: string;
+    version: number;
+    contentHash: string | null;
+    approvalId: string;
+  };
   snapshot: ProjectContext["repoSnapshot"];
 }
 
@@ -64,6 +71,7 @@ export interface RepositoryContextAssemblyInput {
   taskIntentSpec: TaskIntentSpec;
   evidenceStore: RepositoryEvidenceStore;
   approvedArchitecture: { content: string } | null;
+  architectureAuthority?: RepositoryProjectFacts["architectureAuthority"];
   diagnosticTargetPaths: string[];
   baselineDiagnosticsList: BaselineDiagnostic[];
   executionContract: ExecutionContract;
@@ -92,18 +100,25 @@ export interface RepositoryContextAssemblyResult {
 
 /** Collects materialized repository facts. It grants no mutation or model authority. */
 export class RepositoryObserver {
-  public static async loadProjectFacts(projectId: string): Promise<RepositoryProjectFacts> {
+  public static async loadProjectFacts(projectId: string, authority?: ImplementationAuthority): Promise<RepositoryProjectFacts> {
     const projectContext = await RepositoryContextBuilder.buildProjectContext(projectId);
     const project = await prisma.project.findUnique({
       where: { id: projectId },
       select: { localPath: true, githubUrl: true, githubToken: true },
     });
-    const approvedArchitecture = await prisma.phaseArtifact.findFirst({
-      where: { projectId, phase: "architecture", approved: true },
-      orderBy: { createdAt: "desc" },
-      select: { content: true },
-    });
-    return { projectContext, project, approvedArchitecture, snapshot: projectContext.repoSnapshot };
+    const approvedArchitecture = authority?.projectId === projectId
+      ? { content: authority.architecture.artifact.content }
+      : null;
+    const architectureAuthority = authority?.projectId === projectId
+      ? {
+        artifactId: authority.architecture.artifact.id,
+        version: authority.architecture.artifact.version,
+        contentHash: authority.architecture.artifact.contentHash,
+        approvalId: authority.architecture.approvalId,
+        fingerprint: authority.fingerprint,
+      }
+      : undefined;
+    return { projectContext, project, approvedArchitecture, architectureAuthority, snapshot: projectContext.repoSnapshot };
   }
 
   public static async observe(
@@ -112,7 +127,7 @@ export class RepositoryObserver {
     facts: RepositoryProjectFacts,
     options?: RepositoryObservationOptions,
   ): Promise<RepositoryObservation> {
-    const { projectContext, project, approvedArchitecture, snapshot } = facts;
+    const { projectContext, project, approvedArchitecture, architectureAuthority, snapshot } = facts;
     const requestContext = request.context as { effectiveLocalPath?: string } | undefined;
     const requestedPath = options?.effectiveLocalPath || requestContext?.effectiveLocalPath || project?.localPath;
     console.log(`[ANKA_EXEC] AgentPipeline starting, localPath=${requestedPath || "none"}`);
@@ -160,6 +175,7 @@ export class RepositoryObserver {
       projectContext,
       project,
       approvedArchitecture,
+      architectureAuthority,
       snapshot,
       effectiveLocalPath,
       effectiveSnapshot,
@@ -189,6 +205,7 @@ export class RepositoryObserver {
       taskIntentSpec,
       evidenceStore,
       approvedArchitecture,
+      architectureAuthority,
       diagnosticTargetPaths,
       baselineDiagnosticsList,
       executionContract,
@@ -259,12 +276,15 @@ export class RepositoryObserver {
       durationMs: s3Time,
     });
 
-    const systemPrompt = CodeGenerator.buildAgentSystemPrompt(
+    const baseSystemPrompt = CodeGenerator.buildAgentSystemPrompt(
       projectContext,
       effectiveSnapshot,
       approvedArchitecture?.content,
       projectContext.summary?.summary,
     );
+    const systemPrompt = architectureAuthority
+      ? `Approved Architecture authority: artifact=${architectureAuthority.artifactId}; version=${architectureAuthority.version}; contentHash=${architectureAuthority.contentHash}; approval=${architectureAuthority.approvalId}; chainFingerprint=${architectureAuthority.fingerprint}.\n${baseSystemPrompt}`
+      : baseSystemPrompt;
 
     // Stage 4: Real Vector & Grounded Multi-Query Semantic Retrieval
     // Guard: skip re-indexing if the effective repository content has not changed

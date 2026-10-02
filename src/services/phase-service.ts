@@ -1,5 +1,4 @@
-import { ArtifactActorType, ArtifactChangeKind, PrismaClient } from "@prisma/client";
-import { AiService } from "../ai/application/AiService";
+import { ArtifactActorType, ArtifactChangeKind, Prisma, PrismaClient } from "@prisma/client";
 import { PlanningDomainError } from "../planning/planning-errors";
 import { REQUIREMENTS_PHASE } from "../planning/requirements-schema";
 import { PlanningApprovalService } from "./planning-approval.service";
@@ -24,6 +23,7 @@ import { PlanningTransitionPolicy } from "./planning-transition-policy";
 import { PlanningArchitectureArtifactService, CreateArchitectureInput } from "./planning-architecture-artifact.service";
 import { GenerateInitialArchitectureInput, PlanningArchitectureGenerationService, ReviseArchitectureInput } from "./planning-architecture-generation.service";
 import { PlanningArchitectureRunService } from "./planning-architecture-run.service";
+import { resolveImplementationAuthority } from "../planning/implementation-authority-preflight";
 
 export const PHASE_ORDER = [
   "requirements",
@@ -48,7 +48,6 @@ export class PhaseService {
   private readonly architectureArtifacts: PlanningArchitectureArtifactService;
   private readonly architectureGeneration: PlanningArchitectureGenerationService;
   private readonly architectureRuns: PlanningArchitectureRunService;
-  private readonly aiService = AiService.getInstance();
 
   constructor(private readonly prisma: PrismaClient = new PrismaClient()) {
     this.authorization = new PlanningAuthorizationService(prisma);
@@ -121,23 +120,25 @@ export class PhaseService {
 
   async startPhase(projectId: string, phase: string, actorId: string) {
     await this.authorization.assertCanEdit(projectId, actorId);
-    if (phase === REQUIREMENTS_PHASE || phase === "architecture") {
+    if (phase === REQUIREMENTS_PHASE || phase === "architecture" || phase === "documentation" || phase === "testing" || phase === "review") {
       throw new PlanningDomainError(
         "PLANNING_ACTION_LOCKED",
-        `${phase === REQUIREMENTS_PHASE ? "Requirements" : "Architecture"} starts only when its first immutable artifact is created.`,
+        `${phase} cannot be started through the generic phase route.`,
         409,
       );
     }
     if (!PHASE_ORDER.includes(phase as Phase)) {
       throw new PlanningDomainError("PLANNING_INVALID_PHASE", `Unknown phase '${phase}'.`, 422, { phase });
     }
-    const state = await this.prisma.projectPhaseState.upsert({
-      where: { projectId_phase: { projectId, phase } },
-      update: { status: "in_progress", startedAt: new Date() },
-      create: { projectId, phase, status: "in_progress", startedAt: new Date() },
-    });
-    await this.prisma.project.update({ where: { id: projectId }, data: { currentPhase: phase } });
-    return state;
+    return this.prisma.$transaction(async (tx) => {
+      await resolveImplementationAuthority(tx, projectId, actorId);
+      const state = await tx.projectPhaseState.update({
+        where: { projectId_phase: { projectId, phase } },
+        data: { status: "in_progress", startedAt: new Date() },
+      });
+      await tx.project.update({ where: { id: projectId }, data: { currentPhase: phase } });
+      return state;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async requestApproval(
@@ -304,56 +305,15 @@ export class PhaseService {
 
   async runAutomatedPhase(projectId: string, phase: string, createdBy: string, brief?: string) {
     await this.authorization.assertCanEdit(projectId, createdBy);
-    if (phase === REQUIREMENTS_PHASE || phase === "documentation" || phase === "architecture") {
+    if (PHASE_ORDER.includes(phase as Phase)) {
       throw new PlanningDomainError(
         "PLANNING_ACTION_LOCKED",
-        `${phase === REQUIREMENTS_PHASE ? "Requirements" : phase === "documentation" ? "Documentation" : "Architecture"} uses its dedicated structured workflow.`,
+        `${phase} cannot generate an authoritative artifact through the generic automated route.`,
         409,
       );
     }
+    throw new PlanningDomainError("PLANNING_INVALID_PHASE", `Unknown phase '${phase}'.`, 422, { phase });
 
-    const run = await this.prisma.workflowRun.create({
-      data: { projectId, triggerType: "manual", currentPhase: phase, status: "running" },
-    });
-    try {
-      const [previousArtifact, latestDecision] = await Promise.all([
-        this.prisma.phaseArtifact.findFirst({ where: { projectId, phase }, orderBy: { createdAt: "desc" } }),
-        this.prisma.phaseApproval.findFirst({ where: { projectId, phase }, orderBy: { approvedAt: "desc" } }),
-      ]);
-      const revision = previousArtifact && latestDecision?.decision === "changes_requested" && latestDecision.comments
-        ? { previousContent: previousArtifact.content, feedback: latestDecision.comments }
-        : undefined;
-      const proposal = await this.aiService.generatePhaseProposal(projectId, phase, revision, brief);
-      const artifact = await this.prisma.phaseArtifact.create({
-        data: {
-          projectId,
-          phase,
-          type: `${phase}_doc`,
-          title: proposal.title,
-          content: proposal.content,
-          version: (previousArtifact?.version || 0) + 1,
-          createdBy,
-        },
-      });
-      await this.startPhase(projectId, phase, createdBy);
-      await this.prisma.workflowRun.update({
-        where: { id: run.id },
-        data: {
-          status: "completed",
-          completedAt: new Date(),
-          modelUsage: { model: proposal.model, ...proposal.usage },
-          costUSD: proposal.costUSD,
-          outputArtifactId: artifact.id,
-        },
-      });
-      return { artifact, workflowRun: await this.prisma.workflowRun.findUnique({ where: { id: run.id } }) };
-    } catch (error) {
-      await this.prisma.workflowRun.update({
-        where: { id: run.id },
-        data: { status: "failed", completedAt: new Date() },
-      });
-      throw error;
-    }
   }
 
   async getWorkflowRuns(projectId: string, actorId: string) {

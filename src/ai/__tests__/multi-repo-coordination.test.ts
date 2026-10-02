@@ -9,6 +9,12 @@ import { AgentFileChange, ChatRequest, ExecutionContract, FileManifest } from ".
 import { RepositoryRunSummary } from "../../services/git-worktree.service";
 import { enforceExecutionScope } from "../contracts/ExecutionScopeEnforcer";
 
+// These orchestration fixtures have no database; authority behavior is covered by PostgreSQL integration tests.
+jest.mock("../../planning/implementation-authority-preflight", () => ({
+  currentImplementationAuthority: jest.fn().mockResolvedValue({ projectId: "proj-1", actorId: "user-1", fingerprint: "fixture" }),
+  assertImplementationAuthorityCurrent: jest.fn().mockResolvedValue({ fingerprint: "fixture" }),
+}));
+
 describe("Multi-Repo Coordination — Fast Track MVP Tests", () => {
   const mockBackendRepo: RepositoryCandidate = {
     id: "repo-api-id",

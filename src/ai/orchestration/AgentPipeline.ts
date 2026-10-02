@@ -150,6 +150,7 @@ export class AgentPipeline {
       persistenceSession?: { id: string; title?: string | null };
       deferCompletionToGitWorktree?: boolean;
       trustedEarlyNoOpProof?: TrustedDiagnosticNoOpProof;
+      implementationAuthority?: import("../../planning/implementation-authority-preflight").ImplementationAuthority;
       [key: string]: any;
     },
   ): Promise<AgentResponse> {
@@ -183,7 +184,7 @@ export class AgentPipeline {
       maxIterations,
       checkpointJournal: journal,
       observe: async (iteration) => {
-        const facts = await RepositoryObserver.loadProjectFacts(projectId);
+        const facts = await RepositoryObserver.loadProjectFacts(projectId, options?.implementationAuthority);
         const observation = await RepositoryObserver.observe(projectId, iterationRequest, facts, options);
         preparedFacts = facts;
         preparedObservation = observation;
@@ -261,7 +262,7 @@ export class AgentPipeline {
     });
     let completionEvaluation: CompletionEvaluationResult | undefined;
     if (result.loop.outcome === "AWAITING_COMPLETION_EVALUATION") {
-      const facts = preparedFacts ?? await RepositoryObserver.loadProjectFacts(projectId);
+      const facts = preparedFacts ?? await RepositoryObserver.loadProjectFacts(projectId, options?.implementationAuthority);
       const finalObservation = await RepositoryObserver.observe(projectId, iterationRequest, facts, options);
       const repositoryRevision = finalObservation.currentRevisionHash ?? `unversioned-completion-${result.loop.iterations}`;
       const finalWorkspace = runtime.workspaceState().withEvidence({
@@ -392,7 +393,7 @@ export class AgentPipeline {
   ): Promise<AgentResponse> {
     const session = options?.persistenceSession
       ?? await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
-    const repositoryFacts = options?.repositoryFacts ?? await RepositoryObserver.loadProjectFacts(projectId);
+    const repositoryFacts = options?.repositoryFacts ?? await RepositoryObserver.loadProjectFacts(projectId, options?.implementationAuthority);
     const saveConversationMessage = options?.persistConversation === false
       ? async (_role: "user" | "assistant", _content: string): Promise<void> => undefined
       : async (role: "user" | "assistant", content: string): Promise<void> => {
@@ -415,6 +416,7 @@ export class AgentPipeline {
     const {
       projectContext,
       approvedArchitecture,
+      architectureAuthority,
       effectiveLocalPath,
       effectiveSnapshot,
       currentRevisionHash,
@@ -729,6 +731,7 @@ export class AgentPipeline {
       taskIntentSpec,
       evidenceStore,
       approvedArchitecture,
+      architectureAuthority,
       diagnosticTargetPaths,
       baselineDiagnosticsList,
       executionContract,

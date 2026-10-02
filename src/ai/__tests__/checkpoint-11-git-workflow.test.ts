@@ -16,6 +16,7 @@ import { GitShippingRequest, GitWorkflowError, GitWorkflowService } from "../../
 import { GitHubCodeReviewProvider, ReviewHttpResponse } from "../../services/github-code-review.provider";
 import { GitLabCodeReviewProvider } from "../../services/gitlab-code-review.provider";
 import type { AgentFileChange } from "../../types";
+import * as implementationAuthority from "../../planning/implementation-authority-preflight";
 
 function run(cwd: string, args: readonly string[]): string {
   return execFileSync("git", [...args], { cwd, encoding: "utf8" }).trim();
@@ -282,6 +283,18 @@ describe("Checkpoint 11 verified Git/GitHub/GitLab workflow", () => {
     expect(run(prepared.worktreePath, ["rev-parse", "HEAD"])).toBe(baseRevision);
   });
 
+  test("planning authority change blocks Git commit before external mutation", async () => {
+    const prepared = await prepare("authority-changed-before-commit");
+    const state = await completed(prepared, [
+      { path: "src/value.ts", action: "modify", content: "new value\n", description: "verified" },
+    ]);
+    const revalidateAuthority = jest.fn().mockRejectedValue(new Error("PLANNING_CONTEXT_CHANGED"));
+    await expect(new GitWorkflowService().ship(request(prepared, state, { revalidateAuthority })))
+      .rejects.toThrow("PLANNING_CONTEXT_CHANGED");
+    expect(revalidateAuthority).toHaveBeenCalledTimes(1);
+    expect(run(prepared.worktreePath, ["rev-parse", "HEAD"])).toBe(baseRevision);
+  });
+
   test("7a. clean-filtered index bytes are accepted only when derived from verified worktree bytes", async () => {
     const prepared = await prepare("clean-filtered-stage");
     const verifiedContent = "body {\r\n  color: white;\r\n}\r\n";
@@ -343,14 +356,26 @@ describe("Checkpoint 11 verified Git/GitHub/GitLab workflow", () => {
   }, 20_000);
 
   test("31. human approval ships only the retained verified bytes and rejects forged handoffs", async () => {
+    const currentAuthority = jest.spyOn(implementationAuthority, "currentImplementationAuthority")
+      .mockResolvedValue({ fingerprint: "test-approved-chain" } as implementationAuthority.ImplementationAuthority);
     const prepared = await prepare("approval-handoff");
     const content = "export const value = 'approved';\n";
     const state = await completed(prepared, [
       { path: "src/value.ts", action: "modify", content, description: "approved change" },
     ]);
+    const unbound = GitWorktreeService.retainVerifiedRunForApproval({
+      userId: "user-1", projectId: "project-1", prepared, taskRuntime: state.runtime,
+      checkpointJournal: state.journal, validationPassed: true,
+    });
+    await expect(GitWorktreeService.shipApprovedRun({
+      approvalId: unbound.approvalId, userId: "user-1", projectId: "project-1",
+      changes: [{ path: "src/value.ts", content }], commitSummary: "unbound approval",
+      expectedRepositoryIdentity: bareRemote,
+    })).rejects.toMatchObject({ code: "PLANNING_CONTEXT_CHANGED" });
     const approval = GitWorktreeService.retainVerifiedRunForApproval({
       userId: "user-1",
       projectId: "project-1",
+      implementationAuthorityFingerprint: "test-approved-chain",
       prepared,
       taskRuntime: state.runtime,
       checkpointJournal: state.journal,
@@ -384,6 +409,7 @@ describe("Checkpoint 11 verified Git/GitHub/GitLab workflow", () => {
       expectedRepositoryIdentity: bareRemote,
     });
     expect(result).toMatchObject({ pushed: true, changedPaths: ["src/value.ts"] });
+    currentAuthority.mockRestore();
     expect(run(root, ["--git-dir", bareRemote, "show", `${result.commitSha}:src/value.ts`])).toContain("approved");
     expect(fs.existsSync(prepared.worktreePath)).toBe(false);
   }, 20_000);

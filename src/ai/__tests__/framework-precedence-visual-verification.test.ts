@@ -4,6 +4,11 @@ import { GitWorktreeService } from "../../services/git-worktree.service";
 import { CodingAgent } from "../application/CodingAgent";
 import { VisualVerificationResult } from "../../types";
 
+jest.mock("../../planning/implementation-authority-preflight", () => ({
+  currentImplementationAuthority: jest.fn().mockResolvedValue({ fingerprint: "fixture" }),
+  assertImplementationAuthorityCurrent: jest.fn().mockResolvedValue({ fingerprint: "fixture" }),
+}));
+
 describe("Framework Precedence & Visual Verification Live Path Regressions", () => {
   // Test 1: Vite repo with src/pages/* and vite in package.json -> VITE_REACT
   test("1. Vite repo with src/pages/* is detected as VITE_REACT, not NEXT_JS", () => {

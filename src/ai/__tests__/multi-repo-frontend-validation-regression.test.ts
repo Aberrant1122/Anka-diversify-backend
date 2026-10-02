@@ -7,6 +7,12 @@ import {
 } from "../coordination/MultiRepoCoordinator";
 import { RepositoryRunSummary } from "../../services/git-worktree.service";
 
+// These orchestration fixtures have no database; authority behavior is covered by PostgreSQL integration tests.
+jest.mock("../../planning/implementation-authority-preflight", () => ({
+  currentImplementationAuthority: jest.fn().mockResolvedValue({ projectId: "proj-1", actorId: "user-1", fingerprint: "fixture" }),
+  assertImplementationAuthorityCurrent: jest.fn().mockResolvedValue({ fingerprint: "fixture" }),
+}));
+
 describe("Multi-Repo Frontend Validation & Handoff Regressions", () => {
   beforeAll(async () => {
     await WasmASTParserEngine.initialize();

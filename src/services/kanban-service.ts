@@ -2,6 +2,9 @@ import { PrismaClient } from "@prisma/client";
 import { WorkflowContextService } from "./workflow-context.service";
 import { LLMGateway } from "../ai/gateway/LLMGateway";
 import { PipelineStages } from "../ai/gateway/PipelineStage";
+import { Prisma } from "@prisma/client";
+import { currentImplementationAuthority, resolveImplementationAuthority } from "../planning/implementation-authority-preflight";
+import { PlanningDomainError } from "../planning/planning-errors";
 
 const prisma = new PrismaClient();
 const workflowContextService = new WorkflowContextService();
@@ -89,8 +92,11 @@ export class KanbanService {
    * Generates Kanban stages & tasks based strictly on the project's Workflow Phase Artifacts
    * (Requirements, Documentation, Architecture, Implementation).
    */
-  async generateBoardFromWorkflow(projectId: string) {
-    const ctx = await workflowContextService.getProjectWorkflowContext(projectId);
+  async generateBoardFromWorkflow(projectId: string, actorId: string) {
+    const accepted = await currentImplementationAuthority(prisma, projectId, actorId);
+    const ctx = { projectId, requirements: accepted.requirements.artifact.content,
+      documentation: accepted.documentation.artifact.content,
+      architecture: accepted.architecture.artifact.content };
     const boundaryPrompt = workflowContextService.buildSystemBoundaryPrompt(ctx);
 
     const prompt = `
@@ -184,14 +190,13 @@ Return ONLY a valid JSON object matching this schema:
       },
     });
 
-    // Ensure board exists
-    let board = await prisma.kanbanBoard.findUnique({ where: { projectId } });
-    if (board) {
-      // Clear old stages & tasks for fresh generation
-      await prisma.kanbanBoard.delete({ where: { projectId } });
-    }
-
-    board = await prisma.kanbanBoard.create({
+    return prisma.$transaction(async (tx) => {
+      const current = await resolveImplementationAuthority(tx, projectId, actorId);
+      if (current.fingerprint !== accepted.fingerprint)
+        throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Implementation planning authority changed during task generation.", 409);
+      const board = await tx.kanbanBoard.findUnique({ where: { projectId } });
+      if (board) await tx.kanbanBoard.delete({ where: { projectId } });
+      return tx.kanbanBoard.create({
       data: {
         projectId,
         stages: {
@@ -220,7 +225,7 @@ Return ONLY a valid JSON object matching this schema:
       },
     });
 
-    return board;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   /**

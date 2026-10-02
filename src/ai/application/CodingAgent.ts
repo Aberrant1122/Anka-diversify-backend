@@ -11,6 +11,7 @@ import { TaskRuntime } from "../runtime/TaskRuntime";
 import { runWithTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
 import { AuthorizedCapabilityScope } from "../runtime/CapabilityGuard";
 import { NodeGitCommandExecutor } from "../../services/git-command";
+import { assertImplementationAuthorityCurrent, currentImplementationAuthority } from "../../planning/implementation-authority-preflight";
 
 const git = new NodeGitCommandExecutor();
 
@@ -71,6 +72,9 @@ export class CodingAgent {
       });
     }
 
+    const acceptedAuthority = await currentImplementationAuthority(prisma, projectId, userId);
+    const revalidateAuthority = () => assertImplementationAuthorityCurrent(prisma, acceptedAuthority).then(() => undefined);
+
     // 2. Query target repository localPath from database
     let targetLocalPath: string | null = null;
     let targetGithubUrl: string | null = null;
@@ -105,6 +109,7 @@ export class CodingAgent {
 
     // 3. Materialize or refresh repository freshness if githubUrl is present or managed clone exists
     if (!request.repositoryId && (targetGithubUrl || (targetLocalPath && RepositoryMaterializationService.isManagedRepositoryPath(targetLocalPath)))) {
+      await revalidateAuthority();
       const mat = await RepositoryMaterializationService.ensureProjectRepositoryCurrent(projectId);
       if (mat.success && mat.metadata) {
         targetLocalPath = mat.metadata.canonicalRoot;
@@ -154,6 +159,7 @@ export class CodingAgent {
     console.log(`[REPO_READY] localPathConfigured=${isUserConfiguredLocalPath}`);
 
     // 8. Execute strictly through GitWorktreeService against the canonical Git repository root
+    await revalidateAuthority();
     const runId = crypto.randomUUID().slice(0, 8);
     const initialWorkspace = AgentWorkspaceState.create({
       projectId,
@@ -189,6 +195,8 @@ export class CodingAgent {
           runId,
           request,
           taskRuntime: runtime,
+          implementationAuthority: acceptedAuthority,
+          revalidateAuthority,
           shipping: internalOptions?.shipping,
           onProgress,
         })
@@ -203,6 +211,8 @@ export class CodingAgent {
       }
       throw error;
     }
+
+    await revalidateAuthority();
 
     let finalWorkspace = runtime.workspaceState().withRelevantPaths([
       ...runtime.workspaceState().snapshot().relevantPaths,

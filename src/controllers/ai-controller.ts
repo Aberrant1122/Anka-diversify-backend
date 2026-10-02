@@ -5,11 +5,13 @@ import { ChatRequest } from "../types";
 import { PrismaClient } from "@prisma/client";
 import { decrypt } from "../utils/encryption";
 import { listActiveReservations } from "../services/file-reservation-service";
-import { MultiRepoCoordinator } from "../ai/coordination/MultiRepoCoordinator";
+import { MultiRepoAuthorityConflictError, MultiRepoCoordinator } from "../ai/coordination/MultiRepoCoordinator";
 import { CapabilityAction, CapabilityGrant } from "../ai/runtime/CapabilityGuard";
 import { GitWorktreeService } from "../services/git-worktree.service";
 import { GitWorkflowError } from "../services/git-workflow.service";
 import { ProjectSidebarService } from "../services/project-sidebar.service";
+import { currentImplementationAuthority } from "../planning/implementation-authority-preflight";
+import { isPlanningDomainError } from "../planning/planning-errors";
 
 const prisma = new PrismaClient();
 
@@ -395,6 +397,8 @@ export class AiController {
       const invocation = parseCodingAgentInvocation(req.body);
       if (!invocation) return res.status(400).json({ error: "A valid message is required" });
 
+      await currentImplementationAuthority(prisma, projectId, userId);
+
       if (req.headers.accept?.includes("text/event-stream") || req.query.stream === "true") {
         return this.streamAgent(req, res);
       }
@@ -408,6 +412,7 @@ export class AiController {
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Agent run error:", error);
+      if (isPlanningDomainError(error)) return res.status(error.httpStatus).json({ error: error.code, message: error.message });
       res.status(500).json({
         error: "Internal server error",
         message: error instanceof Error ? error.message : "Unknown error",
@@ -424,6 +429,8 @@ export class AiController {
 
       const invocation = parseCodingAgentInvocation(req.body);
       if (!invocation) return res.status(400).json({ error: "A valid message is required" });
+
+      await currentImplementationAuthority(prisma, projectId, userId);
 
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -449,6 +456,8 @@ export class AiController {
       res.end();
     } catch (error) {
       console.error("Agent stream error:", error);
+      if (isPlanningDomainError(error) && !res.headersSent)
+        return res.status(error.httpStatus).json({ error: error.code, message: error.message });
       res.write(`event: error\ndata: ${JSON.stringify({ error: "Agent run failed", message: error instanceof Error ? error.message : "Unknown error" })}\n\n`);
       (res as any).flush?.();
       res.end();
@@ -470,6 +479,8 @@ export class AiController {
       if (!message || typeof message !== "string") {
         return res.status(400).json({ error: "message is required" });
       }
+
+      await currentImplementationAuthority(prisma, projectId, userId);
 
       const coordinator = new MultiRepoCoordinator();
 
@@ -509,6 +520,20 @@ export class AiController {
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Multi-repo agent error:", error);
+      if (error instanceof MultiRepoAuthorityConflictError) {
+        const payload = { error: error.code, message: error.message, partialResult: error.partialResult };
+        if (res.headersSent) {
+          res.write(`event: error\ndata: ${JSON.stringify(payload)}\n\n`);
+          return res.end();
+        }
+        return res.status(error.httpStatus).json(payload);
+      }
+      if (isPlanningDomainError(error) && !res.headersSent)
+        return res.status(error.httpStatus).json({ error: error.code, message: error.message });
+      if (res.headersSent) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: isPlanningDomainError(error) ? error.code : "MULTI_REPO_FAILED", message: error instanceof Error ? error.message : "Unknown error" })}\n\n`);
+        return res.end();
+      }
       res.status(500).json({
         error: "Multi-repo coordination failed",
         message: error instanceof Error ? error.message : "Unknown error",
@@ -524,6 +549,7 @@ export class AiController {
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
 
       const body = req.body as Record<string, unknown> | undefined;
+      await currentImplementationAuthority(prisma, projectId, userId);
       const approvalId = typeof body?.approvalId === "string" ? body.approvalId.trim() : "";
       const commitMessage = typeof body?.commitMessage === "string" ? body.commitMessage.trim() : "";
       const rawChanges = body?.changes;
@@ -603,6 +629,7 @@ export class AiController {
       });
     } catch (error) {
       console.error("Push agent changes error:", error instanceof Error ? error.message : error);
+      if (isPlanningDomainError(error)) return res.status(error.httpStatus).json({ error: error.code, message: error.message });
       const message = error instanceof Error ? error.message : "Unknown Git shipping failure";
       const isApprovalError = message.startsWith("GIT_APPROVAL_") || message.startsWith("GIT_SHIPPING_IN_PROGRESS");
       const status = isApprovalError ? 409 : error instanceof GitWorkflowError ? 409 : 500;

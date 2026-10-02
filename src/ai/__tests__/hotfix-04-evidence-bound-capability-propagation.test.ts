@@ -38,6 +38,11 @@ import { AiService } from "../application/AiService";
 import { CodingAgent } from "../application/CodingAgent";
 import { productionAddEvidence } from "./helpers/capability-test-harness";
 
+jest.mock("../../planning/implementation-authority-preflight", () => ({
+  currentImplementationAuthority: jest.fn().mockResolvedValue({ fingerprint: "fixture" }),
+  assertImplementationAuthorityCurrent: jest.fn().mockResolvedValue({ fingerprint: "fixture" }),
+}));
+
 // Mock PrismaClient to prevent DB connection attempts
 jest.mock("@prisma/client", () => {
   return {

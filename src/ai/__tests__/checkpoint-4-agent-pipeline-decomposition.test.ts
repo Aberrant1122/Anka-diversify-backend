@@ -103,19 +103,24 @@ describe("Checkpoint 4 AgentPipeline decomposition", () => {
   test("RepositoryObserver returns normalized materialized repository facts", async () => {
     const snapshot = repositorySnapshot();
     mockProjectFindUnique.mockResolvedValue({ localPath: "C:\\fixture", githubUrl: null, githubToken: null });
-    mockPhaseArtifactFindFirst.mockResolvedValue({ content: "approved architecture" });
     jest.spyOn(RepositoryContextBuilder, "buildProjectContext").mockResolvedValue(projectContext(snapshot));
     jest.spyOn(RepositoryScanner, "ensureLocalWorkspace").mockResolvedValue("C:\\fixture");
     jest.spyOn(RepositoryScanner, "getEffectiveSnapshot").mockReturnValue(snapshot);
     jest.spyOn(MonorepoDetector, "detectMonorepo").mockReturnValue(monorepoDescriptor());
 
-    const facts = await RepositoryObserver.loadProjectFacts("project-1");
+    const facts = await RepositoryObserver.loadProjectFacts("project-1", {
+      projectId: "project-1",
+      architecture: { artifact: { id: "architecture-1", version: 1, contentHash: "hash-1", content: "approved architecture" }, approvalId: "approval-1" },
+      fingerprint: "approved-chain-1",
+    } as Parameters<typeof RepositoryObserver.loadProjectFacts>[1]);
     const result = await RepositoryObserver.observe("project-1", { message: "fix it" }, facts);
 
     expect(result.effectiveLocalPath).toBe("C:\\fixture");
     expect(result.currentRevisionHash).toBe("revision-1");
     expect(result.canonicalExistingFiles).toEqual(["src/index.ts"]);
     expect(result.approvedArchitecture?.content).toBe("approved architecture");
+    expect(result.architectureAuthority).toMatchObject({ artifactId: "architecture-1", approvalId: "approval-1", fingerprint: "approved-chain-1" });
+    expect(mockPhaseArtifactFindFirst).not.toHaveBeenCalled();
   });
 
   test("AgentPlanner produces and activates a typed execution stage", async () => {

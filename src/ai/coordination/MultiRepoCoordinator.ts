@@ -9,6 +9,9 @@ import {
 import { GitWorktreeService, RepositoryRunSummary } from "../../services/git-worktree.service";
 import { ErrorDiagnosticsParser } from "../../services/surgical-repair.engine";
 import { prisma } from "../../services/database";
+import { assertImplementationAuthorityCurrent, currentImplementationAuthority, ImplementationAuthority } from "../../planning/implementation-authority-preflight";
+import { isPlanningDomainError, PlanningDomainError } from "../../planning/planning-errors";
+import type { GitShippingResult } from "../../services/git-workflow.service";
 
 export type RepositoryRole =
   | "shared_library"
@@ -49,7 +52,7 @@ export interface MultiRepoRepoResult {
   repositoryId: string;
   repositoryName: string;
   role: string;
-  status: "SUCCESS" | "FAILED" | "SKIPPED";
+  status: "SUCCESS" | "FAILED" | "SKIPPED" | "REJECTED";
   changes: AgentFileChange[];
   buildVerified: boolean;
   validationPassed: boolean;
@@ -57,6 +60,10 @@ export interface MultiRepoRepoResult {
   validationErrors?: string;
   visualVerification?: VisualVerificationResult;
   handoff?: CrossRepoHandoff;
+  runId?: string;
+  branchName?: string;
+  observedChangedFiles?: string[];
+  sideEffects?: { status: "UNKNOWN" | "NOT_EXECUTED" | "REPORTED"; git?: GitShippingResult };
 }
 
 export interface MultiRepoTaskResult {
@@ -65,6 +72,27 @@ export interface MultiRepoTaskResult {
   results: MultiRepoRepoResult[];
   failedRepositoryId?: string;
   changes: AgentFileChange[];
+}
+
+export interface MultiRepoAuthorityConflictResult extends Omit<MultiRepoTaskResult, "overallStatus"> {
+  overallStatus: "AUTHORITY_CONFLICT";
+  authorityCurrent: false;
+}
+
+export class MultiRepoAuthorityConflictError extends PlanningDomainError {
+  readonly partialResult: MultiRepoAuthorityConflictResult;
+
+  constructor(cause: PlanningDomainError, partialResult: MultiRepoAuthorityConflictResult) {
+    super(cause.code, cause.message, cause.httpStatus);
+    this.name = "MultiRepoAuthorityConflictError";
+    this.partialResult = partialResult;
+  }
+}
+
+function isAuthorityConflict(error: unknown): error is PlanningDomainError {
+  return isPlanningDomainError(error) && [
+    "PLANNING_ACTION_LOCKED", "PLANNING_CONTEXT_CHANGED", "PLANNING_ARTIFACT_INVALID", "PLANNING_READINESS_BLOCKED",
+  ].includes(error.code);
 }
 
 export interface MultiRepoProgressEvent {
@@ -98,6 +126,8 @@ export type MultiRepoAgentRunner = (options: {
   repositoryPath: string;
   runId: string;
   request: ChatRequest;
+  implementationAuthority?: ImplementationAuthority;
+  revalidateAuthority?: () => Promise<void>;
   onProgress?: (event: AgentProgressEvent) => void;
 }) => Promise<RepositoryRunSummary>;
 
@@ -484,6 +514,9 @@ export class MultiRepoCoordinator {
       customPlanEdges,
     } = options;
 
+    const acceptedAuthority = await currentImplementationAuthority(prisma, projectId, userId);
+    const revalidateAuthority = () => assertImplementationAuthorityCurrent(prisma, acceptedAuthority).then(() => undefined);
+
     // 1. Verify repository access & membership
     const candidateRepos = await this.verifyAndResolveRepositories(
       projectId,
@@ -504,11 +537,59 @@ export class MultiRepoCoordinator {
 
     const results: MultiRepoRepoResult[] = [];
     const accumulatedHandoffs: CrossRepoHandoff[] = [];
+    const observedRuns = new Map<string, { runId: string; branchName?: string; changedFiles?: string[]; shipping?: GitShippingResult }>();
     let failedRepositoryId: string | undefined = undefined;
     let abortRemaining = false;
 
+    const authorityConflict = (error: PlanningDomainError, rejectedIndex?: number): MultiRepoAuthorityConflictError => {
+      const partialResults: MultiRepoRepoResult[] = plan.steps.map((step, index) => {
+        const existing = results.find((result) => result.repositoryId === step.repositoryId);
+        const observed = observedRuns.get(step.repositoryId);
+        const observedChangedFiles = [...new Set([
+          ...(existing?.changes.map((change) => change.path) ?? []),
+          ...(observed?.changedFiles ?? []),
+        ])];
+        const status = index === rejectedIndex ? "REJECTED" : existing?.status ?? "SKIPPED";
+        const ran = Boolean(observed);
+        return {
+          repositoryId: step.repositoryId,
+          repositoryName: step.name,
+          role: step.role,
+          status,
+          changes: [],
+          buildVerified: status === "SUCCESS" && existing?.buildVerified === true,
+          validationPassed: status === "SUCCESS" && existing?.validationPassed === true,
+          validationCommands: existing?.validationCommands ?? [],
+          ...(status === "REJECTED" ? { validationErrors: "Planning authority changed; this result was not accepted." }
+            : existing?.validationErrors ? { validationErrors: existing.validationErrors } : {}),
+          ...(observed?.runId ? { runId: observed.runId } : {}),
+          ...(observed?.branchName ? { branchName: observed.branchName } : {}),
+          ...(observedChangedFiles.length ? { observedChangedFiles } : {}),
+          sideEffects: observed?.shipping
+            ? { status: "REPORTED", git: observed.shipping }
+            : { status: ran ? "UNKNOWN" : "NOT_EXECUTED" },
+        };
+      });
+      return new MultiRepoAuthorityConflictError(error, {
+        planId: plan.planId,
+        overallStatus: "AUTHORITY_CONFLICT",
+        authorityCurrent: false,
+        results: partialResults,
+        ...(rejectedIndex === undefined
+          ? (failedRepositoryId ? { failedRepositoryId } : {})
+          : { failedRepositoryId: plan.steps[rejectedIndex].repositoryId }),
+        changes: [],
+      });
+    };
+
     // 3. Sequentially execute each step
-    for (const step of plan.steps) {
+    for (const [stepIndex, step] of plan.steps.entries()) {
+      try {
+        await revalidateAuthority();
+      } catch (error) {
+        if (isAuthorityConflict(error)) throw authorityConflict(error, stepIndex);
+        throw error;
+      }
       if (abortRemaining) {
         results.push({
           repositoryId: step.repositoryId,
@@ -547,6 +628,7 @@ export class MultiRepoCoordinator {
       };
 
       const runId = `${plan.planId.slice(-6)}-${step.order + 1}`;
+      observedRuns.set(step.repositoryId, { runId });
 
       try {
         const summary = await agentRunner({
@@ -555,6 +637,8 @@ export class MultiRepoCoordinator {
           repositoryPath: step.repositoryPath,
           runId,
           request: stepRequest,
+          implementationAuthority: acceptedAuthority,
+          revalidateAuthority,
           onProgress: (event) => {
             if (event.stageName === "VALIDATING" || (typeof event.stageName === "string" && event.stageName.toUpperCase().includes("VALIDAT"))) {
               onProgress?.({
@@ -569,6 +653,16 @@ export class MultiRepoCoordinator {
           },
         });
 
+        observedRuns.set(step.repositoryId, {
+          runId: summary.runId || runId,
+          branchName: summary.branchName,
+          changedFiles: [...new Set([
+            ...summary.changedFiles,
+            ...(summary.agentResponse?.changes ?? []).map((change) => change.path),
+          ])],
+          shipping: summary.shipping,
+        });
+        await revalidateAuthority();
         const validationPassed = summary.validationPassed;
         const rawChanges = summary.agentResponse?.changes || [];
 
@@ -706,6 +800,7 @@ export class MultiRepoCoordinator {
           });
         }
       } catch (err: any) {
+        if (isAuthorityConflict(err)) throw authorityConflict(err, stepIndex);
         abortRemaining = true;
         failedRepositoryId = step.repositoryId;
 
@@ -738,6 +833,12 @@ export class MultiRepoCoordinator {
       }
     }
 
+    try {
+      await revalidateAuthority();
+    } catch (error) {
+      if (isAuthorityConflict(error)) throw authorityConflict(error);
+      throw error;
+    }
     // 4. Compute overall status
     const hasSuccess = results.some((r) => r.status === "SUCCESS");
     const hasFailed = results.some((r) => r.status === "FAILED");

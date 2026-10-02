@@ -30,6 +30,7 @@ import { RepositoryObserver } from "../ai/orchestration/RepositoryObserver";
 import { NodeGitCommandExecutor } from "./git-command";
 import { GitShippingMode, GitShippingResult, GitWorkflowService } from "./git-workflow.service";
 import type { CodeReviewProvider } from "./code-review-provider";
+import { PlanningDomainError } from "../planning/planning-errors";
 
 const git = new NodeGitCommandExecutor();
 
@@ -105,6 +106,7 @@ interface PendingGitShippingApproval {
   readonly approval: GitShippingApproval;
   readonly userId: string;
   readonly projectId: string;
+  readonly implementationAuthorityFingerprint?: string;
   readonly repositoryId?: string;
   readonly prepared: PreparedRepositoryRun;
   readonly taskRuntime: TaskRuntime;
@@ -136,6 +138,8 @@ export interface RunIsolatedAgentOptions {
   authorizedCapabilities?: readonly CapabilityGrant[];
   taskRuntime?: TaskRuntime;
   shipping?: RepositoryShippingPolicy;
+  implementationAuthority?: import("../planning/implementation-authority-preflight").ImplementationAuthority;
+  revalidateAuthority?: () => Promise<void>;
   onProgress?: (event: AgentProgressEvent) => void;
 }
 
@@ -166,6 +170,7 @@ export class GitWorktreeService {
   public static retainVerifiedRunForApproval(input: {
     readonly userId: string;
     readonly projectId: string;
+    readonly implementationAuthorityFingerprint?: string;
     readonly repositoryId?: string;
     readonly prepared: PreparedRepositoryRun;
     readonly taskRuntime: TaskRuntime;
@@ -201,6 +206,7 @@ export class GitWorktreeService {
       approval,
       userId: input.userId,
       projectId: input.projectId,
+      ...(input.implementationAuthorityFingerprint ? { implementationAuthorityFingerprint: input.implementationAuthorityFingerprint } : {}),
       ...(input.repositoryId ? { repositoryId: input.repositoryId } : {}),
       prepared: input.prepared,
       taskRuntime: input.taskRuntime,
@@ -263,6 +269,14 @@ export class GitWorktreeService {
       throw new Error("GIT_SHIPPING_IN_PROGRESS: This verified approval is already being shipped.");
     }
 
+    if (!pending.implementationAuthorityFingerprint)
+      throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Shipping approval has no accepted Implementation authority.", 409);
+    const { currentImplementationAuthority } = await import("../planning/implementation-authority-preflight");
+    const { prisma } = await import("./database");
+    const current = await currentImplementationAuthority(prisma, input.projectId, input.userId);
+    if (current.fingerprint !== pending.implementationAuthorityFingerprint)
+      throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Implementation authority changed after generation.", 409);
+
     const verified = new GitWorkflowService().buildVerifiedChangeset(
       pending.checkpointJournal,
       pending.trustedInfrastructureChanges,
@@ -307,6 +321,13 @@ export class GitWorktreeService {
           trustedInfrastructureChanges: pending.trustedInfrastructureChanges,
           validationSummary: "Deterministic validation passed before human approval",
           gitEnvironment: input.gitEnvironment,
+          revalidateAuthority: async () => {
+            const { currentImplementationAuthority } = await import("../planning/implementation-authority-preflight");
+            const { prisma } = await import("./database");
+            const current = await currentImplementationAuthority(prisma, input.projectId, input.userId);
+            if (current.fingerprint !== pending.implementationAuthorityFingerprint)
+              throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Implementation authority changed after generation.", 409);
+          },
         })
       );
       this.pendingShippingApprovals.delete(input.approvalId);
@@ -953,6 +974,7 @@ export class GitWorktreeService {
           onProgress,
           {
             effectiveLocalPath: prepared.worktreePath,
+            implementationAuthority: options.implementationAuthority,
             authorizedCapabilityScope: this.createIsolatedCapabilityScope(
               prepared.worktreePath,
               runId,
@@ -1089,7 +1111,7 @@ export class GitWorktreeService {
         && options.taskRuntime.snapshot().status === "RUNNING"
         && agentResponse.agentLoop?.outcome === "AWAITING_COMPLETION_EVALUATION"
       ) {
-        const completionFacts = await RepositoryObserver.loadProjectFacts(projectId);
+        const completionFacts = await RepositoryObserver.loadProjectFacts(projectId, options.implementationAuthority);
         const completionObservation = await RepositoryObserver.observe(projectId, request, completionFacts, {
           effectiveLocalPath: prepared.worktreePath,
         });
@@ -1191,6 +1213,7 @@ export class GitWorktreeService {
 
       let shipping: GitShippingResult | undefined;
       let shippingApproval: GitShippingApproval | undefined;
+      await options.revalidateAuthority?.();
       if (options.shipping) {
         if (!options.taskRuntime) {
           throw new Error("GIT_WORKFLOW_REQUIRED: Shipping requires the authoritative TaskRuntime.");
@@ -1226,6 +1249,7 @@ export class GitWorktreeService {
           trustedInfrastructureChanges: infrastructureChanges,
           reviewProvider: options.shipping.reviewProvider,
           validationSummary: validationPassed ? "Deterministic validation passed" : "Deterministic validation failed",
+          revalidateAuthority: options.revalidateAuthority,
         });
       } else if (
         options.taskRuntime
@@ -1253,6 +1277,7 @@ export class GitWorktreeService {
           checkpointJournal,
           validationPassed,
           trustedInfrastructureChanges,
+          implementationAuthorityFingerprint: options.implementationAuthority?.fingerprint,
         });
         preserveForShippingRetry = true;
       }

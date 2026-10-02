@@ -43,6 +43,8 @@ export interface TrustedInfrastructureChange {
 }
 
 export interface GitShippingRequest {
+  /** Rechecks the accepted planning authority immediately before external side effects. */
+  readonly revalidateAuthority?: () => Promise<void>;
   readonly repositoryRoot: string;
   readonly worktreePath: string;
   readonly baseRevision: string;
@@ -267,9 +269,11 @@ export class GitWorkflowService {
           ciStatus: "NOT_REQUESTED",
         });
       }
+      await request.revalidateAuthority?.();
       await this.stageAndVerify(worktree, request.baseRevision, allowed);
       const message = `anka: ${safeSummary(request.commitSummary)} [anka-shipping:${request.shippingId}]`;
       try {
+        await request.revalidateAuthority?.();
         await this.git.run(worktree, ["commit", "-m", message]);
         commitSha = (await this.git.run(worktree, ["rev-parse", "HEAD"])).stdout.trim();
         if (!/^[0-9a-f]{40}$/i.test(commitSha)) throw new Error("Git returned an invalid commit SHA");
@@ -292,6 +296,7 @@ export class GitWorkflowService {
       request.trustedTargetRevision,
       request.gitEnvironment,
     );
+    await request.revalidateAuthority?.();
     const pushed = await this.pushTaskBranch(
       worktree,
       remote,
@@ -313,6 +318,7 @@ export class GitWorkflowService {
       body: this.reviewBody(request, allowedPaths, commitSha),
       shippingId: request.shippingId,
     });
+    await request.revalidateAuthority?.();
     let review: CodeReviewMetadata;
     try {
       review = await request.reviewProvider.findExistingReview(reviewRequest)
