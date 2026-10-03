@@ -202,14 +202,20 @@ describe("PlanningDocumentationGenerationService - Revisions", () => {
     ["FEEDBACK_APPLICATION", null, DOCUMENTATION_FEEDBACK_PROMPT_VERSION],
     ["SECTION_REVISION", "features", DOCUMENTATION_SECTION_REVISION_PROMPT_VERSION],
     ["SECTION_REGENERATION", "features", DOCUMENTATION_SECTION_REGENERATION_PROMPT_VERSION],
-  ] as const)("executes %s using 8k stage and prompt version %s", async (operation, targetSection, expectedPromptVersion) => {
+  ] as const)("executes %s using the 32k Documentation revision route and prompt version %s", async (operation, targetSection, expectedPromptVersion) => {
     const run = { id: `run-${operation}`, status: "running" } as WorkflowRun;
     const successorArtifact = { id: "doc-v2", version: 2 } as PhaseArtifact;
     const context = makeContext(operation, targetSection);
 
     const runs = {
       start: jest.fn().mockResolvedValue({ run, context, reused: false }),
-      finalizeRevision: jest.fn().mockImplementation(async (input: { structuredContent: Record<string, unknown> }) => {
+      finalizeRevision: jest.fn().mockImplementation(async (input: { structuredContent: Record<string, unknown>; audit: { modelUsage: Record<string, unknown> } }) => {
+        expect(input.audit.modelUsage).toMatchObject({
+          model: "gpt-6.1-sol",
+          routeId: "DOCUMENTATION_REVISION:REASONING",
+          reasoningEffort: "medium",
+          configuredMaxOutputTokens: 32_000,
+        });
         return {
           run: { ...run, status: "completed", outputArtifactId: successorArtifact.id },
           artifact: successorArtifact,
@@ -222,11 +228,11 @@ describe("PlanningDocumentationGenerationService - Revisions", () => {
 
     const gateway = {
       callStructured: jest.fn().mockImplementation(async (options) => {
-        expect(options.stage).toBe(PipelineStages.DOCUMENTATION_PLANNING);
-        expect(options.maxTokens).toBe(8_000);
+        expect(options.stage).toBe(PipelineStages.DOCUMENTATION_REVISION);
+        expect(options.maxTokens).toBe(32_000);
         return {
           content: draft,
-          model: "gpt-4o",
+          model: "gpt-6.1-sol",
           stage: options.stage,
           finishReason: "stop",
           latencyMs: 15,
@@ -238,13 +244,16 @@ describe("PlanningDocumentationGenerationService - Revisions", () => {
               kind: "initial",
               providerResponseId: "resp-1",
               providerRequestId: "req-1",
-              model: "gpt-4o",
+              model: "gpt-6.1-sol",
               finishReason: "stop",
               promptTokens: 100,
               completionTokens: 200,
               totalTokens: 300,
               usageSource: "provider",
               latencyMs: 15,
+              routeId: "DOCUMENTATION_REVISION:REASONING",
+              reasoningEffort: "medium",
+              maxOutputTokens: 32_000,
             },
           ],
         };
@@ -287,7 +296,7 @@ describe("PlanningDocumentationGenerationService - Revisions", () => {
     };
 
     const gateway = {
-      callStructured: jest.fn().mockRejectedValue(new LLMTruncationError("Max tokens exceeded", { maxTokens: 8000, stage: PipelineStages.DOCUMENTATION_PLANNING })),
+      callStructured: jest.fn().mockRejectedValue(new LLMTruncationError("Max tokens exceeded", { maxTokens: 32_000, stage: PipelineStages.DOCUMENTATION_REVISION })),
     };
 
     const service = new PlanningDocumentationGenerationService({} as never, {

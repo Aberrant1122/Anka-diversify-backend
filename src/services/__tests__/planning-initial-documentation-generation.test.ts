@@ -29,7 +29,7 @@ const draft: DocumentationProviderDraft = {
 };
 
 describe("PlanningDocumentationGenerationService", () => {
-  test("uses the dedicated 8k structured stage and server-owned provenance", async () => {
+  test("uses the dedicated 32k Documentation generation route and server-owned provenance", async () => {
     const run = { id: "run-1", status: "running" } as WorkflowRun;
     const artifact = { id: "doc-1" } as PhaseArtifact;
     const context = {
@@ -44,19 +44,25 @@ describe("PlanningDocumentationGenerationService", () => {
     };
     const runs = {
       start: jest.fn().mockResolvedValue({ run, context, reused: false }),
-      finalize: jest.fn().mockImplementation(async (input: { structuredContent: Record<string, unknown> }) => {
+      finalize: jest.fn().mockImplementation(async (input: { structuredContent: Record<string, unknown>; audit: { modelUsage: Record<string, unknown> } }) => {
         expect(input.structuredContent.sourceRequirements).toEqual({ artifactId: "req-1", version: 1, contentHash: hashRequirementsContent(requirements) });
         expect(input.structuredContent.requirementsTraceability).toBeDefined();
+        expect(input.audit.modelUsage).toMatchObject({
+          model: "gpt-6.1-sol",
+          routeId: "DOCUMENTATION_GENERATION:REASONING",
+          reasoningEffort: "medium",
+          configuredMaxOutputTokens: 32_000,
+        });
         return { run: { ...run, status: "completed", outputArtifactId: artifact.id }, artifact, readiness: { ready: true } };
       }),
       finish: jest.fn(),
     };
     const gateway = { callStructured: jest.fn().mockImplementation(async (options) => {
-      expect(options.stage).toBe(PipelineStages.DOCUMENTATION_PLANNING);
-      expect(options.maxTokens).toBe(8_000);
+      expect(options.stage).toBe(PipelineStages.DOCUMENTATION_GENERATION);
+      expect(options.maxTokens).toBe(32_000);
       expect(options.schema.schema.properties.sourceRequirements).toBeUndefined();
-      return { content: draft, model: "gpt-4o", stage: options.stage, finishReason: "stop", latencyMs: 1, attemptCount: 1,
-        usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 }, providerAttempts: [{ attemptNumber: 1, kind: "initial", providerResponseId: "response", providerRequestId: "request", model: "gpt-4o", finishReason: "stop", promptTokens: 10, completionTokens: 20, totalTokens: 30, usageSource: "provider", latencyMs: 1 }] };
+      return { content: draft, model: "gpt-6.1-sol", stage: options.stage, finishReason: "stop", latencyMs: 1, attemptCount: 1,
+        usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 }, providerAttempts: [{ attemptNumber: 1, kind: "initial", providerResponseId: "response", providerRequestId: "request", model: "gpt-6.1-sol", finishReason: "stop", promptTokens: 10, completionTokens: 20, totalTokens: 30, usageSource: "provider", latencyMs: 1, routeId: "DOCUMENTATION_GENERATION:REASONING", reasoningEffort: "medium", maxOutputTokens: 32_000 }] };
     }) };
     const service = new PlanningDocumentationGenerationService({} as never, {
       authorization: {} as never, artifacts: {} as never, readiness: {} as never,
@@ -86,7 +92,7 @@ describe("PlanningDocumentationGenerationService", () => {
     };
     const gateway = { callStructured: jest.fn().mockResolvedValue({
       content: { ...draft, sourceRequirements: { artifactId: "forged", version: 99, contentHash: "f".repeat(64) } },
-      model: "gpt-4o", stage: PipelineStages.DOCUMENTATION_PLANNING, finishReason: "stop", latencyMs: 1,
+      model: "gpt-6.1-sol", stage: PipelineStages.DOCUMENTATION_GENERATION, finishReason: "stop", latencyMs: 1,
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, attemptCount: 1,
     }) };
     const service = new PlanningDocumentationGenerationService({} as never, {

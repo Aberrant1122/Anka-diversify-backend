@@ -148,8 +148,16 @@ export class PhaseService {
     expectedHash: string,
     actorId: string,
   ) {
-    if (phase === "architecture") return this.approvals.requestArchitectureApproval({ projectId, artifactId, expectedHash, actorId });
-    return this.approvals.requestApproval({ projectId, phase, artifactId, expectedHash, actorId });
+    if (phase === REQUIREMENTS_PHASE) {
+      return this.approvals.requestApproval({ projectId, phase, artifactId, expectedHash, actorId });
+    }
+    if (phase === "documentation") {
+      return this.approvals.requestDocumentationApproval({ projectId, artifactId, expectedHash, actorId });
+    }
+    if (phase === "architecture") {
+      return this.approvals.requestArchitectureApproval({ projectId, artifactId, expectedHash, actorId });
+    }
+    throw new PlanningDomainError("PLANNING_INVALID_PHASE", `Unknown approval phase '${phase}'.`, 422, { phase });
   }
 
   async approvePhase(
@@ -160,15 +168,22 @@ export class PhaseService {
     approvedById: string,
     comments?: string,
   ) {
-    if (phase === "architecture") return this.approvals.approveArchitectureArtifact({ projectId, artifactId, expectedHash, actorId: approvedById, comments });
-    return this.approvals.approveArtifact({
-      projectId,
-      phase,
-      artifactId,
-      expectedHash,
-      actorId: approvedById,
-      comments,
-    });
+    if (phase === REQUIREMENTS_PHASE) {
+      return this.approvals.approveArtifact({
+        projectId, phase, artifactId, expectedHash, actorId: approvedById, comments,
+      });
+    }
+    if (phase === "documentation") {
+      return this.approvals.approveDocumentationArtifact({
+        projectId, artifactId, expectedHash, actorId: approvedById, comments,
+      });
+    }
+    if (phase === "architecture") {
+      return this.approvals.approveArchitectureArtifact({
+        projectId, artifactId, expectedHash, actorId: approvedById, comments,
+      });
+    }
+    throw new PlanningDomainError("PLANNING_INVALID_PHASE", `Unknown approval phase '${phase}'.`, 422, { phase });
   }
 
   async requestChanges(
@@ -179,15 +194,22 @@ export class PhaseService {
     approvedById: string,
     comments: string,
   ) {
-    if (phase === "architecture") return this.approvals.requestArchitectureChanges({ projectId, artifactId, expectedHash, actorId: approvedById, comments });
-    return this.approvals.requestChanges({
-      projectId,
-      phase,
-      artifactId,
-      expectedHash,
-      actorId: approvedById,
-      comments,
-    });
+    if (phase === REQUIREMENTS_PHASE) {
+      return this.approvals.requestChanges({
+        projectId, phase, artifactId, expectedHash, actorId: approvedById, comments,
+      });
+    }
+    if (phase === "documentation") {
+      return this.approvals.requestDocumentationChanges({
+        projectId, artifactId, expectedHash, actorId: approvedById, comments,
+      });
+    }
+    if (phase === "architecture") {
+      return this.approvals.requestArchitectureChanges({
+        projectId, artifactId, expectedHash, actorId: approvedById, comments,
+      });
+    }
+    throw new PlanningDomainError("PLANNING_INVALID_PHASE", `Unknown approval phase '${phase}'.`, 422, { phase });
   }
 
   async rejectPhase(

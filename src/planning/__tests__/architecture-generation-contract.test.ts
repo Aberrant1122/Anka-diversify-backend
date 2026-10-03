@@ -40,12 +40,15 @@ describe("Architecture generation contract", () => {
     expect(() => assertArchitectureCapacity(messages, ARCHITECTURE_PROVIDER_JSON_SCHEMA, "repair")).not.toThrow();
   });
 
-  test("dedicated route budgets and unknown model capability fails closed", () => {
+  test("capacity validates only the selected Architecture route and fails closed", () => {
     const decision = new ModelRouter().route(PipelineStages.ARCHITECTURE_PLANNING);
     expect(decision).toMatchObject({ maxInputTokens: 64_000, maxOutputTokens: 12_000 });
     const messages = [{ role: "system" as const, content: "policy" }, { role: "user" as const, content: "data" }];
     expect(() => assertArchitectureCapacity(messages, ARCHITECTURE_PROVIDER_JSON_SCHEMA, "repair",
-      new ModelRouter({ standardModel: "unverified-model" }))).toThrow();
+      new ModelRouter({ standardModel: "unverified-model" }))).not.toThrow();
+    expect(() => assertArchitectureCapacity(messages, ARCHITECTURE_PROVIDER_JSON_SCHEMA, "repair",
+      new ModelRouter({ architectureModel: "gpt-6.1-sol" }))).not.toThrow();
+    expect(() => new ModelRouter({ architectureModel: "unverified-model" })).toThrow(/Unsupported Architecture model configuration/);
     expect(() => assertArchitectureCapacity([messages[0], { role: "user", content: "x".repeat(65_000) }],
       ARCHITECTURE_PROVIDER_JSON_SCHEMA, "repair")).toThrow();
   });

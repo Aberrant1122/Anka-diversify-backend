@@ -166,7 +166,7 @@ Return ONLY a valid JSON object matching this schema:
 `;
 
     const result = await LLMGateway.getInstance().callStructured<KanbanBoardProposal>({
-      stage: PipelineStages.TASK_DECOMPOSITION,
+      stage: PipelineStages.IMPLEMENTATION_PLANNING,
       messages: [{ role: "user", content: prompt }],
       schema: {
         name: "KanbanBoardProposalSchema",

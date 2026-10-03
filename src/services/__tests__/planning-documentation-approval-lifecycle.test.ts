@@ -11,6 +11,7 @@ import {
   DocumentationLifecycleFixture,
   hashOf,
 } from "./planning-documentation-test-fixtures";
+import { PhaseService } from "../phase-service";
 
 const fixture = new DocumentationLifecycleFixture();
 beforeAll(() => fixture.start());
@@ -40,12 +41,10 @@ function oversized(input: DocumentationContent): DocumentationContent {
 describe("Checkpoint 1B Documentation approval lifecycle", () => {
   test("member requests approval; owner approves exact authority and seeds Architecture", async () => {
     const setup = await setupDocumentation("approve", true);
-    const requested = await fixture.approvals.requestDocumentationApproval({
-      projectId: setup.projectId,
-      artifactId: setup.artifact.id,
-      expectedHash: hashOf(setup.artifact),
-      actorId: fixture.memberId,
-    });
+    const phases = new PhaseService(fixture.prisma);
+    const requested = await phases.requestApproval(
+      setup.projectId, "documentation", setup.artifact.id, hashOf(setup.artifact), fixture.memberId,
+    );
     expect(requested).toMatchObject({
       status: "awaiting_approval",
       currentArtifactId: setup.artifact.id,
@@ -54,13 +53,9 @@ describe("Checkpoint 1B Documentation approval lifecycle", () => {
     });
     await expect(fixture.prisma.phaseApproval.count({ where: { projectId: setup.projectId, phase: "documentation" } })).resolves.toBe(0);
 
-    const approved = await fixture.approvals.approveDocumentationArtifact({
-      projectId: setup.projectId,
-      artifactId: setup.artifact.id,
-      expectedHash: hashOf(setup.artifact),
-      actorId: fixture.ownerId,
-      comments: "Approved.",
-    });
+    const approved = await phases.approvePhase(
+      setup.projectId, "documentation", setup.artifact.id, hashOf(setup.artifact), fixture.ownerId, "Approved.",
+    );
     expect(approved).toMatchObject({ status: "approved", currentApprovedArtifactId: setup.artifact.id, approvalCandidateArtifactId: null });
     await expect(fixture.prisma.phaseArtifact.findUniqueOrThrow({ where: { id: setup.artifact.id } })).resolves.toMatchObject({ lifecycleStatus: "APPROVED", approved: true, supersededAt: null });
     await expect(fixture.prisma.phaseApproval.findFirstOrThrow({ where: { artifactId: setup.artifact.id, decision: "approved" } })).resolves.toMatchObject({

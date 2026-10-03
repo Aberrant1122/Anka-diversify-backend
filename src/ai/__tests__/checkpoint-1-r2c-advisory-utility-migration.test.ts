@@ -9,16 +9,51 @@ import { KanbanService } from "../../services/kanban-service";
 import { GitHubService } from "../github/GitHubService";
 
 jest.mock("@prisma/client", () => ({
-  PrismaClient: jest.fn().mockImplementation(() => ({
-    projectMemorySummary: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({}) },
-    project: { findUnique: jest.fn().mockResolvedValue({ githubUrl: "https://github.com/acme/repo", githubToken: null }) },
-    kanbanBoard: {
-      findUnique: jest.fn().mockResolvedValue(null),
-      delete: jest.fn().mockResolvedValue({}),
-      create: jest.fn().mockResolvedValue({ id: "board-1", stages: [] }),
-    },
-  })),
+  Prisma: { TransactionIsolationLevel: { Serializable: "Serializable" } },
+  PrismaClient: jest.fn().mockImplementation(() => {
+    const transaction = {
+      kanbanBoard: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: "board-1" }),
+        findUniqueOrThrow: jest.fn().mockResolvedValue({ id: "board-1", stages: [] }),
+      },
+      kanbanStage: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }), create: jest.fn().mockResolvedValue({}) },
+      implementationTaskDependency: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
+    };
+    return {
+      projectMemorySummary: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({}) },
+      project: { findUnique: jest.fn().mockResolvedValue({ githubUrl: "https://github.com/acme/repo", githubToken: null }) },
+      kanbanBoard: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        delete: jest.fn().mockResolvedValue({}),
+        create: jest.fn().mockResolvedValue({ id: "board-1", stages: [] }),
+      },
+      $transaction: jest.fn().mockImplementation((callback) => callback(transaction)),
+    };
+  }),
 }));
+
+jest.mock("../../planning/implementation-authority-preflight", () => {
+  const authority = {
+    projectId: "project-1",
+    actorId: "actor-1",
+    projectPhase: "implementation",
+    implementationStatus: "not_started",
+    requirements: { artifact: { content: "requirements" } },
+    documentation: { artifact: { content: "documentation" } },
+    architecture: {
+      artifact: { id: "architecture-1", content: "architecture", version: 1 },
+      content: { components: [{ id: "ARCH-COMP-API" }] },
+      contentHash: "a".repeat(64),
+      approvalId: "approval-1",
+    },
+    fingerprint: "f".repeat(64),
+  };
+  return {
+    currentImplementationAuthority: jest.fn().mockResolvedValue(authority),
+    resolveImplementationAuthority: jest.fn().mockResolvedValue(authority),
+  };
+});
 
 jest.mock("../github/GitHubService", () => ({
   GitHubService: {
@@ -82,23 +117,23 @@ describe("Checkpoint 1 R2C advisory and utility gateway migration", () => {
     expect(gatewaySpy.mock.calls[0][0].schema.validate({ score: 2, passed: true, critique: [], improvements: "" }).valid).toBe(false);
   });
 
-  test("Kanban generation routes planning data through TASK_DECOMPOSITION and rejects unsafe nested paths", async () => {
+  test("Kanban generation routes planning data through IMPLEMENTATION_PLANNING and rejects unsafe nested paths", async () => {
     const gatewaySpy = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(
-      gatewayResult({ stages: [{ title: "Setup", order: 0, tasks: [{ title: "Create schema", description: "Define models", acceptanceCriteria: ["Schema validates"], targetFiles: ["prisma/schema.prisma"] }] }] }, PipelineStages.TASK_DECOMPOSITION),
+      gatewayResult({ stages: [{ title: "Setup", order: 0, tasks: [{ key: "TASK-SCHEMA", title: "Create schema", description: "Define models", acceptanceCriteria: ["Schema validates"], targetFiles: ["prisma/schema.prisma"], architectureComponentIds: ["ARCH-COMP-API"], dependencyKeys: [] }] }] }, PipelineStages.IMPLEMENTATION_PLANNING),
     );
-    await new KanbanService().generateBoardFromWorkflow("project-1");
-    expect(gatewaySpy.mock.calls[0][0].stage).toBe(PipelineStages.TASK_DECOMPOSITION);
+    await new KanbanService().generateBoardFromWorkflow("project-1", "actor-1");
+    expect(gatewaySpy.mock.calls[0][0].stage).toBe(PipelineStages.IMPLEMENTATION_PLANNING);
     expect(gatewaySpy.mock.calls[0][0].schema.validate({ stages: [{ title: "x", order: 0, tasks: [{ title: "x", description: "x", acceptanceCriteria: ["x"], targetFiles: ["../outside.ts"] }] }] }).valid).toBe(false);
     expect(gatewaySpy.mock.calls[0][0].schema.validate({ stages: [{ title: "x", order: 0, tasks: [{ title: "x", description: "x", acceptanceCriteria: ["x"], targetFiles: ["src/a.ts"], success: true }] }] }).valid).toBe(false);
   });
 
   test("Kanban provider failure cannot create a board", async () => {
     jest.spyOn(LLMGateway.getInstance(), "callStructured").mockRejectedValue(new Error("provider unavailable"));
-    await expect(new KanbanService().generateBoardFromWorkflow("project-1")).rejects.toThrow("provider unavailable");
+    await expect(new KanbanService().generateBoardFromWorkflow("project-1", "actor-1")).rejects.toThrow("provider unavailable");
   });
 
   test("all R2C requests use gateway stages and no direct provider fallback exists", () => {
-    expect([PipelineStages.SUMMARIZATION, PipelineStages.STATIC_REVIEW, PipelineStages.TASK_DECOMPOSITION]).toHaveLength(3);
+    expect([PipelineStages.SUMMARIZATION, PipelineStages.STATIC_REVIEW, PipelineStages.IMPLEMENTATION_PLANNING]).toHaveLength(3);
     expect(GitHubService.getPullRequestDiff).toBeDefined();
   });
 });

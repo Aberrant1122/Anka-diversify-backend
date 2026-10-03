@@ -81,8 +81,9 @@ describe("controlled implementation task lifecycle on disposable PostgreSQL", ()
       { key: "TASK-A", title: "Foundation", description: "Create foundation", acceptanceCriteria: ["Foundation passes"], targetFiles: ["src/a.ts"], architectureComponentIds: ["ARCH-COMP-API"], dependencyKeys: [] },
       { key: "TASK-B", title: "Consumer", description: "Use foundation", acceptanceCriteria: ["Consumer passes"], targetFiles: ["src/b.ts"], architectureComponentIds: ["ARCH-COMP-API"], dependencyKeys: ["TASK-A"] },
     ] }] };
-    jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue({ content: proposal, rawResponse: {}, finishReason: "stop", latencyMs: 1, model: "mock", stage: PipelineStages.TASK_DECOMPOSITION } as never);
+    const gateway = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue({ content: proposal, rawResponse: {}, finishReason: "stop", latencyMs: 1, model: "mock", stage: PipelineStages.IMPLEMENTATION_PLANNING } as never);
     const board = await new KanbanService().generateBoardFromWorkflow(projectId, fixture.ownerId);
+    expect(gateway).toHaveBeenCalledWith(expect.objectContaining({ stage: PipelineStages.IMPLEMENTATION_PLANNING }));
     const tasks = board.stages.flatMap((stage) => stage.tasks);
     expect(tasks).toHaveLength(2);
     expect(tasks.every((task) => task.implementationState === "draft" && task.architectureArtifactId === architecture.id && task.planningAuthorityFingerprint?.length === 64)).toBe(true);

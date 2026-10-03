@@ -26,10 +26,6 @@ export function assertArchitectureCapacity(
   if (route.maxInputTokens !== ARCHITECTURE_MAX_INPUT_TOKENS || route.maxOutputTokens < ARCHITECTURE_MAX_OUTPUT_TOKENS) {
     throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "Architecture model route capacity is invalid.", 413);
   }
-  const standardModel = router.route(PipelineStages.ARCHITECTURE_PLANNING).primaryModel;
-  if (!MODEL_CAPABILITIES[standardModel]) {
-    throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "An Architecture model has unknown or insufficient capacity.", 413);
-  }
   for (const model of [route.primaryModel, ...route.fallbackModels]) {
     const capability = MODEL_CAPABILITIES[model];
     if (!capability || capability.context < route.contextWindowTokens || capability.output < ARCHITECTURE_MAX_OUTPUT_TOKENS) {

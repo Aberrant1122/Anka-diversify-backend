@@ -8,6 +8,7 @@
     "build": "prisma generate && tsc && node scripts/copy-wasm.js",
     "test": "jest --config jest.config.json --forceExit",
     "copy:wasm": "node scripts/copy-wasm.js",
+    "prestart": "npm run build",
     "start": "node scripts/db-startup.js && node dist/index.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
