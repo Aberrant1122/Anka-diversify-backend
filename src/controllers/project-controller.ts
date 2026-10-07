@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
 import { generatePresignedUrl, generateDownloadUrl, deleteFromS3, detectType } from "../services/upload.service";
+import { isProjectStorageKey, isProjectUploadKey } from "../services/project-upload-key";
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
@@ -565,6 +566,9 @@ export class ProjectController {
       if (!name || !url) {
         return res.status(400).json({ success: false, error: "name and url required" });
       }
+      if (!isProjectUploadKey(param(req, "id"), s3Key, url)) {
+        return res.status(404).json({ success: false, error: "Upload not found" });
+      }
       const file = await projectService.createFile({
         projectId: param(req, "id"),
         name,
@@ -584,7 +588,7 @@ export class ProjectController {
 
   async deleteFile(req: Request, res: Response) {
     try {
-      const s3Key = await projectService.deleteFile(param(req, "fileId"));
+      const s3Key = await projectService.deleteFile(param(req, "id"), param(req, "fileId"));
       if (s3Key === undefined) {
         return res.status(404).json({ success: false, error: "File not found" });
       }
@@ -602,12 +606,15 @@ export class ProjectController {
   async getFileDownloadUrl(req: Request, res: Response) {
     try {
       const fileId = param(req, "fileId");
-      const file = await prisma.projectFile.findUnique({ where: { id: fileId } });
+      const file = await prisma.projectFile.findFirst({ where: { id: fileId, projectId: param(req, "id") } });
       if (!file) {
         return res.status(404).json({ success: false, error: "File not found" });
       }
       if (!file.s3Key) {
         return res.status(400).json({ success: false, error: "File has no S3 key" });
+      }
+      if (!isProjectStorageKey(param(req, "id"), file.s3Key)) {
+        return res.status(404).json({ success: false, error: "File not found" });
       }
       const downloadUrl = await generateDownloadUrl(file.s3Key, 3600);
       res.json({ success: true, data: { downloadUrl, filename: file.name, url: downloadUrl } });

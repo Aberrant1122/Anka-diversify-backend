@@ -7,6 +7,7 @@ import { MemoryPersistence } from "../memory/MemoryPersistence";
 import { LLMGateway, LLMToolValidationResult } from "../gateway/LLMGateway";
 import { LLMProviderError } from "../gateway/LLMError";
 import { PipelineStages } from "../gateway/PipelineStage";
+import { PlanningAuthorizationService } from "../../services/planning-authorization.service";
 
 const prisma = new PrismaClient();
 
@@ -37,6 +38,14 @@ function isIsoDate(value: unknown): value is string {
 }
 
 export class ProjectChatService {
+  private readonly prisma: PrismaClient;
+  private readonly authorization: PlanningAuthorizationService;
+
+  constructor(prismaClient?: PrismaClient, authorization?: PlanningAuthorizationService) {
+    this.prisma = prismaClient ?? prisma;
+    this.authorization = authorization ?? new PlanningAuthorizationService(this.prisma);
+  }
+
   private get agentTools(): OpenAI.Chat.Completions.ChatCompletionTool[] {
     return [
       {
@@ -187,34 +196,39 @@ export class ProjectChatService {
             actions.push({ type: "project_proposed", data: { ...args } });
             toolResult = JSON.stringify({ status: "proposed", message: "Project proposal requires user confirmation before creation." });
           } else if (call.name === "list_projects") {
-            const projects = await prisma.project.findMany({
-              where: { userId },
-              select: { id: true, name: true, description: true, phase: true },
-              orderBy: { createdAt: "desc" },
-              take: 20,
-            });
+            const projects = await this.authorization.listVisibleProjects(userId, { take: 20 });
             toolResult = JSON.stringify(projects);
           } else if (call.name === "propose_document") {
-            let projectId = args.projectId;
-            let projectName = args.projectName;
-            if (!projectId && projectName) {
-              const found = await prisma.project.findFirst({
-                where: { name: { contains: projectName, mode: "insensitive" } },
-                select: { id: true, name: true },
-              });
-              if (found) { projectId = found.id; projectName = found.name; }
-            } else if (projectId && !projectName) {
-              const found = await prisma.project.findUnique({ where: { id: projectId }, select: { name: true } });
-              if (found) projectName = found.name;
-            }
-            if (!projectId) {
-              toolResult = JSON.stringify({ error: "Project not found. Call list_projects to get the correct project ID." });
-            } else {
+            const resolution = await this.authorization.resolveProjectForActor(userId, {
+              projectId: args.projectId,
+              projectName: args.projectName,
+            });
+
+            if (resolution.status === "RESOLVED") {
               actions.push({
                 type: "document_proposed",
-                data: { title: args.title, content: args.content, type: args.type, projectId, projectName: projectName ?? "Unknown project" },
+                data: {
+                  title: args.title,
+                  content: args.content,
+                  type: args.type,
+                  projectId: resolution.project.id,
+                  projectName: resolution.project.name,
+                },
               });
-              toolResult = JSON.stringify({ status: "proposed", message: "Document proposed to the user for review." });
+              toolResult = JSON.stringify({
+                status: "proposed",
+                message: "Document proposed to the user for review.",
+              });
+            } else if (resolution.status === "AMBIGUOUS") {
+              const nameLabel = args.projectName ? `"${args.projectName}"` : "the specified name";
+              toolResult = JSON.stringify({
+                error: `Multiple projects match ${nameLabel}. Please specify the project ID.`,
+                candidates: resolution.candidates,
+              });
+            } else {
+              toolResult = JSON.stringify({
+                error: "Project not found or is not accessible. Call list_projects to get the correct project ID.",
+              });
             }
           }
         } catch (err) {
@@ -366,11 +380,11 @@ export class ProjectChatService {
   ): Promise<{ taskId: string; title: string; reason: string; priority: string }[]> {
     const suggestionLimit = Number.isInteger(capacity) ? Math.min(50, Math.max(1, capacity)) : 10;
     const [sprint, allTasks] = await Promise.all([
-      prisma.sprint.findUnique({
+      this.prisma.sprint.findUnique({
         where: { id: sprintId },
         include: { tasks: { select: { taskId: true } } },
       }),
-      prisma.projectTask.findMany({
+      this.prisma.projectTask.findMany({
         where: { projectId, status: { in: ["todo", "in_progress"] } },
       }),
     ]);
@@ -433,8 +447,8 @@ export class ProjectChatService {
     suggestedTasks: { taskId: string; title: string; reason: string; priority: string }[];
   }> {
     const [project, allTasks] = await Promise.all([
-      prisma.project.findUnique({ where: { id: projectId } }),
-      prisma.projectTask.findMany({
+      this.prisma.project.findUnique({ where: { id: projectId } }),
+      this.prisma.projectTask.findMany({
         where: { projectId, status: { in: ["todo", "in_progress"] } },
       }),
     ]);

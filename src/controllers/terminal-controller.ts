@@ -147,6 +147,11 @@ export class TerminalController {
         return;
       }
 
+      if (!this.sessionManager.getSession(sessionId, projectId)) {
+        res.status(404).json({ success: false, error: "Terminal session not found or belongs to another project" });
+        return;
+      }
+
       const interrupted = this.sessionManager.interruptSession(sessionId, projectId);
 
       res.json({
@@ -165,6 +170,11 @@ export class TerminalController {
 
       if (!projectId || !sessionId) {
         res.status(400).json({ success: false, error: "projectId and sessionId are required" });
+        return;
+      }
+
+      if (!this.sessionManager.getSession(sessionId, projectId)) {
+        res.status(404).json({ success: false, error: "Terminal session not found or belongs to another project" });
         return;
       }
 

@@ -3,6 +3,7 @@ import { AiController } from "../../controllers/ai-controller";
 import { MultiRepoAuthorityConflictError, MultiRepoAuthorityConflictResult, MultiRepoCoordinator } from "../coordination/MultiRepoCoordinator";
 import { PlanningDomainError } from "../../planning/planning-errors";
 import { currentImplementationAuthority } from "../../planning/implementation-authority-preflight";
+import { GitWorktreeService } from "../../services/git-worktree.service";
 
 jest.mock("../../planning/implementation-authority-preflight", () => ({
   currentImplementationAuthority: jest.fn().mockResolvedValue({ fingerprint: "fixture" }),
@@ -77,5 +78,27 @@ describe("multi-repository authority conflict response", () => {
     expect(res.status).toHaveBeenCalledWith(404);
     expect(res.json).toHaveBeenCalledWith({ error: "PLANNING_PROJECT_NOT_FOUND",
       message: "Project was not found or is not accessible." });
+  });
+
+  test("agent push rejects a foreign project approval before Git shipping", async () => {
+    const approvalId = "foreign-project-approval";
+    const pending = (GitWorktreeService as any).pendingShippingApprovals as Map<string, unknown>;
+    pending.set(approvalId, {
+      userId: "actor", projectId: "project-b", repositoryId: "repo-b", state: "AVAILABLE",
+      approval: { approvalId, expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    });
+    const ship = jest.spyOn(GitWorktreeService, "shipApprovedRun");
+    try {
+      const req = request(false);
+      req.params.projectId = "project-a";
+      req.body = { approvalId, commitMessage: "Do not ship", changes: [{ path: "src/a.ts", content: "safe" }] };
+      const res = response();
+      await new AiController().pushAgentChanges(req, res as unknown as Response);
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(res.json).toHaveBeenCalledWith({ error: "GIT_APPROVAL_NOT_FOUND", message: "Approval was not found in this project." });
+      expect(ship).not.toHaveBeenCalled();
+    } finally {
+      pending.delete(approvalId);
+    }
   });
 });

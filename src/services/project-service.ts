@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { checkSprintAutoCloseForTask } from "./rule-engine";
 import { ProjectRepositoryService } from "./project-repository-service";
+import { isProjectStorageKey } from "./project-upload-key";
 
 const prisma = new PrismaClient();
 const repoService = new ProjectRepositoryService();
@@ -447,10 +448,12 @@ export class ProjectService {
     });
   }
 
-  async deleteFile(fileId: string) {
-    const file = await prisma.projectFile.findUnique({ where: { id: fileId } });
-    if (!file) return null;
-    await prisma.projectFile.delete({ where: { id: fileId } });
+  async deleteFile(projectId: string, fileId: string) {
+    const file = await prisma.projectFile.findFirst({ where: { id: fileId, projectId } });
+    if (!file) return undefined;
+    if (file.s3Key && !isProjectStorageKey(projectId, file.s3Key)) return undefined;
+    const deleted = await prisma.projectFile.deleteMany({ where: { id: fileId, projectId } });
+    if (deleted.count === 0) return undefined;
     return file.s3Key || null; // return key so controller can delete from S3
   }
 

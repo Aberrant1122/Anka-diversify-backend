@@ -12,8 +12,10 @@ import { GitWorkflowError } from "../services/git-workflow.service";
 import { ProjectSidebarService } from "../services/project-sidebar.service";
 import { currentImplementationAuthority } from "../planning/implementation-authority-preflight";
 import { isPlanningDomainError } from "../planning/planning-errors";
+import { PlanningAuthorizationService } from "../services/planning-authorization.service";
 
 const prisma = new PrismaClient();
+const planningAuth = new PlanningAuthorizationService(prisma);
 
 const aiService = AiService.getInstance();
 
@@ -519,6 +521,8 @@ export class AiController {
 
       res.json({ success: true, data: result });
     } catch (error) {
+      if (error instanceof Error && error.message.startsWith("[UNAUTHORIZED_REPOSITORY]"))
+        return res.status(404).json({ error: "REPOSITORY_NOT_FOUND", message: "Repository was not found in this project." });
       console.error("Multi-repo agent error:", error);
       if (error instanceof MultiRepoAuthorityConflictError) {
         const payload = { error: error.code, message: error.message, partialResult: error.partialResult };
@@ -571,7 +575,9 @@ export class AiController {
         changes.push({ path: change.path, content: change.content });
       }
 
-      const repositoryId = GitWorktreeService.getApprovalRepositoryId(approvalId, userId, projectId);
+      const approval = GitWorktreeService.inspectShippingApproval(approvalId, userId, projectId);
+      if (!approval) return res.status(404).json({ error: "GIT_APPROVAL_NOT_FOUND", message: "Approval was not found in this project." });
+      const repositoryId = approval.repositoryId;
       const project = await prisma.project.findFirst({
         where: { id: projectId, userId },
         select: { id: true, name: true, githubUrl: true, githubToken: true },
@@ -775,15 +781,37 @@ export class AiController {
 
   async approveManifest(req: Request, res: Response) {
     try {
+      const userId = req.user?.userId as string | undefined;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
       const { id } = req.params;
+      const manifest = await prisma.agentManifest.findUnique({
+        where: { id: String(id) },
+        select: { id: true, projectId: true },
+      });
+      if (!manifest) {
+        return res.status(404).json({ error: "Manifest not found" });
+      }
+      try {
+        await planningAuth.assertCanEdit(manifest.projectId, userId);
+      } catch (error) {
+        if (isPlanningDomainError(error)) {
+          return res.status(404).json({ error: "Manifest not found" });
+        }
+        throw error;
+      }
       // Compatibility endpoint: approval is human planning-workflow metadata.
       // It is never consumed as mutation, validation, checkpoint, or completion authority.
       const updated = await prisma.agentManifest.update({
-        where: { id: String(id) },
+        where: { id: manifest.id },
         data: { validationStatus: "approved", approvedAt: new Date() },
       });
       res.json({ success: true, role: "PLANNING_WORKFLOW_ONLY", data: updated });
     } catch (error) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ error: error.code, message: error.message });
+      }
       console.error("Approve manifest error:", error);
       res.status(500).json({ error: "Failed to approve manifest", message: error instanceof Error ? error.message : "Unknown error" });
     }
@@ -791,13 +819,35 @@ export class AiController {
 
   async rejectManifest(req: Request, res: Response) {
     try {
+      const userId = req.user?.userId as string | undefined;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
       const { id } = req.params;
-      const updated = await prisma.agentManifest.update({
+      const manifest = await prisma.agentManifest.findUnique({
         where: { id: String(id) },
+        select: { id: true, projectId: true },
+      });
+      if (!manifest) {
+        return res.status(404).json({ error: "Manifest not found" });
+      }
+      try {
+        await planningAuth.assertCanEdit(manifest.projectId, userId);
+      } catch (error) {
+        if (isPlanningDomainError(error)) {
+          return res.status(404).json({ error: "Manifest not found" });
+        }
+        throw error;
+      }
+      const updated = await prisma.agentManifest.update({
+        where: { id: manifest.id },
         data: { validationStatus: "rejected" },
       });
       res.json({ success: true, role: "PLANNING_WORKFLOW_ONLY", data: updated });
     } catch (error) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ error: error.code, message: error.message });
+      }
       console.error("Reject manifest error:", error);
       res.status(500).json({ error: "Failed to reject manifest", message: error instanceof Error ? error.message : "Unknown error" });
     }
@@ -805,14 +855,36 @@ export class AiController {
 
   async getDecomposition(req: Request, res: Response) {
     try {
+      const userId = req.user?.userId as string | undefined;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
       const { sessionId } = req.params;
-      const decomposition = await prisma.taskDecomposition.findFirst({
+      const identity = await prisma.taskDecomposition.findFirst({
         where: { sessionId: String(sessionId) },
-        include: { subTasksExecs: true },
+        select: { id: true, projectId: true },
         orderBy: { createdAt: "desc" },
+      });
+      if (!identity) {
+        return res.json({ success: true, data: null });
+      }
+      try {
+        await planningAuth.assertCanRead(identity.projectId, userId);
+      } catch (error) {
+        if (isPlanningDomainError(error)) {
+          return res.json({ success: true, data: null });
+        }
+        throw error;
+      }
+      const decomposition = await prisma.taskDecomposition.findFirst({
+        where: { id: identity.id, projectId: identity.projectId },
+        include: { subTasksExecs: true },
       });
       res.json({ success: true, data: decomposition });
     } catch (error) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ error: error.code, message: error.message });
+      }
       console.error("Get decomposition error:", error);
       res.status(500).json({ error: "Failed to get decomposition graph", message: error instanceof Error ? error.message : "Unknown error" });
     }
