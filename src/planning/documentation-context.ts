@@ -41,6 +41,7 @@ import {
   parseDocumentationContent,
   renderDocumentationMarkdown,
 } from "./documentation-schema";
+import { AuthorityCurrentnessService } from "../services/authority-currentness.service";
 
 export type DocumentationRunOperation =
   | "INITIAL_GENERATION"
@@ -143,6 +144,8 @@ function sha256(value: string): string {
 }
 
 export class PlanningDocumentationContextBuilder {
+  private readonly currentnessService = new AuthorityCurrentnessService();
+
   async buildInTransaction(tx: Prisma.TransactionClient, input: {
     projectId: string;
     actorId: string;
@@ -192,6 +195,9 @@ export class PlanningDocumentationContextBuilder {
       select: { id: true },
     });
     if (!approval) throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "The approved Requirements record is invalid.", 422);
+
+    // Verify Requirements authority currentness against active Live Brief
+    await this.currentnessService.assertRequirementsCurrentForHandoff(tx, input.projectId, artifact);
 
     let memory: DocumentationMemoryContext | null = null;
     if (input.includeMemory && project.memorySummary) {
@@ -439,6 +445,9 @@ export class PlanningDocumentationContextBuilder {
         422,
       );
     }
+
+    // Verify Requirements authority currentness against active Live Brief
+    await this.currentnessService.assertRequirementsCurrentForHandoff(tx, input.projectId, reqArtifact);
 
     let memory: DocumentationMemoryContext | null = null;
     if (input.includeMemory && project.memorySummary) {

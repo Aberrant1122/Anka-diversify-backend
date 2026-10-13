@@ -12,6 +12,7 @@ import {
 import { PlanningApprovalService } from "../planning-approval.service";
 import { PlanningArtifactService } from "../planning-artifact.service";
 import { PlanningDocumentationArtifactService } from "../planning-documentation-artifact.service";
+import { seedConfirmedLiveBrief, seedRequirementsWorkflowRun } from "./test-brief-fixtures";
 
 const databaseUrl = process.env.DATABASE_URL;
 const isolatedSchema = databaseUrl ? new URL(databaseUrl).searchParams.get("schema") : null;
@@ -106,6 +107,7 @@ export class DocumentationLifecycleFixture {
     const id = `docs-project-${crypto.randomUUID()}`;
     await this.prisma.project.create({ data: { id, name: "Documentation lifecycle", userId: this.ownerId } });
     if (member) await this.prisma.projectMember.create({ data: { projectId: id, userId: this.memberId } });
+    await seedConfirmedLiveBrief(this.prisma, id, this.ownerId);
     this.projectIds.push(id);
     return id;
   }
@@ -118,6 +120,7 @@ export class DocumentationLifecycleFixture {
       title: "Requirements",
       structuredContent: content,
     });
+    await seedRequirementsWorkflowRun(this.prisma, projectId, artifact.id);
     await this.approvals.requestApproval({ projectId, phase: "requirements", artifactId: artifact.id, expectedHash: hashOf(artifact), actorId: this.ownerId });
     await this.approvals.approveArtifact({ projectId, phase: "requirements", artifactId: artifact.id, expectedHash: hashOf(artifact), actorId: this.ownerId });
     return { artifact, content };

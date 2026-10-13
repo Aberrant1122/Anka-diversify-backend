@@ -113,7 +113,7 @@ function optionalQueryString(req: Request, key: string): string | undefined {
   return value;
 }
 
-function initialGenerationBody(req: Request): { brief: string; includeMemory: boolean } {
+function initialGenerationBody(req: Request): { briefConfirmationId: string; includeMemory: boolean } {
   const body = req.body;
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new PlanningDomainError(
@@ -122,7 +122,7 @@ function initialGenerationBody(req: Request): { brief: string; includeMemory: bo
       422,
     );
   }
-  const allowed = new Set(["brief", "includeMemory"]);
+  const allowed = new Set(["briefConfirmationId", "includeMemory"]);
   const unknown = Object.keys(body).filter((key) => !allowed.has(key));
   if (unknown.length > 0) {
     throw new PlanningDomainError(
@@ -140,7 +140,7 @@ function initialGenerationBody(req: Request): { brief: string; includeMemory: bo
       { field: "includeMemory" },
     );
   }
-  return { brief: requiredBodyString(req, "brief"), includeMemory: body.includeMemory === true };
+  return { briefConfirmationId: requiredBodyString(req, "briefConfirmationId"), includeMemory: body.includeMemory === true };
 }
 
 function idempotencyKey(req: Request): string {
@@ -451,6 +451,7 @@ function requireUser(req: Request, res: Response): string | null {
 
 function respondError(res: Response, error: unknown, fallback: string): void {
   if (isPlanningDomainError(error)) {
+    console.error(`[PhaseController] PlanningDomainError [${error.code}] (${error.httpStatus}): ${error.message}`, error.details ?? "");
     res.status(error.httpStatus).json({
       error: error.code,
       message: error.message,
@@ -458,7 +459,7 @@ function respondError(res: Response, error: unknown, fallback: string): void {
     });
     return;
   }
-  console.error(fallback, error);
+  console.error(`[PhaseController] Unexpected error: ${fallback}`, error);
   res.status(500).json({
     error: "Internal server error",
     message: "The planning request could not be completed.",
@@ -480,14 +481,20 @@ export class PhaseController {
     try {
       const actorId = requireUser(req, res);
       if (!actorId) return;
+      const projectId = param(req, "projectId");
+      console.log(`[PhaseController] generateInitialArchitecture started for project=${projectId}, actor=${actorId}`);
       const body = documentationGenerationBody(req, "Architecture");
       const result = await phaseService.generateInitialArchitecture({
-        projectId: param(req, "projectId"), actorId,
+        projectId, actorId,
         idempotencyKey: idempotencyKey(req), includeMemory: body.includeMemory,
       });
+      console.log(`[PhaseController] generateInitialArchitecture completed for project=${projectId}, runId=${result.run?.id}, status=${result.httpStatus}`);
       const { httpStatus, ...data } = result;
       res.status(httpStatus).json({ success: true, data });
-    } catch (error) { respondError(res, error, "Failed to generate initial Architecture"); }
+    } catch (error) {
+      console.error(`[PhaseController] generateInitialArchitecture error for project=${req.params.projectId}:`, error);
+      respondError(res, error, "Failed to generate initial Architecture");
+    }
   }
 
   async getArchitectureRun(req: Request, res: Response) {
@@ -513,12 +520,18 @@ export class PhaseController {
     try {
       const actorId = requireUser(req, res);
       if (!actorId) return;
+      const projectId = param(req, "projectId");
+      console.log(`[PhaseController] reviseArchitectureAI started for project=${projectId}, actor=${actorId}`);
       const body = architectureRevisionBody(req);
-      const result = await phaseService.reviseArchitecture({ projectId: param(req, "projectId"), actorId,
+      const result = await phaseService.reviseArchitecture({ projectId, actorId,
         idempotencyKey: idempotencyKey(req), baseArtifactId: param(req, "artifactId"), ...body });
+      console.log(`[PhaseController] reviseArchitectureAI completed for project=${projectId}, runId=${result.run?.id}, status=${result.httpStatus}`);
       const { httpStatus, ...data } = result;
       res.status(httpStatus).json({ success: true, data });
-    } catch (error) { respondError(res, error, "Failed to revise Architecture with AI"); }
+    } catch (error) {
+      console.error(`[PhaseController] reviseArchitectureAI error for project=${req.params.projectId}:`, error);
+      respondError(res, error, "Failed to revise Architecture with AI");
+    }
   }
 
   async getArchitectureReadiness(req: Request, res: Response) {
@@ -723,7 +736,7 @@ export class PhaseController {
         projectId: param(req, "projectId"),
         actorId: userId,
         idempotencyKey: idempotencyKey(req),
-        brief: body.brief,
+        briefConfirmationId: body.briefConfirmationId,
         includeMemory: body.includeMemory,
       });
       const { httpStatus, ...data } = result;
@@ -952,6 +965,42 @@ export class PhaseController {
       res.status(201).json({ success: true, data: artifact });
     } catch (error) {
       respondError(res, error, "Failed to create artifact");
+    }
+  }
+
+  async getArtifactCurrentness(req: Request, res: Response) {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+      const data = await phaseService.getArtifactCurrentness(
+        param(req, "projectId"),
+        param(req, "artifactId"),
+        userId,
+      );
+      res.status(200).json({ success: true, data });
+    } catch (error) {
+      respondError(res, error, "Failed to get artifact currentness");
+    }
+  }
+
+  async getArtifactDiff(req: Request, res: Response) {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+      const compareArtifactId = typeof req.query.compareArtifactId === "string"
+        ? req.query.compareArtifactId
+        : typeof req.query.baseArtifactId === "string"
+          ? req.query.baseArtifactId
+          : "";
+      const data = await phaseService.compareArtifactVersions(
+        param(req, "projectId"),
+        param(req, "artifactId"),
+        compareArtifactId,
+        userId,
+      );
+      res.status(200).json({ success: true, data });
+    } catch (error) {
+      respondError(res, error, "Failed to compare artifact versions");
     }
   }
 }

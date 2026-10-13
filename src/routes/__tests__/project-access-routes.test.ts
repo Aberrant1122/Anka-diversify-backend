@@ -143,6 +143,35 @@ describe("project access at production router registrations", () => {
     await expect(policy.assertOwner(project.id, "member")).rejects.toMatchObject({ httpStatus: 403 });
   });
 
+  test("mutation routes apply the documented edit and owner role boundaries before handlers", async () => {
+    for (const [method, path] of [
+      ["POST", "/api/projects/project-b/files"],
+      ["POST", "/api/projects/project-b/files/presign"],
+      ["POST", "/api/projects/project-b/files/confirm"],
+      ["DELETE", "/api/projects/project-b/files/file-1"],
+      ["POST", "/api/projects/project-b/files/file-1/extraction/retry"],
+      ["POST", "/api/projects/project-b/chat"],
+    ] as const) {
+      expect((await call(method, path, actor("admin", "admin"))).status).toBe(404);
+      expect(mockDownstream).not.toHaveBeenCalled();
+    }
+
+    for (const [method, path] of [
+      ["POST", "/api/projects/project-b/members"],
+      ["DELETE", "/api/projects/project-b/members/member"],
+    ] as const) {
+      expect((await call(method, path, actor("member"))).status).toBe(403);
+      expect(mockDownstream).not.toHaveBeenCalled();
+    }
+
+    expect((await call("POST", "/api/projects/project-b/files", actor("member"))).body)
+      .toEqual({ handler: "createFile" });
+    expect((await call("POST", "/api/projects/project-b/chat", actor("member"))).body)
+      .toEqual({ handler: "sendChatMessage" });
+    expect((await call("POST", "/api/projects/project-b/members", actor("owner"))).body)
+      .toEqual({ handler: "addProjectMember" });
+  });
+
   test("outsider and missing project return the same non-disclosing response", async () => {
     const outsider = await call("GET", "/api/projects/project-b", actor("outsider"));
     const missing = await call("GET", "/api/projects/missing", actor("outsider"));

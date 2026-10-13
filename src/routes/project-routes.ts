@@ -6,8 +6,9 @@ import phaseRoutes from './phase-routes';
 import kanbanRoutes from './kanban-routes';
 import projectRepositoryRoutes from './project-repository-routes';
 import terminalRoutes from './terminal-routes';
+import liveBriefRoutes from './live-brief-routes';
 import { requireRole } from '../middleware/rbac';
-import { requireProjectAccess } from '../middleware/project-access';
+import { requireProjectAccess, requireProjectEdit, requireProjectOwner } from '../middleware/project-access';
 import { bodyResource, requireProjectResources, routeResource } from '../middleware/project-resource-binding';
 
 const router = Router();
@@ -59,20 +60,26 @@ router.delete('/:id/tasks/:taskId', requireProjectAccess('id'), bind(routeResour
 
 // Project files
 router.get('/:id/files', requireProjectAccess('id'), projectController.getProjectFiles.bind(projectController));
-router.post('/:id/files', requireProjectAccess('id'), projectController.createFile.bind(projectController));
-router.post('/:id/files/presign', requireProjectAccess('id'), projectController.presignUpload.bind(projectController));
-router.post('/:id/files/confirm', requireProjectAccess('id'), projectController.confirmUpload.bind(projectController));
-router.delete('/:id/files/:fileId', requireProjectAccess('id'), bind(routeResource('fileId', 'file')), projectController.deleteFile.bind(projectController));
+router.post('/:id/files', requireProjectEdit('id'), projectController.createFile.bind(projectController));
+router.post('/:id/files/presign', requireProjectEdit('id'), projectController.presignUpload.bind(projectController));
+router.post('/:id/files/confirm', requireProjectEdit('id'), projectController.confirmUpload.bind(projectController));
+router.delete('/:id/files/:fileId', requireProjectEdit('id'), bind(routeResource('fileId', 'file')), projectController.deleteFile.bind(projectController));
 router.get('/:id/files/:fileId/download', requireProjectAccess('id'), bind(routeResource('fileId', 'file')), projectController.getFileDownloadUrl.bind(projectController));
+router.get('/:id/files/:fileId/extraction', requireProjectAccess('id'), bind(routeResource('fileId', 'file')), projectController.getFileExtraction.bind(projectController));
+router.get('/:id/files/:fileId/evidence', requireProjectAccess('id'), bind(routeResource('fileId', 'file')), projectController.getFileEvidence.bind(projectController));
+router.post('/:id/files/:fileId/extraction/retry', requireProjectEdit('id'), bind(routeResource('fileId', 'file')), projectController.retryFileExtraction.bind(projectController));
 
 // Project members
 router.get('/:id/members', requireProjectAccess('id'), projectController.getProjectMembers.bind(projectController));
-router.post('/:id/members', requireProjectAccess('id'), projectController.addProjectMember.bind(projectController));
-router.delete('/:id/members/:userId', requireProjectAccess('id'), projectController.removeProjectMember.bind(projectController));
+router.post('/:id/members', requireProjectOwner('id'), projectController.addProjectMember.bind(projectController));
+router.delete('/:id/members/:userId', requireProjectOwner('id'), projectController.removeProjectMember.bind(projectController));
 
 // Project chat
 router.get('/:id/chat', requireProjectAccess('id'), projectController.getChatMessages.bind(projectController));
-router.post('/:id/chat', requireProjectAccess('id'), projectController.sendChatMessage.bind(projectController));
+router.post('/:id/chat', requireProjectEdit('id'), projectController.sendChatMessage.bind(projectController));
+
+// Evidence-linked intake and immutable Live Brief authority.
+router.use('/:projectId/brief', requireProjectAccess('projectId'), liveBriefRoutes);
 
 // Project activities
 router.get('/:id/activities', requireProjectAccess('id'), projectController.getActivities.bind(projectController));

@@ -7,6 +7,8 @@ import { RequirementsContent } from "../../planning/requirements-schema";
 import { PlanningApprovalService } from "../planning-approval.service";
 import { PlanningArtifactService } from "../planning-artifact.service";
 
+import { seedConfirmedLiveBrief, seedRequirementsWorkflowRun } from "./test-brief-fixtures";
+
 const databaseUrl = process.env.DATABASE_URL;
 const isolatedSchema = databaseUrl ? new URL(databaseUrl).searchParams.get("schema") : null;
 if (!isolatedSchema?.startsWith("planning_checkpoint_1b_")) {
@@ -70,23 +72,27 @@ function hashOf(artifact: PhaseArtifact): string {
 
 async function createProject(options?: { owner?: string; member?: boolean }): Promise<string> {
   const id = `checkpoint-1b-project-${crypto.randomUUID()}`;
+  const effectiveOwner = options?.owner ?? ownerId;
   await prisma.project.create({
-    data: { id, name: "Checkpoint 1B Requirements", userId: options?.owner ?? ownerId },
+    data: { id, name: "Checkpoint 1B Requirements", userId: effectiveOwner },
   });
   if (options?.member) {
     await prisma.projectMember.create({ data: { projectId: id, userId: memberId } });
   }
+  await seedConfirmedLiveBrief(prisma, id, effectiveOwner);
   projectIds.push(id);
   return id;
 }
 
 async function initial(projectId: string, label = "v1", actorId = ownerId): Promise<PhaseArtifact> {
-  return artifactService.createInitialArtifact({
+  const artifact = await artifactService.createInitialArtifact({
     projectId,
     actorId,
     title: `Requirements ${label}`,
     structuredContent: requirements(label),
   });
+  await seedRequirementsWorkflowRun(prisma, projectId, artifact.id);
+  return artifact;
 }
 
 async function revise(projectId: string, base: PhaseArtifact, label: string, actorId = ownerId): Promise<PhaseArtifact> {

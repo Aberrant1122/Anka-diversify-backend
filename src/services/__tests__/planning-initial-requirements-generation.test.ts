@@ -12,6 +12,7 @@ import { PipelineStages } from "../../ai/gateway/PipelineStage";
 import { PlanningDomainError } from "../../planning/planning-errors";
 import { REQUIREMENTS_INPUT_LIMITS } from "../../planning/requirements-run-config";
 import { RequirementsContent } from "../../planning/requirements-schema";
+import { hashCanonical } from "../../planning/requirements-context";
 import {
   CreateInitialRequirementsArtifactInput,
   PlanningArtifactService,
@@ -29,6 +30,7 @@ const prisma = new PrismaClient();
 const ownerId = `checkpoint-1c-c-owner-${crypto.randomUUID()}`;
 const memberId = `checkpoint-1c-c-member-${crypto.randomUUID()}`;
 const projectIds: string[] = [];
+const confirmationIds = new Map<string, string>();
 
 function requirements(label: string, unresolved = false): RequirementsContent {
   return {
@@ -189,8 +191,29 @@ async function createProject(member = false): Promise<string> {
   const id = `checkpoint-1c-c-project-${crypto.randomUUID()}`;
   await prisma.project.create({ data: { id, name: "Checkpoint 1C-C", description: "Initial AI Requirements", userId: ownerId } });
   if (member) await prisma.projectMember.create({ data: { projectId: id, userId: memberId } });
+  const title = "Checkpoint Requirements Brief";
+  const markdownContent = "# Confirmed brief\n\nGenerate the requested Requirements fixture.";
+  const contentHash = hashCanonical({ projectId: id, title, markdownContent, claims: [], evidenceManifest: [] });
+  const revision = await prisma.liveBriefRevision.create({ data: {
+    projectId: id, revisionNumber: 1, title, markdownContent, structuredClaims: [], evidenceManifest: [],
+    contentHash, changeSummary: "Test authority", createdById: ownerId, createdByType: "USER",
+  } });
+  const confirmation = await prisma.liveBriefConfirmation.create({ data: {
+    projectId: id, briefRevisionId: revision.id, briefRevisionNumber: 1,
+    briefContentHash: contentHash, confirmedById: ownerId,
+  } });
+  await prisma.projectIntakeState.create({ data: {
+    projectId: id, status: "CONFIRMED", currentBriefRevisionId: revision.id, currentConfirmationId: confirmation.id,
+  } });
+  confirmationIds.set(id, confirmation.id);
   projectIds.push(id);
   return id;
+}
+
+function authority(projectId: string): string {
+  const confirmationId = confirmationIds.get(projectId);
+  if (!confirmationId) throw new Error(`Missing confirmed Live Brief fixture for ${projectId}`);
+  return confirmationId;
 }
 
 function service(
@@ -244,7 +267,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "success",
-      brief: "Build the initial product requirements.",
+      briefConfirmationId: authority(projectId),
     });
 
     expect(result).toMatchObject({ reused: false, httpStatus: 201, readiness: { ready: false } });
@@ -293,7 +316,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       }],
     });
     const generation = service(gateway);
-    const input = { projectId, actorId: ownerId, idempotencyKey: "replay", brief: "Replay exactly." };
+    const input = { projectId, actorId: ownerId, idempotencyKey: "replay", briefConfirmationId: authority(projectId) };
     const first = await generation.generateInitialRequirements(input);
     const replay = await generation.generateInitialRequirements(input);
     expect(replay).toMatchObject({ reused: true, httpStatus: 200, artifact: { id: first.artifact?.id } });
@@ -314,7 +337,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "missing-usage",
-      brief: "Do not fabricate usage.",
+      briefConfirmationId: authority(projectId),
     });
     expect(result.run.costUSD).toBeNull();
     expect(result.run.modelUsage).toMatchObject({
@@ -362,7 +385,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "repair-audit",
-      brief: "Repair invalid structured output once.",
+      briefConfirmationId: authority(projectId),
     });
     const usage = result.run.modelUsage as Record<string, unknown>;
     expect(usage).toMatchObject({
@@ -425,7 +448,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "partial-audit",
-      brief: "Do not fabricate missing usage.",
+      briefConfirmationId: authority(projectId),
     });
     expect(result.run.modelUsage).toMatchObject({
       usageSource: "partial_provider",
@@ -473,7 +496,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "transport-retry-audit",
-      brief: "Retain transport retry audit.",
+      briefConfirmationId: authority(projectId),
     });
     expect(result.run.modelUsage).toMatchObject({
       attemptCount: 2,
@@ -502,7 +525,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "unknown-price",
-      brief: "Use the configured model.",
+      briefConfirmationId: authority(projectId),
     });
     expect(result.run.modelUsage).toMatchObject({ model: "future-model", usageSource: "provider" });
     expect(result.run.costUSD).toBeNull();
@@ -518,7 +541,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
         projectId,
         actorId: ownerId,
         idempotencyKey: "transaction-a-failure",
-        brief: "Valid request whose run start fails.",
+        briefConfirmationId: authority(projectId),
       })).rejects.toMatchObject({
         code: "PLANNING_PERSISTENCE_FAILED",
         httpStatus: 503,
@@ -564,7 +587,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "failed-structured-repair-audit",
-      brief: "Generate Requirements whose provider fixtures remain invalid.",
+      briefConfirmationId: authority(projectId),
     })).rejects.toMatchObject({ code: "PLANNING_AI_INVALID_RESPONSE" });
 
     expect(create).toHaveBeenCalledTimes(2);
@@ -645,7 +668,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "failed-partial-audit",
-      brief: "Preserve only authoritative failed-attempt usage.",
+      briefConfirmationId: authority(projectId),
     })).rejects.toMatchObject({ code: "PLANNING_AI_INVALID_RESPONSE" });
 
     const run = await prisma.workflowRun.findFirstOrThrow({ where: { projectId } });
@@ -699,7 +722,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "failed-unknown-model",
-      brief: "Do not use fallback pricing.",
+      briefConfirmationId: authority(projectId),
     })).rejects.toMatchObject({ code: "PLANNING_AI_INVALID_RESPONSE" });
 
     const run = await prisma.workflowRun.findFirstOrThrow({ where: { projectId } });
@@ -713,7 +736,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       failure: new LLMTimeoutError("timed out"),
     });
     const generation = service(gateway);
-    const input = { projectId, actorId: ownerId, idempotencyKey: "timeout", brief: "Provider timeout." };
+    const input = { projectId, actorId: ownerId, idempotencyKey: "timeout", briefConfirmationId: authority(projectId) };
     await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({ code: "PLANNING_AI_TIMEOUT" });
     await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
       code: "PLANNING_AI_TIMEOUT",
@@ -738,7 +761,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       actorId: ownerId,
       operation: "INITIAL_GENERATION" as const,
       idempotencyKey: "stale-v1-replay",
-      brief: "Abandoned v1 prompt run",
+      briefConfirmationId: authority(projectId),
     };
     const abandoned = await runs.startRequirementsRun(original);
     const manifest = structuredClone(abandoned.run.contextManifest) as Prisma.JsonObject;
@@ -750,14 +773,14 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
     const recovery = await runs.startRequirementsRun({
       ...original,
       idempotencyKey: "stale-recovery-trigger",
-      brief: "Recover the expired lease",
+      briefConfirmationId: original.briefConfirmationId,
     });
     const gateway = new FakeRequirementsGateway(requirements("must not run"));
     await expect(service(gateway).generateInitialRequirements({
       projectId,
       actorId: ownerId,
       idempotencyKey: original.idempotencyKey,
-      brief: original.brief,
+      briefConfirmationId: original.briefConfirmationId,
     })).rejects.toMatchObject({
       code: "PLANNING_STALE_RUN_RECOVERED",
       httpStatus: 409,
@@ -778,7 +801,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       actorId: ownerId,
       operation: "INITIAL_GENERATION" as const,
       idempotencyKey: "corrupt-replay",
-      brief: "Corrupt terminal state",
+      briefConfirmationId: authority(projectId),
     };
     const started = await runs.startRequirementsRun(input);
     await prisma.$transaction([
@@ -803,7 +826,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
         projectId,
         actorId: ownerId,
         idempotencyKey: input.idempotencyKey,
-        brief: input.brief,
+        briefConfirmationId: input.briefConfirmationId,
       })).rejects.toMatchObject({
         code: "PLANNING_RUN_INVARIANT",
         httpStatus: 500,
@@ -829,7 +852,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "concurrent-finalization",
-      brief: "Exercise terminal classification",
+      briefConfirmationId: authority(projectId),
     };
     await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
       code: "PLANNING_CONCURRENT_UPDATE",
@@ -867,7 +890,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "manual-race",
-      brief: "AI starts first.",
+      briefConfirmationId: authority(projectId),
     })).rejects.toMatchObject({ code: "PLANNING_CONTEXT_CHANGED" });
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(1);
     const manual = await prisma.phaseArtifact.findFirstOrThrow({ where: { projectId } });
@@ -895,7 +918,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: memberId,
       idempotencyKey: "permission-race",
-      brief: "Member begins generation.",
+      briefConfirmationId: authority(projectId),
     };
     await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({ code: "PLANNING_PROJECT_NOT_FOUND" });
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(0);
@@ -926,7 +949,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "oversized-output",
-      brief: "Generate bounded output.",
+      briefConfirmationId: authority(projectId),
     })).rejects.toMatchObject({ code: "PLANNING_AI_OUTPUT_TOO_LARGE" });
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(0);
     await expect(prisma.projectPhaseState.findUniqueOrThrow({
@@ -959,7 +982,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "repaired-oversized-output",
-      brief: "Repair once, then enforce the canonical output limit.",
+      briefConfirmationId: authority(projectId),
     };
 
     await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({
@@ -1004,7 +1027,7 @@ describeIsolated("Checkpoint 1C-C initial Requirements generation", () => {
       projectId,
       actorId: ownerId,
       idempotencyKey: "rollback",
-      brief: "Force Transaction B rollback.",
+      briefConfirmationId: authority(projectId),
     };
     await expect(generation.generateInitialRequirements(input)).rejects.toMatchObject({ code: "PLANNING_PERSISTENCE_FAILED" });
     expect(await prisma.phaseArtifact.count({ where: { projectId } })).toBe(0);

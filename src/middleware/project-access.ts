@@ -5,7 +5,9 @@ import { prisma } from "../services/database";
 
 const authorization = new PlanningAuthorizationService(prisma);
 
-export function requireProjectAccess(projectParamName: string) {
+type ProjectPermission = "read" | "edit" | "owner";
+
+function requireProjectPermission(projectParamName: string, permission: ProjectPermission) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const userId = req.user?.userId;
     if (typeof userId !== "string" || !userId) {
@@ -19,7 +21,13 @@ export function requireProjectAccess(projectParamName: string) {
     }
 
     try {
-      await authorization.assertCanRead(projectId, userId);
+      if (permission === "owner") {
+        await authorization.assertOwner(projectId, userId);
+      } else if (permission === "edit") {
+        await authorization.assertCanEdit(projectId, userId);
+      } else {
+        await authorization.assertCanRead(projectId, userId);
+      }
       next();
     } catch (error) {
       if (isPlanningDomainError(error)) {
@@ -28,4 +36,16 @@ export function requireProjectAccess(projectParamName: string) {
       next(error);
     }
   };
+}
+
+export function requireProjectAccess(projectParamName: string) {
+  return requireProjectPermission(projectParamName, "read");
+}
+
+export function requireProjectEdit(projectParamName: string) {
+  return requireProjectPermission(projectParamName, "edit");
+}
+
+export function requireProjectOwner(projectParamName: string) {
+  return requireProjectPermission(projectParamName, "owner");
 }

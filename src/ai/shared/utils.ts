@@ -8,6 +8,7 @@ export function getOpenAI(): OpenAI {
   if (!openaiInstance) {
     openaiInstance = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
+      timeout: 360_000,
     });
   }
   return openaiInstance;

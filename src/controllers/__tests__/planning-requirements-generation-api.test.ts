@@ -73,7 +73,7 @@ describe("Requirements initial-generation HTTP endpoint", () => {
   }
 
   test("requires JWT authentication", async () => {
-    const response = await post({ brief: "Valid brief" }, {
+    const response = await post({ briefConfirmationId: "confirmation-1" }, {
       authenticated: false,
       idempotencyKey: "jwt-required",
     });
@@ -82,12 +82,13 @@ describe("Requirements initial-generation HTTP endpoint", () => {
   });
 
   test.each([
-    ["missing Idempotency-Key", { brief: "Valid brief" }, undefined],
-    ["blank brief", { brief: "   " }, "blank"],
-    ["unknown body key", { brief: "Valid brief", arbitraryContext: "no" }, "unknown"],
-    ["title", { brief: "Valid brief", title: "Not accepted" }, "title"],
-    ["includeDecisionIds", { brief: "Valid brief", includeDecisionIds: ["decision-1"] }, "decisions"],
-    ["non-boolean includeMemory", { brief: "Valid brief", includeMemory: "yes" }, "memory-type"],
+    ["missing Idempotency-Key", { briefConfirmationId: "confirmation-1" }, undefined],
+    ["blank confirmation", { briefConfirmationId: "   " }, "blank"],
+    ["legacy free-text bypass", { brief: "Valid brief" }, "legacy-brief"],
+    ["unknown body key", { briefConfirmationId: "confirmation-1", arbitraryContext: "no" }, "unknown"],
+    ["title", { briefConfirmationId: "confirmation-1", title: "Not accepted" }, "title"],
+    ["includeDecisionIds", { briefConfirmationId: "confirmation-1", includeDecisionIds: ["decision-1"] }, "decisions"],
+    ["non-boolean includeMemory", { briefConfirmationId: "confirmation-1", includeMemory: "yes" }, "memory-type"],
   ])("rejects %s before invoking the service", async (_label, body, key) => {
     const response = await post(body, { idempotencyKey: key });
     expect(response.status).toBe(422);
@@ -101,7 +102,7 @@ describe("Requirements initial-generation HTTP endpoint", () => {
     [202, true],
   ] as const)("returns %s for the corresponding generation/replay result", async (status, reused) => {
     generationSpy.mockResolvedValueOnce(result(status));
-    const response = await post({ brief: "Valid brief" }, { idempotencyKey: `status-${status}` });
+    const response = await post({ briefConfirmationId: "confirmation-1" }, { idempotencyKey: `status-${status}` });
     expect(response.status).toBe(status);
     expect(response.json).toMatchObject({ success: true, data: { reused } });
   });
@@ -112,7 +113,7 @@ describe("Requirements initial-generation HTTP endpoint", () => {
       "A Requirements generation is already in progress.",
       409,
     ));
-    const response = await post({ brief: "Valid brief" }, { idempotencyKey: "known-error" });
+    const response = await post({ briefConfirmationId: "confirmation-1" }, { idempotencyKey: "known-error" });
     expect(response.status).toBe(409);
     expect(response.json).toEqual({
       error: "PLANNING_GENERATION_IN_PROGRESS",
@@ -122,7 +123,7 @@ describe("Requirements initial-generation HTTP endpoint", () => {
 
   test("does not expose unexpected persistence exception text", async () => {
     generationSpy.mockRejectedValueOnce(new Error("sensitive SQL schema host and filesystem path"));
-    const response = await post({ brief: "Valid brief" }, { idempotencyKey: "unexpected-error" });
+    const response = await post({ briefConfirmationId: "confirmation-1" }, { idempotencyKey: "unexpected-error" });
     expect(response.status).toBe(500);
     expect(response.json).toEqual({
       error: "Internal server error",
@@ -133,12 +134,13 @@ describe("Requirements initial-generation HTTP endpoint", () => {
 
   test("matches the explicit generation route before the generic phase route", async () => {
     generationSpy.mockResolvedValueOnce(result(201));
-    const response = await post({ brief: "Valid brief" }, { idempotencyKey: "route-precedence" });
+    const response = await post({ briefConfirmationId: "confirmation-1" }, { idempotencyKey: "route-precedence" });
     expect(response.status).toBe(201);
     expect(generationSpy).toHaveBeenCalledWith(expect.objectContaining({
       projectId: "project-1",
       actorId: "member-1",
       idempotencyKey: "route-precedence",
+      briefConfirmationId: "confirmation-1",
     }));
     expect(legacyRunSpy).not.toHaveBeenCalled();
   });

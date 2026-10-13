@@ -5,6 +5,8 @@ import { generatePresignedUrl, generateDownloadUrl, deleteFromS3, detectType } f
 import { isProjectStorageKey, isProjectUploadKey } from "../services/project-upload-key";
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
+import { DocumentExtractionService } from "../services/document-extraction.service";
+import { isPlanningDomainError } from "../planning/planning-errors";
 import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
 const prisma = new PrismaClient();
 
@@ -391,9 +393,12 @@ export class ProjectController {
     try {
       const { userId } = req.body;
       if (!userId) return res.status(400).json({ success: false, error: "userId required" });
-      const member = await projectService.addProjectMember(param(req, "id"), userId);
+      const member = await projectService.addProjectMember(param(req, "id"), userId, getUserId(req));
       res.status(201).json({ success: true, data: member });
     } catch (error: any) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ success: false, error: error.code, message: error.message });
+      }
       if (error?.code === "P2002") {
         return res.status(409).json({ success: false, error: "User is already a member" });
       }
@@ -404,10 +409,17 @@ export class ProjectController {
 
   async removeProjectMember(req: Request, res: Response) {
     try {
-      const removed = await projectService.removeProjectMember(param(req, "id"), param(req, "userId"));
+      const removed = await projectService.removeProjectMember(
+        param(req, "id"),
+        param(req, "userId"),
+        getUserId(req),
+      );
       if (!removed) return res.status(404).json({ success: false, error: "Member not found" });
       res.json({ success: true, message: "Member removed" });
     } catch (error) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ success: false, error: error.code, message: error.message });
+      }
       console.error("Error removing member:", error);
       res.status(500).json({ success: false, error: "Failed to remove member" });
     }
@@ -437,6 +449,9 @@ export class ProjectController {
       });
       res.status(201).json({ success: true, data: message });
     } catch (error) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ success: false, error: error.code, message: error.message });
+      }
       console.error("Error sending chat message:", error);
       res.status(500).json({ success: false, error: "Failed to send message" });
     }
@@ -534,10 +549,12 @@ export class ProjectController {
         phase: req.body.phase,
         url: req.body.url,
         size: req.body.size,
-        uploadedBy: req.body.uploadedBy,
-      });
+      }, getUserId(req));
       res.status(201).json({ success: true, data: file });
     } catch (error) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ success: false, error: error.code, message: error.message });
+      }
       console.error("Error creating file:", error);
       res.status(500).json({ success: false, error: "Failed to create file" });
     }
@@ -576,11 +593,17 @@ export class ProjectController {
         phase,
         url,
         s3Key,
+        confirmedUploadKey: s3Key,
         size,
-        uploadedBy: getUserId(req),
-      });
+      }, getUserId(req));
+      if (DocumentExtractionService.isEligible(file.name, file.type)) {
+        await DocumentExtractionService.registerAndTriggerExtraction(file);
+      }
       res.status(201).json({ success: true, data: file });
     } catch (error) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ success: false, error: error.code, message: error.message });
+      }
       console.error("Error confirming upload:", error);
       res.status(500).json({ success: false, error: "Failed to save file" });
     }
@@ -588,15 +611,28 @@ export class ProjectController {
 
   async deleteFile(req: Request, res: Response) {
     try {
-      const s3Key = await projectService.deleteFile(param(req, "id"), param(req, "fileId"));
+      const snapshot = await prisma.documentSource.findFirst({
+        where: { projectFileId: param(req, "fileId"), projectId: param(req, "id") }, select: { s3Key: true },
+      });
+      const s3Key = await projectService.deleteFile(
+        param(req, "id"),
+        param(req, "fileId"),
+        getUserId(req),
+      );
       if (s3Key === undefined) {
         return res.status(404).json({ success: false, error: "File not found" });
       }
       if (s3Key) {
         deleteFromS3(s3Key).catch((err) => console.error("S3 delete failed:", err));
       }
+      if (snapshot?.s3Key && snapshot.s3Key !== s3Key) {
+        deleteFromS3(snapshot.s3Key).catch((err) => console.error("Evidence snapshot delete failed:", err));
+      }
       res.json({ success: true, message: "File deleted successfully" });
     } catch (error) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ success: false, error: error.code, message: error.message });
+      }
       console.error("Error deleting file:", error);
       res.status(500).json({ success: false, error: "Failed to delete file" });
     }
@@ -621,6 +657,71 @@ export class ProjectController {
     } catch (error) {
       console.error("Error generating download URL:", error);
       res.status(500).json({ success: false, error: "Failed to generate download URL" });
+    }
+  }
+
+  // ── Document Evidence Extraction Endpoints (CP1.1) ──────────────────────────
+
+  async getFileExtraction(req: Request, res: Response) {
+    try {
+      const projectId = param(req, "id");
+      const fileId = param(req, "fileId");
+      const summary = await DocumentExtractionService.getExtractionSummary(projectId, fileId);
+      res.json({ success: true, data: summary });
+    } catch (error: any) {
+      if (error.message === "File not found") {
+        return res.status(404).json({ success: false, error: "File not found" });
+      }
+      console.error("Error getting file extraction:", error);
+      res.status(500).json({ success: false, error: "Failed to get extraction metadata" });
+    }
+  }
+
+  async getFileEvidence(req: Request, res: Response) {
+    try {
+      const projectId = param(req, "id");
+      const fileId = param(req, "fileId");
+      const parsePositive = (value: unknown, fallback: number, max: number): number | null => {
+        if (value === undefined) return fallback;
+        if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return null;
+        const number = Number(value);
+        return Number.isSafeInteger(number) && number <= max ? number : null;
+      };
+      const page = parsePositive(req.query.page, 1, 1_000_000);
+      const limit = parsePositive(req.query.limit, 50, 100);
+      // This endpoint is page-based; a cursor is not part of its contract.
+      if (page === null || limit === null || req.query.cursor !== undefined) {
+        return res.status(400).json({ success: false, error: "Invalid evidence pagination" });
+      }
+      const evidence = await DocumentExtractionService.getEvidenceSpans(projectId, fileId, page, limit);
+      res.json({ success: true, data: evidence });
+    } catch (error: any) {
+      if (error.message === "File not found") {
+        return res.status(404).json({ success: false, error: "File not found" });
+      }
+      console.error("Error getting file evidence:", error);
+      res.status(500).json({ success: false, error: "Failed to get evidence passages" });
+    }
+  }
+
+  async retryFileExtraction(req: Request, res: Response) {
+    try {
+      const projectId = param(req, "id");
+      const fileId = param(req, "fileId");
+      const summary = await DocumentExtractionService.retryExtraction(projectId, fileId, getUserId(req));
+      res.json({ success: true, data: summary });
+    } catch (error: any) {
+      if (isPlanningDomainError(error)) {
+        return res.status(error.httpStatus).json({ success: false, error: error.code, message: error.message });
+      }
+      if (error.message === "File not found") {
+        return res.status(404).json({ success: false, error: "File not found" });
+      }
+      if (error.statusCode === 400) {
+        return res.status(400).json({ success: false, error: error.message });
+      }
+      console.error("Error retrying file extraction:", error);
+      res.status(500).json({ success: false, error: "Failed to retry extraction" });
     }
   }
 
@@ -725,12 +826,12 @@ export class ProjectController {
         hasAccessKey: !!process.env.AWS_ACCESS_KEY_ID,
         hasSecretKey: !!process.env.AWS_SECRET_ACCESS_KEY,
         region: process.env.AWS_REGION || "not set",
-        bucket: process.env.AWS_S3_BUCKET_NAME || "not set",
+        bucket: process.env.AWS_S3_BUCKET || process.env.AWS_S3_BUCKET_NAME || "not set",
         accessKeyLength: process.env.AWS_ACCESS_KEY_ID?.length || 0,
         isConfigured: !!(
           process.env.AWS_ACCESS_KEY_ID &&
           process.env.AWS_SECRET_ACCESS_KEY &&
-          process.env.AWS_S3_BUCKET_NAME
+          (process.env.AWS_S3_BUCKET || process.env.AWS_S3_BUCKET_NAME)
         ),
       };
       res.json({ success: true, data: config });

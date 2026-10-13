@@ -1,10 +1,12 @@
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { checkSprintAutoCloseForTask } from "./rule-engine";
 import { ProjectRepositoryService } from "./project-repository-service";
 import { isProjectStorageKey } from "./project-upload-key";
+import { PlanningAuthorizationService } from "./planning-authorization.service";
 
 const prisma = new PrismaClient();
 const repoService = new ProjectRepositoryService();
+const authorization = new PlanningAuthorizationService(prisma);
 
 const DEMO_USER_ID = "demo-user-id";
 
@@ -326,7 +328,8 @@ export class ProjectService {
     return members.map((m) => ({ ...m.user, joinedAt: m.joinedAt }));
   }
 
-  async addProjectMember(projectId: string, userId: string) {
+  async addProjectMember(projectId: string, userId: string, actorId: string) {
+    await authorization.assertOwner(projectId, actorId);
     await ensureUser(userId);
     return prisma.projectMember.create({
       data: { projectId, userId },
@@ -334,7 +337,8 @@ export class ProjectService {
     });
   }
 
-  async removeProjectMember(projectId: string, userId: string) {
+  async removeProjectMember(projectId: string, userId: string, actorId: string) {
+    await authorization.assertOwner(projectId, actorId);
     const member = await prisma.projectMember.findUnique({
       where: { projectId_userId: { projectId, userId } },
     });
@@ -354,6 +358,7 @@ export class ProjectService {
   }
 
   async sendChatMessage(data: { projectId: string; userId: string; userName: string; content: string }) {
+    await authorization.assertCanEdit(data.projectId, data.userId);
     return prisma.projectChatMessage.create({ data });
   }
 
@@ -431,24 +436,38 @@ export class ProjectService {
     phase?: string;
     url?: string;
     s3Key?: string;
+    confirmedUploadKey?: string;
     size?: string;
-    uploadedBy?: string;
-  }) {
-    return prisma.projectFile.create({
-      data: {
+  }, actorId: string) {
+    await authorization.assertCanEdit(data.projectId, actorId);
+    const fileData = {
         projectId: data.projectId,
         name: data.name,
         type: data.type || "doc",
         phase: data.phase || "development",
         url: data.url,
         s3Key: data.s3Key,
+        confirmedUploadKey: data.confirmedUploadKey,
         size: data.size,
-        uploadedBy: data.uploadedBy,
-      },
-    });
+        uploadedBy: actorId,
+    };
+    if (data.confirmedUploadKey) {
+      try {
+        return await prisma.projectFile.upsert({
+          where: { confirmedUploadKey: data.confirmedUploadKey },
+          create: fileData,
+          update: {},
+        });
+      } catch (error) {
+        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") throw error;
+        return prisma.projectFile.findUniqueOrThrow({ where: { confirmedUploadKey: data.confirmedUploadKey } });
+      }
+    }
+    return prisma.projectFile.create({ data: fileData });
   }
 
-  async deleteFile(projectId: string, fileId: string) {
+  async deleteFile(projectId: string, fileId: string, actorId: string) {
+    await authorization.assertCanEdit(projectId, actorId);
     const file = await prisma.projectFile.findFirst({ where: { id: fileId, projectId } });
     if (!file) return undefined;
     if (file.s3Key && !isProjectStorageKey(projectId, file.s3Key)) return undefined;

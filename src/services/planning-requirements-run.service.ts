@@ -43,6 +43,7 @@ import {
   validateRevisionStableIds,
 } from "../planning/requirements-revision-policy";
 import { PlanningArtifactService } from "./planning-artifact.service";
+import { AuthorityCurrentnessService } from "./authority-currentness.service";
 import { PlanningAuthorizationService } from "./planning-authorization.service";
 import { PlanningReadinessService, RequirementsReadiness } from "./planning-readiness.service";
 import { PlanningTransitionPolicy } from "./planning-transition-policy";
@@ -65,7 +66,7 @@ export type StartRequirementsRunInput =
       actorId: string;
       operation: "INITIAL_GENERATION";
       idempotencyKey: string;
-      brief: string;
+      briefConfirmationId: string;
       includeMemory?: boolean;
     }
   | {
@@ -175,7 +176,8 @@ function requestFingerprint(input: StartRequirementsRunInput, context: PreparedR
     ? hashCanonical({
       projectId: input.projectId,
       operation: input.operation,
-      brief: context.manifest.brief?.normalizedText,
+      briefConfirmationId: input.briefConfirmationId,
+      briefContentHash: context.manifest.briefAuthority?.contentHash,
       includeMemory: input.includeMemory === true,
     })
     : hashCanonical({
@@ -221,6 +223,7 @@ export class PlanningRequirementsRunService {
   private readonly artifacts: PlanningArtifactService;
   private readonly readiness: PlanningReadinessService;
   private readonly transitions: PlanningTransitionPolicy;
+  private readonly currentness: AuthorityCurrentnessService;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -235,6 +238,7 @@ export class PlanningRequirementsRunService {
     this.artifacts = artifacts ?? new PlanningArtifactService(prisma, this.authorization);
     this.readiness = readiness ?? new PlanningReadinessService();
     this.transitions = transitions ?? new PlanningTransitionPolicy();
+    this.currentness = new AuthorityCurrentnessService(prisma);
   }
 
   async startRequirementsRun(input: StartRequirementsRunInput): Promise<StartRequirementsRunResult> {
@@ -255,7 +259,7 @@ export class PlanningRequirementsRunService {
       ? await this.contexts.buildInitial({
         projectId: input.projectId,
         actorId: input.actorId,
-        brief: input.brief,
+        briefConfirmationId: input.briefConfirmationId,
         includeMemory: input.includeMemory,
       })
       : await this.contexts.buildRevision({
@@ -288,12 +292,20 @@ export class PlanningRequirementsRunService {
             create: { projectId: input.projectId, phase: REQUIREMENTS_PHASE },
           });
           if (input.operation === WorkflowOperation.INITIAL_GENERATION && state.currentArtifactId) {
-            throw new PlanningDomainError(
-              "PLANNING_CONTEXT_CHANGED",
-              "Requirements already has a current artifact; initial generation context is no longer current.",
-              409,
-              { currentArtifactId: state.currentArtifactId },
-            );
+            const currentArtifact = await tx.phaseArtifact.findUnique({
+              where: { id: state.currentArtifactId },
+            });
+            const isStale = currentArtifact
+              ? (await this.currentness.getRequirementsArtifactCurrentness(tx, input.projectId, currentArtifact)).isStale
+              : true;
+            if (!isStale) {
+              throw new PlanningDomainError(
+                "PLANNING_CONTEXT_CHANGED",
+                "Requirements already has a current artifact; initial generation context is no longer current.",
+                409,
+                { currentArtifactId: state.currentArtifactId },
+              );
+            }
           }
           if (input.operation !== WorkflowOperation.INITIAL_GENERATION) {
             if (state.currentArtifactId !== input.baseArtifactId) {
@@ -305,6 +317,11 @@ export class PlanningRequirementsRunService {
               );
             }
             this.transitions.assertAction(state.status, "create_revision");
+            const baseArt = await tx.phaseArtifact.findUnique({ where: { id: input.baseArtifactId } });
+            if (!baseArt || baseArt.projectId !== input.projectId) {
+              throw new PlanningDomainError("PLANNING_ARTIFACT_NOT_FOUND", "Requirements base artifact not found.", 404);
+            }
+            await this.currentness.assertRequirementsCurrentForHandoff(tx, input.projectId, baseArt);
           }
           if (state.activeRunId) {
             state = await this.recoverOrRejectActiveRun(tx, state);
@@ -417,6 +434,20 @@ export class PlanningRequirementsRunService {
     ) {
       throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Requirements run authority is inconsistent.", 409, { runId });
     }
+    if (run.operation === WorkflowOperation.INITIAL_GENERATION) {
+      const intake = await this.prisma.projectIntakeState.findUnique({
+        where: { projectId }, include: { currentConfirmation: { include: { briefRevision: true } } },
+      });
+      const authority = manifest.briefAuthority;
+      if (!authority || !intake?.currentConfirmation || intake.currentConfirmation.status !== "ACTIVE"
+        || intake.currentConfirmation.id !== authority.confirmationId
+        || intake.currentConfirmation.briefRevisionId !== authority.revisionId
+        || intake.currentConfirmation.briefRevisionNumber !== authority.revisionNumber
+        || intake.currentConfirmation.briefContentHash !== authority.contentHash
+        || intake.currentConfirmation.briefRevision.contentHash !== authority.contentHash) {
+        throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "The confirmed Live Brief changed during Requirements generation.", 409, { runId });
+      }
+    }
     if (run.operation !== WorkflowOperation.INITIAL_GENERATION) {
       const target = validateRequirementsRevisionTarget(run.operation!, run.targetSectionKey);
       if (
@@ -445,12 +476,20 @@ export class PlanningRequirementsRunService {
       throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Project metadata changed during the Requirements operation.", 409, { runId });
     }
     if (run.operation === WorkflowOperation.INITIAL_GENERATION && state.currentArtifactId !== null) {
-      throw new PlanningDomainError(
-        "PLANNING_CONTEXT_CHANGED",
-        "A Requirements artifact was created during the initial generation operation.",
-        409,
-        { runId, currentArtifactId: state.currentArtifactId },
-      );
+      const currentArtifact = await this.prisma.phaseArtifact.findUnique({
+        where: { id: state.currentArtifactId },
+      });
+      const isStale = currentArtifact
+        ? (await this.currentness.getRequirementsArtifactCurrentness(this.prisma, projectId, currentArtifact)).isStale
+        : true;
+      if (!isStale) {
+        throw new PlanningDomainError(
+          "PLANNING_CONTEXT_CHANGED",
+          "A Requirements artifact was created during the initial generation operation.",
+          409,
+          { runId, currentArtifactId: state.currentArtifactId },
+        );
+      }
     }
     if (run.baseArtifactId) {
       const base = await this.prisma.phaseArtifact.findUnique({
@@ -518,18 +557,29 @@ export class PlanningRequirementsRunService {
               select: { id: true },
             }),
           ]);
+          const latestArtifact = await tx.phaseArtifact.findFirst({
+            where: {
+              projectId: input.projectId,
+              phase: REQUIREMENTS_PHASE,
+              type: REQUIREMENTS_ARTIFACT_TYPE,
+            },
+            orderBy: [{ version: "desc" }, { id: "desc" }],
+          });
+          const isRecovery = latestArtifact
+            ? (await this.currentness.getRequirementsArtifactCurrentness(tx, input.projectId, latestArtifact)).isStale
+            : false;
           if (
             !manifest || manifest.target !== "requirements" ||
             manifest.operation !== WorkflowOperation.INITIAL_GENERATION || !manifest.brief ||
             manifest.initiator.id !== input.actorId || run.initiatedById !== input.actorId ||
             run.contextHash !== manifest.contextHash || !state || !project ||
-            state.activeRunId !== run.id || state.currentArtifactId !== null || existingArtifact
+            state.activeRunId !== run.id || (!isRecovery && (state.currentArtifactId !== null || latestArtifact !== null))
           ) {
             throw new PlanningDomainError(
               "PLANNING_CONTEXT_CHANGED",
               "Requirements context changed before initial generation could be persisted.",
               409,
-              { runId: run.id, currentArtifactId: state?.currentArtifactId ?? existingArtifact?.id ?? null },
+              { runId: run.id, currentArtifactId: state?.currentArtifactId ?? latestArtifact?.id ?? null },
             );
           }
           if (canonicalJson(manifest.project) !== canonicalJson({
@@ -563,6 +613,24 @@ export class PlanningRequirementsRunService {
             }
           }
 
+          const intake = await tx.projectIntakeState.findUnique({
+            where: { projectId: input.projectId }, include: { currentConfirmation: { include: { briefRevision: true } } },
+          });
+          const authority = manifest.briefAuthority;
+          if (!authority || !intake?.currentConfirmation || intake.currentConfirmation.status !== "ACTIVE"
+            || intake.currentConfirmation.id !== authority.confirmationId
+            || intake.currentConfirmation.briefRevisionId !== authority.revisionId
+            || intake.currentConfirmation.briefRevisionNumber !== authority.revisionNumber
+            || intake.currentConfirmation.briefContentHash !== authority.contentHash
+            || intake.currentConfirmation.briefRevision.contentHash !== authority.contentHash) {
+            throw new PlanningDomainError(
+              "PLANNING_CONTEXT_CHANGED",
+              "The confirmed Live Brief changed before Requirements could be persisted.",
+              409,
+              { runId: run.id },
+            );
+          }
+
           const { artifact, state: artifactState } = await this.artifacts.createInitialArtifactInTransaction(tx, {
             projectId: input.projectId,
             actorId: input.actorId,
@@ -585,7 +653,7 @@ export class PlanningRequirementsRunService {
               id: state.id,
               stateVersion: state.stateVersion,
               activeRunId: run.id,
-              currentArtifactId: null,
+              currentArtifactId: state.currentArtifactId,
             },
             data: {
               status: "in_progress",
@@ -789,6 +857,8 @@ export class PlanningRequirementsRunService {
               { runId: run.id, baseArtifactId: run.baseArtifactId },
             );
           }
+
+          await this.currentness.assertRequirementsCurrentForHandoff(tx, input.projectId, base);
 
           const baseContent = parseRequirementsContent(base.structuredContent);
           const newContent = parseRequirementsContent(input.structuredContent);

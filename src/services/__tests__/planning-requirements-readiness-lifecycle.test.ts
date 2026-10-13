@@ -5,6 +5,7 @@ import { PhaseService } from "../phase-service";
 import { PlanningApprovalService } from "../planning-approval.service";
 import { PlanningArtifactService } from "../planning-artifact.service";
 import { PlanningReadinessService, RequirementsReadiness } from "../planning-readiness.service";
+import { seedConfirmedLiveBrief } from "./test-brief-fixtures";
 
 const databaseUrl = process.env.DATABASE_URL;
 const isolatedSchema = databaseUrl ? new URL(databaseUrl).searchParams.get("schema") : null;
@@ -69,6 +70,7 @@ function hashOf(artifact: PhaseArtifact): string {
 async function createProject(): Promise<string> {
   const id = `checkpoint-1c-a-project-${crypto.randomUUID()}`;
   await prisma.project.create({ data: { id, name: "Checkpoint 1C-A", userId: ownerId } });
+  await seedConfirmedLiveBrief(prisma, id, ownerId);
   projectIds.push(id);
   return id;
 }

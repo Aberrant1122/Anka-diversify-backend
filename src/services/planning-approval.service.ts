@@ -27,6 +27,7 @@ import { ARCHITECTURE_PHASE, preflightArchitectureHandoff } from "../planning/do
 import { ARCHITECTURE_ARTIFACT_TYPE } from "../planning/architecture-schema";
 import { PlanningArchitectureArtifactService } from "./planning-architecture-artifact.service";
 import { PlanningArchitectureReadinessService } from "./planning-architecture-readiness.service";
+import { AuthorityCurrentnessService } from "./authority-currentness.service";
 
 export interface ExactArtifactDecisionInput {
   projectId: string;
@@ -51,6 +52,7 @@ export class PlanningApprovalService {
   private readonly documentationReadiness: PlanningDocumentationReadinessService;
   private readonly architectureArtifacts: PlanningArchitectureArtifactService;
   private readonly architectureReadiness = new PlanningArchitectureReadinessService();
+  private readonly currentness: AuthorityCurrentnessService;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -67,6 +69,7 @@ export class PlanningApprovalService {
       ?? new PlanningDocumentationArtifactService(prisma, this.authorization);
     this.documentationReadiness = documentationReadiness ?? new PlanningDocumentationReadinessService();
     this.architectureArtifacts = new PlanningArchitectureArtifactService(prisma, this.authorization);
+    this.currentness = new AuthorityCurrentnessService(prisma);
   }
 
   async requestApproval(input: ExactArtifactDecisionInput): Promise<ProjectPhaseState> {
@@ -75,6 +78,7 @@ export class PlanningApprovalService {
 
     return this.withTransactionRetry(() => this.prisma.$transaction(async (tx) => {
       const { state, artifact } = await this.loadCurrent(tx, input);
+      await this.currentness.assertRequirementsCurrentForHandoff(tx, input.projectId, artifact);
       this.transitions.assertAction(state.status, "request_approval");
       this.transitions.assertTransition(state.status, "awaiting_approval");
       this.assertReady(artifact, input.expectedHash);
@@ -108,6 +112,11 @@ export class PlanningApprovalService {
       if (!phaseState) {
         throw new PlanningDomainError("PLANNING_ARTIFACT_NOT_FOUND", "Requirements has no current artifact.", 404);
       }
+      const targetArtifact = await tx.phaseArtifact.findUnique({
+        where: { id: input.artifactId },
+      });
+      this.assertArtifactScope(targetArtifact, input.projectId);
+      await this.currentness.assertRequirementsCurrentForHandoff(tx, input.projectId, targetArtifact);
       this.transitions.assertAction(phaseState.status, "approve");
       this.transitions.assertTransition(phaseState.status, "approved");
       const { state, artifact } = await this.loadCandidate(tx, input);
@@ -260,6 +269,7 @@ export class PlanningApprovalService {
         { expectedHash: input.expectedHash, requireCurrentRequirements: true },
       );
       this.assertDocumentationReady(artifact, validated);
+      await this.currentness.assertDocumentationCurrentForHandoff(tx, input.projectId, artifact);
 
       const artifactUpdate = await tx.phaseArtifact.updateMany({
         where: { id: artifact.id, lifecycleStatus: ArtifactLifecycleStatus.DRAFT },
@@ -305,6 +315,7 @@ export class PlanningApprovalService {
         { expectedHash: input.expectedHash, requireCurrentRequirements: true },
       );
       this.assertDocumentationReady(artifact, validated);
+      await this.currentness.assertDocumentationCurrentForHandoff(tx, input.projectId, artifact);
       const now = new Date();
 
       await tx.phaseApproval.create({

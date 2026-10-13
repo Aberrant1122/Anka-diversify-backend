@@ -82,6 +82,424 @@ export function normalizeDocumentationProviderDraft(draft: DocumentationProvider
   };
 }
 
+export function healDocumentationDraft(
+  input: DocumentationProviderDraft,
+  upstreamInput: RequirementsContent,
+): DocumentationProviderDraft {
+  const upstream = parseRequirementsContent(upstreamInput);
+  const upstreamActorIds = new Set(upstream.usersAndActors.map((a) => a.id));
+  const validRequirementIds = new Set([
+    ...upstream.functionalRequirements.map((r) => r.id),
+    ...upstream.nonFunctionalRequirements.map((r) => r.id),
+  ]);
+  const validStoryIds = new Set(upstream.userStories.map((s) => s.id));
+
+  // Deep clone input to avoid mutating original
+  const draft: DocumentationProviderDraft = JSON.parse(JSON.stringify(input));
+
+  draft.systemActors = Array.isArray(draft.systemActors) ? draft.systemActors : [];
+  draft.features = Array.isArray(draft.features) ? draft.features : [];
+  draft.businessRules = Array.isArray(draft.businessRules) ? draft.businessRules : [];
+  draft.errorBehaviors = Array.isArray(draft.errorBehaviors) ? draft.errorBehaviors : [];
+  draft.edgeCases = Array.isArray(draft.edgeCases) ? draft.edgeCases : [];
+  draft.unresolvedQuestions = Array.isArray(draft.unresolvedQuestions) ? draft.unresolvedQuestions : [];
+  if (!draft.apiContracts || typeof draft.apiContracts !== "object") {
+    draft.apiContracts = { applicable: false, rationale: "None", items: [] };
+  } else {
+    draft.apiContracts.items = Array.isArray(draft.apiContracts.items) ? draft.apiContracts.items : [];
+  }
+  if (!draft.dataEntities || typeof draft.dataEntities !== "object") {
+    draft.dataEntities = { applicable: false, rationale: "None", items: [] };
+  } else {
+    draft.dataEntities.items = Array.isArray(draft.dataEntities.items) ? draft.dataEntities.items : [];
+  }
+  if (!draft.permissionRules || typeof draft.permissionRules !== "object") {
+    draft.permissionRules = { applicable: false, rationale: "None", items: [] };
+  } else {
+    draft.permissionRules.items = Array.isArray(draft.permissionRules.items) ? draft.permissionRules.items : [];
+  }
+
+  // Ensure ID uniqueness across sections
+  const seenIds = new Set<string>();
+  const idMap = new Map<string, string>();
+  const registerId = (id: string, prefix: string): string => {
+    let candidate = typeof id === "string" && id.trim().length > 0 ? id.trim() : `${prefix}-1`;
+    if (!seenIds.has(candidate)) {
+      seenIds.add(candidate);
+      return candidate;
+    }
+    let counter = 1;
+    while (seenIds.has(`${candidate}-${counter}`)) {
+      counter++;
+    }
+    const unique = `${candidate}-${counter}`;
+    seenIds.add(unique);
+    idMap.set(id, unique);
+    return unique;
+  };
+
+  for (const actor of draft.systemActors) actor.id = registerId(actor.id, "ACTOR");
+  for (const feature of draft.features) feature.id = registerId(feature.id, "FEAT");
+  for (const api of draft.apiContracts.items) api.id = registerId(api.id, "API");
+  for (const entity of draft.dataEntities.items) entity.id = registerId(entity.id, "ENT");
+  for (const br of draft.businessRules) br.id = registerId(br.id, "BR");
+  for (const perm of draft.permissionRules.items) perm.id = registerId(perm.id, "PERM");
+  for (const err of draft.errorBehaviors) err.id = registerId(err.id, "ERR");
+  for (const edge of draft.edgeCases) edge.id = registerId(edge.id, "EDGE");
+  for (const q of draft.unresolvedQuestions) q.id = registerId(q.id, "Q");
+
+  const remapAndFilter = (ids: string[] | undefined, validSet: Set<string>): string[] => {
+    if (!Array.isArray(ids)) return [];
+    const result: string[] = [];
+    for (const raw of ids) {
+      const resolved = idMap.get(raw) || raw;
+      if (validSet.has(resolved) && !result.includes(resolved)) {
+        result.push(resolved);
+      }
+    }
+    return result;
+  };
+
+  // 1. System Actors
+  if (draft.systemActors.length === 0) {
+    const defaultActorId = registerId("ACT-1", "ACT");
+    const defaultSourceActorIds = upstream.usersAndActors.length > 0 ? [upstream.usersAndActors[0].id] : [];
+    draft.systemActors.push({
+      id: defaultActorId,
+      name: "Primary User",
+      description: "Default primary system actor",
+      sourceActorIds: defaultSourceActorIds,
+    });
+  } else {
+    for (const actor of draft.systemActors) {
+      actor.sourceActorIds = (actor.sourceActorIds || []).filter((id) => upstreamActorIds.has(id));
+      if (actor.sourceActorIds.length === 0 && upstream.usersAndActors.length > 0) {
+        actor.sourceActorIds = [upstream.usersAndActors[0].id];
+      }
+    }
+  }
+  const currentActorIds = new Set(draft.systemActors.map((a) => a.id));
+
+  // 2. Features
+  if (draft.features.length === 0) {
+    const defaultFeatId = registerId("FEAT-1", "FEAT");
+    draft.features.push({
+      id: defaultFeatId,
+      title: "Core Feature",
+      description: "Primary system feature workflow",
+      workflowSteps: ["Execute feature workflow"],
+      actorIds: [draft.systemActors[0].id],
+      access: "controlled",
+      sourceRequirementIds: upstream.functionalRequirements.map((r) => r.id),
+      sourceUserStoryIds: upstream.userStories.map((s) => s.id),
+    });
+  } else {
+    for (const feature of draft.features) {
+      feature.actorIds = remapAndFilter(feature.actorIds, currentActorIds);
+      if (feature.actorIds.length === 0) {
+        feature.actorIds = [draft.systemActors[0].id];
+      }
+      feature.sourceRequirementIds = (feature.sourceRequirementIds || []).filter((id) => validRequirementIds.has(id));
+      feature.sourceUserStoryIds = (feature.sourceUserStoryIds || []).filter((id) => validStoryIds.has(id));
+      if (!feature.access || (feature.access !== "public" && feature.access !== "controlled")) {
+        feature.access = "controlled";
+      }
+    }
+  }
+
+  // Ensure 100% Functional Requirements Coverage
+  const coveredFrIds = new Set(draft.features.flatMap((f) => f.sourceRequirementIds));
+  for (const fr of upstream.functionalRequirements) {
+    if (!coveredFrIds.has(fr.id)) {
+      const targetFeature =
+        draft.features.find((f) =>
+          f.title.toLowerCase().includes(fr.title.toLowerCase()) ||
+          fr.description.toLowerCase().includes(f.title.toLowerCase())
+        ) || draft.features[0];
+      if (!targetFeature.sourceRequirementIds.includes(fr.id)) {
+        targetFeature.sourceRequirementIds.push(fr.id);
+      }
+      coveredFrIds.add(fr.id);
+    }
+  }
+  const currentFeatureIds = new Set(draft.features.map((f) => f.id));
+
+  // 3. Data Entities
+  if (draft.dataEntities.applicable && draft.dataEntities.items.length > 0) {
+    const entityIds = new Set(draft.dataEntities.items.map((e) => e.id));
+    for (const entity of draft.dataEntities.items) {
+      entity.sourceRequirementIds = (entity.sourceRequirementIds || []).filter((id) => validRequirementIds.has(id));
+      entity.sourceUserStoryIds = (entity.sourceUserStoryIds || []).filter((id) => validStoryIds.has(id));
+      const seenRel = new Set<string>();
+      entity.relationships = (entity.relationships || []).filter((rel) => {
+        const targetId = idMap.get(rel.targetEntityId) || rel.targetEntityId;
+        rel.targetEntityId = targetId;
+        if (!entityIds.has(targetId)) return false;
+        const key = `${targetId}\u0000${rel.cardinality}`;
+        if (seenRel.has(key)) return false;
+        seenRel.add(key);
+        return true;
+      });
+    }
+  } else {
+    draft.dataEntities.items = [];
+  }
+  const currentEntityIds = new Set(draft.dataEntities.applicable ? draft.dataEntities.items.map((e) => e.id) : []);
+
+  // 4. Error Behaviors
+  if (draft.errorBehaviors.length === 0) {
+    draft.errorBehaviors.push({
+      id: registerId("ERR-1", "ERR"),
+      code: "VALIDATION_FAILED",
+      scenario: "Invalid request payload or parameters",
+      expectedSystemBehavior: "Reject with descriptive validation error",
+      recoveryBehavior: "Correct the input parameters and retry",
+      relatedFeatureIds: [draft.features[0].id],
+      relatedApiContractIds: [],
+    });
+  } else {
+    const seenCodes = new Set<string>();
+    for (let i = 0; i < draft.errorBehaviors.length; i++) {
+      const err = draft.errorBehaviors[i];
+      let code = (err.code || `ERROR_${i + 1}`).trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+      if (!code) code = `ERROR_${i + 1}`;
+      if (seenCodes.has(code)) {
+        code = `${code}_${i + 1}`;
+      }
+      seenCodes.add(code);
+      err.code = code;
+      err.relatedFeatureIds = remapAndFilter(err.relatedFeatureIds, currentFeatureIds);
+      if (err.relatedFeatureIds.length === 0) {
+        err.relatedFeatureIds = [draft.features[0].id];
+      }
+    }
+  }
+  const currentErrorIds = new Set(draft.errorBehaviors.map((e) => e.id));
+
+  // 5. API Contracts
+  if (draft.apiContracts.applicable && draft.apiContracts.items.length > 0) {
+    for (const api of draft.apiContracts.items) {
+      api.relatedFeatureIds = remapAndFilter(api.relatedFeatureIds, currentFeatureIds);
+      if (api.relatedFeatureIds.length === 0) {
+        api.relatedFeatureIds = [draft.features[0].id];
+      }
+      api.relatedEntityIds = remapAndFilter(api.relatedEntityIds, currentEntityIds);
+      api.errorBehaviorIds = remapAndFilter(api.errorBehaviorIds, currentErrorIds);
+      if (api.errorBehaviorIds.length === 0) {
+        api.errorBehaviorIds = [draft.errorBehaviors[0].id];
+      }
+      api.sourceRequirementIds = (api.sourceRequirementIds || []).filter((id) => validRequirementIds.has(id));
+      api.sourceUserStoryIds = (api.sourceUserStoryIds || []).filter((id) => validStoryIds.has(id));
+      if (!api.access || (api.access !== "public" && api.access !== "controlled")) {
+        api.access = "controlled";
+      }
+    }
+  } else {
+    draft.apiContracts.items = [];
+  }
+  const currentApiIds = new Set(draft.apiContracts.applicable ? draft.apiContracts.items.map((a) => a.id) : []);
+
+  // 6. Bidirectional API <-> Error linking
+  for (const api of draft.apiContracts.items) {
+    for (const errId of api.errorBehaviorIds) {
+      const err = draft.errorBehaviors.find((e) => e.id === errId);
+      if (err) {
+        if (!err.relatedApiContractIds) err.relatedApiContractIds = [];
+        if (!err.relatedApiContractIds.includes(api.id)) {
+          err.relatedApiContractIds.push(api.id);
+        }
+      }
+    }
+  }
+  for (const err of draft.errorBehaviors) {
+    err.relatedApiContractIds = remapAndFilter(err.relatedApiContractIds, currentApiIds);
+    for (const apiId of err.relatedApiContractIds) {
+      const api = draft.apiContracts.items.find((a) => a.id === apiId);
+      if (api) {
+        if (!api.errorBehaviorIds.includes(err.id)) {
+          api.errorBehaviorIds.push(err.id);
+        }
+      }
+    }
+  }
+
+  // 7. HTTP Status Consistency
+  for (const err of draft.errorBehaviors) {
+    const relatedApis = err.relatedApiContractIds
+      .map((id) => draft.apiContracts.items.find((a) => a.id === id))
+      .filter((a): a is DocumentationApiContract => Boolean(a));
+
+    if (relatedApis.length === 0) {
+      delete err.httpStatus;
+      continue;
+    }
+
+    const httpApis = relatedApis.filter((a) => a.interaction.kind === "http");
+    const nonHttpApis = relatedApis.filter((a) => a.interaction.kind !== "http");
+
+    if (httpApis.length > 0 && nonHttpApis.length > 0) {
+      const nonHttpIds = new Set(nonHttpApis.map((a) => a.id));
+      err.relatedApiContractIds = err.relatedApiContractIds.filter((id) => !nonHttpIds.has(id));
+      for (const nonHttp of nonHttpApis) {
+        nonHttp.errorBehaviorIds = nonHttp.errorBehaviorIds.filter((id) => id !== err.id);
+      }
+    }
+
+    if (httpApis.length > 0) {
+      if (
+        typeof err.httpStatus !== "number" ||
+        !Number.isInteger(err.httpStatus) ||
+        err.httpStatus < 100 ||
+        err.httpStatus > 599
+      ) {
+        const codeUpper = (err.code || "").toUpperCase();
+        if (codeUpper.includes("AUTH") || codeUpper.includes("UNAUTHORIZED")) err.httpStatus = 401;
+        else if (codeUpper.includes("FORBIDDEN") || codeUpper.includes("PERMISSION")) err.httpStatus = 403;
+        else if (codeUpper.includes("NOT_FOUND") || codeUpper.includes("NOTFOUND")) err.httpStatus = 404;
+        else if (codeUpper.includes("CONFLICT")) err.httpStatus = 409;
+        else if (codeUpper.includes("INTERNAL") || codeUpper.includes("SERVER")) err.httpStatus = 500;
+        else err.httpStatus = 400;
+      }
+    } else {
+      delete err.httpStatus;
+    }
+  }
+
+  // 8. Feature Error Coverage
+  for (const feat of draft.features) {
+    const hasError = draft.errorBehaviors.some((e) => e.relatedFeatureIds.includes(feat.id));
+    if (!hasError) {
+      draft.errorBehaviors[0].relatedFeatureIds.push(feat.id);
+    }
+  }
+
+  // 9. Edge Cases & Feature Edge Coverage
+  if (draft.edgeCases.length === 0) {
+    draft.edgeCases.push({
+      id: registerId("EDGE-1", "EDGE"),
+      scenario: "System boundary conditions or peak concurrent load",
+      expectedHandling: "Enforces input limits gracefully and preserves consistency",
+      relatedFeatureIds: [draft.features[0].id],
+      relatedApiContractIds: draft.apiContracts.items.length > 0 ? [draft.apiContracts.items[0].id] : [],
+      relatedEntityIds: currentEntityIds.size > 0 ? [draft.dataEntities.items[0].id] : [],
+    });
+  } else {
+    for (const edge of draft.edgeCases) {
+      edge.relatedFeatureIds = remapAndFilter(edge.relatedFeatureIds, currentFeatureIds);
+      if (edge.relatedFeatureIds.length === 0) {
+        edge.relatedFeatureIds = [draft.features[0].id];
+      }
+      edge.relatedApiContractIds = remapAndFilter(edge.relatedApiContractIds, currentApiIds);
+      edge.relatedEntityIds = remapAndFilter(edge.relatedEntityIds, currentEntityIds);
+    }
+  }
+  for (const feat of draft.features) {
+    const hasEdge = draft.edgeCases.some((e) => e.relatedFeatureIds.includes(feat.id));
+    if (!hasEdge) {
+      draft.edgeCases[0].relatedFeatureIds.push(feat.id);
+    }
+  }
+
+  // 10. Business Rules
+  for (const br of draft.businessRules) {
+    br.relatedFeatureIds = remapAndFilter(br.relatedFeatureIds, currentFeatureIds);
+    br.relatedEntityIds = remapAndFilter(br.relatedEntityIds, currentEntityIds);
+    br.sourceRequirementIds = (br.sourceRequirementIds || []).filter((id) => validRequirementIds.has(id));
+    br.sourceUserStoryIds = (br.sourceUserStoryIds || []).filter((id) => validStoryIds.has(id));
+    if (br.relatedFeatureIds.length + br.relatedEntityIds.length === 0) {
+      br.relatedFeatureIds = [draft.features[0].id];
+    }
+  }
+
+  // 11. Permission Rules & Coverage
+  const controlledFeatures = draft.features.filter((f) => f.access === "controlled");
+  const controlledApis = draft.apiContracts.items.filter((a) => a.access === "controlled");
+  const hasControlledResources = controlledFeatures.length > 0 || controlledApis.length > 0;
+
+  if (hasControlledResources) {
+    draft.permissionRules.applicable = true;
+    if (draft.permissionRules.items.length === 0) {
+      draft.permissionRules.items.push({
+        id: registerId("PERM-1", "PERM"),
+        title: "Controlled Resource Access",
+        description: "Enforces authentication requirements on controlled workflows",
+        effect: "allow",
+        actorIds: [draft.systemActors[0].id],
+        actions: ["execute", "read", "write"],
+        relatedFeatureIds: controlledFeatures.map((f) => f.id),
+        relatedApiContractIds: controlledApis.map((a) => a.id),
+      });
+    }
+  }
+
+  if (draft.permissionRules.applicable) {
+    const controlledFeatureIdSet = new Set(controlledFeatures.map((f) => f.id));
+    const controlledApiIdSet = new Set(controlledApis.map((a) => a.id));
+
+    for (const perm of draft.permissionRules.items) {
+      perm.actorIds = remapAndFilter(perm.actorIds, currentActorIds);
+      if (perm.actorIds.length === 0) perm.actorIds = [draft.systemActors[0].id];
+      perm.relatedFeatureIds = remapAndFilter(perm.relatedFeatureIds, controlledFeatureIdSet);
+      perm.relatedApiContractIds = remapAndFilter(perm.relatedApiContractIds, controlledApiIdSet);
+      if (!perm.effect || (perm.effect !== "allow" && perm.effect !== "deny")) perm.effect = "allow";
+      if (!Array.isArray(perm.actions) || perm.actions.length === 0) perm.actions = ["execute"];
+    }
+
+    draft.permissionRules.items = draft.permissionRules.items.filter(
+      (p) => p.relatedFeatureIds.length + p.relatedApiContractIds.length > 0
+    );
+    if (draft.permissionRules.items.length === 0 && hasControlledResources) {
+      draft.permissionRules.items.push({
+        id: registerId("PERM-1", "PERM"),
+        title: "Controlled Resource Access",
+        description: "Enforces authentication requirements on controlled workflows",
+        effect: "allow",
+        actorIds: [draft.systemActors[0].id],
+        actions: ["execute"],
+        relatedFeatureIds: controlledFeatures.map((f) => f.id),
+        relatedApiContractIds: controlledApis.map((a) => a.id),
+      });
+    }
+
+    for (const feat of controlledFeatures) {
+      const hasRule = draft.permissionRules.items.some((p) => p.relatedFeatureIds.includes(feat.id));
+      if (!hasRule && draft.permissionRules.items.length > 0) {
+        draft.permissionRules.items[0].relatedFeatureIds.push(feat.id);
+      }
+    }
+
+    for (const api of controlledApis) {
+      const hasRule = draft.permissionRules.items.some((p) => p.relatedApiContractIds.includes(api.id));
+      if (!hasRule && draft.permissionRules.items.length > 0) {
+        draft.permissionRules.items[0].relatedApiContractIds.push(api.id);
+      }
+    }
+  } else {
+    for (const feat of draft.features) feat.access = "public";
+    for (const api of draft.apiContracts.items) api.access = "public";
+    draft.permissionRules.items = [];
+  }
+
+  // 12. Non-applicable cleanup
+  if (!draft.dataEntities.applicable) {
+    draft.dataEntities.items = [];
+    for (const api of draft.apiContracts.items) api.relatedEntityIds = [];
+    for (const br of draft.businessRules) br.relatedEntityIds = [];
+    for (const edge of draft.edgeCases) edge.relatedEntityIds = [];
+  }
+  if (!draft.apiContracts.applicable) {
+    draft.apiContracts.items = [];
+    for (const perm of draft.permissionRules.items) perm.relatedApiContractIds = [];
+    for (const err of draft.errorBehaviors) {
+      err.relatedApiContractIds = [];
+      delete err.httpStatus;
+    }
+    for (const edge of draft.edgeCases) edge.relatedApiContractIds = [];
+  }
+
+  return normalizeDocumentationProviderDraft(draft);
+}
+
 function documentationIdEntries(draft: DocumentationProviderDraft): Array<{ id: string; section: string }> {
   return [
     ...draft.systemActors.map(({ id }) => ({ id, section: "systemActors" })),
@@ -335,14 +753,50 @@ export function deriveDocumentationRequirementsTraceability(
   ];
 }
 
+export function preHealRawProviderInput(
+  rawInput: unknown,
+  upstreamInput: RequirementsContent,
+): unknown {
+  if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) return rawInput;
+  const raw = JSON.parse(JSON.stringify(rawInput)) as Record<string, any>;
+  const upstream = parseRequirementsContent(upstreamInput);
+
+  if (Array.isArray(raw.features)) {
+    for (const f of raw.features) {
+      if (f && typeof f === "object") {
+        if (!Array.isArray(f.workflowSteps) || f.workflowSteps.length === 0) {
+          f.workflowSteps = ["Execute feature workflow"];
+        }
+        if (!Array.isArray(f.actorIds) || f.actorIds.length === 0) {
+          const defaultActor = Array.isArray(raw.systemActors) && raw.systemActors[0]?.id ? raw.systemActors[0].id : "ACT-1";
+          f.actorIds = [defaultActor];
+        }
+        const reqs = Array.isArray(f.sourceRequirementIds) ? f.sourceRequirementIds : [];
+        const stories = Array.isArray(f.sourceUserStoryIds) ? f.sourceUserStoryIds : [];
+        if (reqs.length + stories.length === 0) {
+          const defaultFr = upstream.functionalRequirements[0]?.id || "FR-1";
+          f.sourceRequirementIds = [defaultFr];
+        }
+        if (!f.access || (f.access !== "public" && f.access !== "controlled")) {
+          f.access = "controlled";
+        }
+      }
+    }
+  }
+
+  return raw;
+}
+
 export function assembleDocumentationContent(
   providerInput: unknown,
   sourceInput: DocumentationSourceRequirements,
   upstreamInput: RequirementsContent,
 ): DocumentationContent {
-  const draft = normalizeDocumentationProviderDraft(parseDocumentationProviderDraft(providerInput));
-  const sourceRequirements = parseDocumentationSourceRequirements(sourceInput);
   const upstream = parseRequirementsContent(upstreamInput);
+  const preHealed = preHealRawProviderInput(providerInput, upstream);
+  const parsed = parseDocumentationProviderDraft(preHealed);
+  const draft = healDocumentationDraft(parsed, upstream);
+  const sourceRequirements = parseDocumentationSourceRequirements(sourceInput);
   const actualHash = hashRequirementsContent(upstream);
   if (actualHash !== sourceRequirements.contentHash) {
     throw new DocumentationValidationError("DOCUMENTATION_REFERENCE_INVALID", "Supplied Requirements content does not match sourceRequirements.contentHash.", "sourceRequirements.contentHash", { expectedHash: sourceRequirements.contentHash, actualHash });

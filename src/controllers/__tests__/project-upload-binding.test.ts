@@ -14,10 +14,15 @@ const mockDeleteFile = (require("../../services/project-service") as { mockDelet
 jest.mock("@prisma/client", () => {
   const actual = jest.requireActual("@prisma/client");
   const findFirst = jest.fn();
-  return { ...actual, PrismaClient: jest.fn().mockImplementation(() => ({ projectFile: { findFirst } })),
+  const findSource = jest.fn();
+  return { ...actual, PrismaClient: jest.fn().mockImplementation(() => ({
+      projectFile: { findFirst }, documentSource: { findFirst: findSource },
+    })),
+    mockFindSource: findSource,
     mockFindFirst: findFirst };
 });
 const mockFindFirst = (require("@prisma/client") as { mockFindFirst: jest.Mock }).mockFindFirst;
+const mockFindSource = (require("@prisma/client") as { mockFindSource: jest.Mock }).mockFindSource;
 jest.mock("../../services/upload.service", () => {
   const generateDownloadUrl = jest.fn();
   const deleteFromS3 = jest.fn();
@@ -38,6 +43,7 @@ describe("upload confirmation binds key and URL to route project", () => {
     jest.clearAllMocks();
     mockCreateFile.mockResolvedValue({ id: "file-a", projectId: "project-a" });
     mockDeleteFile.mockResolvedValue(undefined);
+    mockFindSource.mockResolvedValue(null);
     mockGenerateDownloadUrl.mockResolvedValue("signed-url");
   });
 
@@ -55,7 +61,9 @@ describe("upload confirmation binds key and URL to route project", () => {
 
   test("valid Project A key and matching URL creates the Project A file", async () => {
     expect((await confirm(keyA, url(keyA))).statusCode).toBe(201);
-    expect(mockCreateFile).toHaveBeenCalledWith(expect.objectContaining({ projectId: "project-a", s3Key: keyA }));
+    expect(mockCreateFile).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: "project-a", s3Key: keyA, confirmedUploadKey: keyA,
+    }), "both-projects-user");
   });
 
   test.each([
@@ -82,7 +90,10 @@ describe("upload confirmation binds key and URL to route project", () => {
 
     await controller.deleteFile(req, res);
     expect(response.statusCode).toBe(404);
-    expect(mockDeleteFile).toHaveBeenCalledWith("project-a", "file-b");
+    expect(mockFindSource).toHaveBeenCalledWith({
+      where: { projectFileId: "file-b", projectId: "project-a" }, select: { s3Key: true },
+    });
+    expect(mockDeleteFile).toHaveBeenCalledWith("project-a", "file-b", "both-projects-user");
     expect(mockDeleteFromS3).not.toHaveBeenCalled();
   });
 

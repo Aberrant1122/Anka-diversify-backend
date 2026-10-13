@@ -7,6 +7,7 @@ import { ARCHITECTURE_ARTIFACT_TYPE, ARCHITECTURE_SCHEMA_VERSION, ArchitectureCo
 import { ApprovedAuthorityRecord, preflightArchitectureHandoff } from "./documentation-architecture-preflight";
 import { PlanningDomainError } from "./planning-errors";
 import { canonicalJson, hashCanonical } from "./requirements-context";
+import { AuthorityCurrentnessService } from "../services/authority-currentness.service";
 
 export interface ImplementationAuthority {
   readonly projectId: string;
@@ -57,6 +58,8 @@ export async function resolveImplementationAuthority(
     throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Approved Architecture authority is invalid.", 422);
   }
   const content = architectureArtifacts.validatePersisted(artifact, upstream);
+  const currentness = new AuthorityCurrentnessService();
+  await currentness.assertArchitectureCurrentForHandoff(tx, projectId, artifact);
   const result = readiness.evaluateArchitecture(artifact, upstream);
   if (!result.ready) throw new PlanningDomainError("PLANNING_READINESS_BLOCKED", "Approved Architecture is not ready for Implementation.", 422, { blockers: result.blockers });
   const approval = await tx.phaseApproval.findFirst({ where: { projectId, phase: "architecture", artifactId: artifact.id,

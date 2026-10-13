@@ -61,7 +61,7 @@ export interface GenerateInitialRequirementsInput {
   projectId: string;
   actorId: string;
   idempotencyKey: string;
-  brief: string;
+  briefConfirmationId: string;
   includeMemory?: boolean;
 }
 
@@ -133,6 +133,7 @@ const REPLAY_FAILURES = Object.freeze({
   PLANNING_STALE_RUN_RECOVERED: { terminalStatus: "failed", code: "PLANNING_STALE_RUN_RECOVERED", httpStatus: 409 },
   PLANNING_CONTEXT_CHANGED: { terminalStatus: "conflicted", code: "PLANNING_CONTEXT_CHANGED", httpStatus: 409 },
   PLANNING_CONCURRENT_UPDATE: { terminalStatus: "conflicted", code: "PLANNING_CONCURRENT_UPDATE", httpStatus: 409 },
+  PLANNING_STALE_UPSTREAM: { terminalStatus: "conflicted", code: "PLANNING_STALE_UPSTREAM", httpStatus: 409 },
   PLANNING_AUTHORIZATION_CHANGED: { terminalStatus: "cancelled", code: "PLANNING_RUN_CANCELLED", httpStatus: 409 },
 } satisfies Readonly<Record<RequirementsRunPersistedFailureCode, ReplayMapping>>);
 
@@ -165,6 +166,7 @@ function classifyFinalizationError(error: unknown, persistenceMessage: string): 
     switch (error.code) {
       case "PLANNING_CONTEXT_CHANGED":
       case "PLANNING_CONCURRENT_UPDATE":
+      case "PLANNING_STALE_UPSTREAM":
         return { action: "conflict", error, failure: persistedFailure(error.code, error) };
       case "PLANNING_PROJECT_NOT_FOUND":
         return {
@@ -285,7 +287,7 @@ export class PlanningGenerationService {
         actorId: input.actorId,
         operation: "INITIAL_GENERATION",
         idempotencyKey: input.idempotencyKey,
-        brief: input.brief,
+        briefConfirmationId: input.briefConfirmationId,
         includeMemory: input.includeMemory === true,
       });
     } catch (error) {
@@ -316,6 +318,7 @@ export class PlanningGenerationService {
         },
         structuredRepair: { instructions: REQUIREMENTS_STRUCTURED_REPAIR_POLICY },
         maxRetries: 1,
+        timeoutMs: 360_000,
         context: { runId: started.run.id, projectId: input.projectId },
       });
     } catch (error) {

@@ -18,6 +18,15 @@ import {
 import { DOCUMENTATION_PHASE } from "./documentation-run-config";
 import { PlanningDomainError } from "./planning-errors";
 import { PlanningDocumentationReadinessService } from "../services/planning-documentation-readiness.service";
+import { AuthorityCurrentnessService } from "../services/authority-currentness.service";
+
+let currentnessServiceInstance: AuthorityCurrentnessService | null = null;
+function getCurrentnessService(): AuthorityCurrentnessService {
+  if (!currentnessServiceInstance) {
+    currentnessServiceInstance = new AuthorityCurrentnessService();
+  }
+  return currentnessServiceInstance;
+}
 
 export const ARCHITECTURE_PHASE = "architecture" as const;
 export const REQUIREMENTS_PHASE = "requirements" as const;
@@ -147,6 +156,9 @@ export async function preflightArchitectureHandoff(
     );
   }
 
+  // Verify Requirements authority currentness against active Live Brief
+  await getCurrentnessService().assertRequirementsCurrentForHandoff(prisma, projectId, reqArtifact);
+
   // 3. Verify Documentation Authority
   const docState = await prisma.projectPhaseState.findUnique({
     where: { projectId_phase: { projectId, phase: DOCUMENTATION_PHASE } },
@@ -229,6 +241,9 @@ export async function preflightArchitectureHandoff(
       { artifactId: docArtifact.id },
     );
   }
+
+  // Verify Documentation authority currentness
+  await getCurrentnessService().assertDocumentationCurrentForHandoff(prisma, projectId, docArtifact);
 
   // 4. Exact Provenance Match Verification
   // Documentation.sourceRequirements must exactly reference the current approved Requirements artifact

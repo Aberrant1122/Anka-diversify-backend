@@ -23,6 +23,7 @@ import {
   PlanningArtifactService,
 } from "../planning-artifact.service";
 import { PlanningAuthorizationService } from "../planning-authorization.service";
+import { seedConfirmedLiveBrief } from "./test-brief-fixtures";
 import { PlanningGenerationService } from "../planning-generation.service";
 import { PlanningApprovalService } from "../planning-approval.service";
 import { PlanningReadinessService } from "../planning-readiness.service";
@@ -196,6 +197,7 @@ async function createProject(member = false): Promise<string> {
     data: { id, name: "Checkpoint 1C-D", description: "Whole-Document Requirements Revision", userId: ownerId },
   });
   if (member) await prisma.projectMember.create({ data: { projectId: id, userId: memberId } });
+  await seedConfirmedLiveBrief(prisma, id, ownerId);
   projectIds.push(id);
   return id;
 }

@@ -65,6 +65,7 @@ app.use(
       "Authorization",
       "X-User-ID",
       "X-User-Name",
+      "Idempotency-Key",
     ],
   }),
 );
@@ -108,6 +109,7 @@ import { WasmASTParserEngine } from "./services/ast-parser.engine";
 import { GitWorktreeService } from "./services/git-worktree.service";
 import { RepositoryCacheManager } from "./services/repository-cache.manager";
 import { TerminalSessionManager } from "./services/terminal-session-manager";
+import { DocumentExtractionService } from "./services/document-extraction.service";
 
 process.on("SIGTERM", () => {
   TerminalSessionManager.getInstance().shutdownAll();
@@ -126,12 +128,19 @@ RepositoryCacheManager.performStartupSweep()
   .then((res) => console.log(`  ✓ Startup sweep completed: ${res.sweptCaches} cache(s), ${res.sweptRuns} run(s), reclaimed ${res.reclaimedBytes} bytes`))
   .catch((err) => console.warn(`[StartupSweep Warning] Startup sweep warning: ${err?.message || err}`));
 
+// Reconcile pending/interrupted document extraction runs on startup
+DocumentExtractionService.reconcileOnStartup()
+  .then((res) => console.log(`  ✓ Document extraction startup reconciliation: ${res.recovered} pending recovered, ${res.markedStale} stale marked failed`))
+  .catch((err) => console.warn(`[DocumentExtraction Warning] Startup reconciliation warning: ${err?.message || err}`));
+
 httpServer.listen(PORT, () => {
   console.log(`🚀 Anka OS Backend server running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🤖 AI API: http://localhost:${PORT}/api/ai`);
 });
 
-httpServer.timeout = 300000; // 5 minutes for long-running AI agent tasks
+httpServer.timeout = 360000; // 6 minutes for long-running AI reasoning model tasks
+httpServer.requestTimeout = 360000;
+httpServer.headersTimeout = 370000;
 httpServer.keepAliveTimeout = 120000; // 2 minutes keep-alive
 export default app;

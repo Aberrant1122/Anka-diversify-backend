@@ -569,7 +569,8 @@ export class PlanningArchitectureRunService {
   }
 
   async finish(projectId: string, runId: string, status: "failed" | "conflicted" | "cancelled",
-    failure: { code: string; message: string }, audit?: ArchitectureRunAudit): Promise<WorkflowRun> {
+    failure: { code: string; message: string; details?: unknown }, audit?: ArchitectureRunAudit): Promise<WorkflowRun> {
+    console.log(`[PlanningArchitectureRun] Finishing run ${runId} with status=${status}, code=${failure.code}: ${failure.message}`);
     return this.prisma.$transaction(async (tx) => {
       const run = await tx.workflowRun.findFirst({ where: { id: runId, projectId,
         currentPhase: ARCHITECTURE_PHASE, operation: { in: ["INITIAL_GENERATION", "DOCUMENT_REVISION", "FEEDBACK_APPLICATION"] } } });
@@ -578,7 +579,7 @@ export class PlanningArchitectureRunService {
       if (run.status !== "running") throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Architecture run is already terminal.", 409);
       const updated = await tx.workflowRun.update({ where: { id: run.id }, data: {
         status, completedAt: new Date(), errorCode: failure.code,
-        errorMessage: canonicalJson({ message: failure.message.slice(0, 8192) }),
+        errorMessage: canonicalJson({ message: failure.message.slice(0, 8192), ...(failure.details !== undefined ? { details: failure.details } : {}) }),
         ...(audit ? { modelUsage: audit.modelUsage, costUSD: audit.costUSD } : {}),
       } });
       await tx.projectPhaseState.updateMany({ where: { projectId, phase: ARCHITECTURE_PHASE, activeRunId: run.id },

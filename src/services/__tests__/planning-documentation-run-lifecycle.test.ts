@@ -8,6 +8,7 @@ import { PlanningArtifactService } from "../planning-artifact.service";
 import { PlanningDocumentationArtifactService } from "../planning-documentation-artifact.service";
 import { PlanningDocumentationGenerationService } from "../planning-documentation-generation.service";
 import { PhaseService } from "../phase-service";
+import { seedConfirmedLiveBrief, seedRequirementsWorkflowRun } from "./test-brief-fixtures";
 
 const databaseUrl = process.env.DATABASE_URL;
 const schema = databaseUrl ? new URL(databaseUrl).searchParams.get("schema") : null;
@@ -56,15 +57,20 @@ function completion(content: DocumentationProviderDraft) {
 async function project(): Promise<string> {
   const id = `docs-run-project-${crypto.randomUUID()}`;
   await prisma.project.create({ data: { id, name: "Documentation run", userId: ownerId } });
+  await seedConfirmedLiveBrief(prisma, id, ownerId);
   projectIds.push(id);
   return id;
 }
 
 async function approveRequirements(projectId: string, label: string) {
   const current = await prisma.projectPhaseState.findUnique({ where: { projectId_phase: { projectId, phase: "requirements" } } });
+  const isInitial = !current?.currentArtifactId;
   const artifact = current?.currentArtifactId
     ? await requirementsArtifacts.createManualRevision({ projectId, actorId: ownerId, baseArtifactId: current.currentArtifactId, baseContentHash: (await prisma.phaseArtifact.findUniqueOrThrow({ where: { id: current.currentArtifactId } })).contentHash!, structuredContent: requirements(label) })
     : await requirementsArtifacts.createInitialArtifact({ projectId, actorId: ownerId, title: "Requirements", structuredContent: requirements(label) });
+  if (isInitial) {
+    await seedRequirementsWorkflowRun(prisma, projectId, artifact.id);
+  }
   await approvals.requestApproval({ projectId, phase: "requirements", artifactId: artifact.id, expectedHash: artifact.contentHash!, actorId: ownerId });
   await approvals.approveArtifact({ projectId, phase: "requirements", artifactId: artifact.id, expectedHash: artifact.contentHash!, actorId: ownerId });
   return artifact;

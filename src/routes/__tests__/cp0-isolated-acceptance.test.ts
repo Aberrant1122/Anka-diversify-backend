@@ -19,6 +19,8 @@ import { assembleDocumentationContent } from "../../planning/documentation-assem
 import { architectureDraft } from "../../planning/__tests__/architecture-test-fixtures";
 import { CodingAgent } from "../../ai/application/CodingAgent";
 import * as uploadService from "../../services/upload.service";
+import { DocumentExtractionService } from "../../services/document-extraction.service";
+import { seedConfirmedLiveBrief, seedRequirementsWorkflowRun } from "../../services/__tests__/test-brief-fixtures";
 
 // Strict safety guard: Fail closed if not running in an isolated planning_checkpoint_* PostgreSQL schema
 const databaseUrl = process.env.DATABASE_URL;
@@ -757,6 +759,125 @@ describe("CP0.5 Reproducible Isolated Authorization Acceptance Suite", () => {
     });
   });
 
+  describe("Project Mutation Role Matrix & Denied Side Effects", () => {
+    test("an unrelated Project A owner cannot mutate Project B or reach S3", async () => {
+      const before = {
+        files: await prisma.projectFile.count({ where: { projectId: projectBId } }),
+        messages: await prisma.projectChatMessage.count({ where: { projectId: projectBId } }),
+        members: await prisma.projectMember.count({ where: { projectId: projectBId } }),
+      };
+      const proposedUserId = `unauthorized-member-${crypto.randomUUID()}`;
+      const cases: Array<[string, string, Record<string, unknown>]> = [
+        ["files", "POST", { name: "unauthorized.txt", uploadedBy: userAId }],
+        ["files/presign", "POST", { filename: "unauthorized.txt", mimetype: "text/plain" }],
+        ["chat", "POST", { content: "unauthorized message" }],
+        ["members", "POST", { userId: proposedUserId }],
+      ];
+      for (const [path, method, body] of cases) {
+        const response = await fetch(`${baseUrl}/api/projects/${projectBId}/${path}`, {
+          method,
+          headers: { Authorization: tokenA, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect({ path, status: response.status }).toEqual({ path, status: 404 });
+      }
+      expect(uploadService.generatePresignedUrl).not.toHaveBeenCalled();
+      expect(await prisma.user.findUnique({ where: { id: proposedUserId } })).toBeNull();
+      expect({
+        files: await prisma.projectFile.count({ where: { projectId: projectBId } }),
+        messages: await prisma.projectChatMessage.count({ where: { projectId: projectBId } }),
+        members: await prisma.projectMember.count({ where: { projectId: projectBId } }),
+      }).toEqual(before);
+    });
+
+    test("a read-only system admin cannot perform edit mutations or external effects", async () => {
+      const retry = jest.spyOn(DocumentExtractionService, "retryExtraction");
+      const beforeFiles = await prisma.projectFile.count({ where: { projectId: projectAId } });
+      const beforeMessages = await prisma.projectChatMessage.count({ where: { projectId: projectAId } });
+      const editCases: Array<[string, string, Record<string, unknown> | undefined]> = [
+        ["files", "POST", { name: "admin-created.txt", uploadedBy: userAdminId }],
+        ["files/presign", "POST", { filename: "admin-upload.txt", mimetype: "text/plain" }],
+        ["files/confirm", "POST", { name: "admin-upload.txt", url: "https://invalid", s3Key: "invalid" }],
+        [`files/${fileAId}`, "DELETE", undefined],
+        [`files/${fileAId}/extraction/retry`, "POST", undefined],
+        ["chat", "POST", { content: "admin mutation" }],
+      ];
+      for (const [path, method, body] of editCases) {
+        const response = await fetch(`${baseUrl}/api/projects/${projectAId}/${path}`, {
+          method,
+          headers: { Authorization: tokenAdmin, ...(body ? { "Content-Type": "application/json" } : {}) },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        expect({ path, status: response.status }).toEqual({ path, status: 404 });
+      }
+      expect(uploadService.generatePresignedUrl).not.toHaveBeenCalled();
+      expect(uploadService.deleteFromS3).not.toHaveBeenCalled();
+      expect(retry).not.toHaveBeenCalled();
+      expect(await prisma.projectFile.count({ where: { projectId: projectAId } })).toBe(beforeFiles);
+      expect(await prisma.projectChatMessage.count({ where: { projectId: projectAId } })).toBe(beforeMessages);
+      expect(await prisma.projectFile.findUnique({ where: { id: fileAId } })).not.toBeNull();
+      retry.mockRestore();
+    });
+
+    test("project members may write files and team chat, with server-owned actor identity", async () => {
+      const key = `projects/${projectAId}/${crypto.randomUUID()}.txt`;
+      const fileUrl = `https://anka-os-documents.s3.ap-south-1.amazonaws.com/${key}`;
+      const confirm = await fetch(`${baseUrl}/api/projects/${projectAId}/files/confirm`, {
+        method: "POST",
+        headers: { Authorization: tokenDual, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "member-note.txt", type: "text/plain", url: fileUrl,
+          s3Key: key, uploadedBy: userAdminId }),
+      });
+      expect(confirm.status).toBe(201);
+      const confirmed = (await confirm.json()) as { data: { id: string; uploadedBy: string } };
+      expect(confirmed.data.uploadedBy).toBe(userDualId);
+
+      const chat = await fetch(`${baseUrl}/api/projects/${projectAId}/chat`, {
+        method: "POST",
+        headers: { Authorization: tokenDual, "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "member-authorized message" }),
+      });
+      expect(chat.status).toBe(201);
+      const message = (await chat.json()) as { data: { id: string; userId: string } };
+      expect(message.data.userId).toBe(userDualId);
+
+      const deletion = await fetch(`${baseUrl}/api/projects/${projectAId}/files/${confirmed.data.id}`, {
+        method: "DELETE", headers: { Authorization: tokenDual },
+      });
+      expect(deletion.status).toBe(200);
+      await prisma.projectChatMessage.delete({ where: { id: message.data.id } });
+    });
+
+    test("only the owner may add or remove project members", async () => {
+      const deniedAdd = await fetch(`${baseUrl}/api/projects/${projectAId}/members`, {
+        method: "POST", headers: { Authorization: tokenDual, "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: userBId }),
+      });
+      expect(deniedAdd.status).toBe(403);
+      expect(await prisma.projectMember.findUnique({
+        where: { projectId_userId: { projectId: projectAId, userId: userBId } },
+      })).toBeNull();
+
+      const deniedRemove = await fetch(`${baseUrl}/api/projects/${projectAId}/members/${userDualId}`, {
+        method: "DELETE", headers: { Authorization: tokenDual },
+      });
+      expect(deniedRemove.status).toBe(403);
+      expect(await prisma.projectMember.findUnique({
+        where: { projectId_userId: { projectId: projectAId, userId: userDualId } },
+      })).not.toBeNull();
+
+      const added = await fetch(`${baseUrl}/api/projects/${projectAId}/members`, {
+        method: "POST", headers: { Authorization: tokenA, "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: userBId }),
+      });
+      expect(added.status).toBe(201);
+      const removed = await fetch(`${baseUrl}/api/projects/${projectAId}/members/${userBId}`, {
+        method: "DELETE", headers: { Authorization: tokenA },
+      });
+      expect(removed.status).toBe(200);
+    });
+  });
+
   // ────────────────────────────────────────────────────────────────────────────
   // 3. NESTED RESOURCE BINDING (Dual User Cross-Project Substitution)
   // ────────────────────────────────────────────────────────────────────────────
@@ -801,6 +922,9 @@ describe("CP0.5 Reproducible Isolated Authorization Acceptance Suite", () => {
       path: () => string;
       body?: () => Record<string, unknown>;
     }> = [
+      { entry: "file extraction metadata", method: "GET", path: () => `/api/projects/${projectAId}/files/${fileBId}/extraction` },
+      { entry: "file extraction evidence", method: "GET", path: () => `/api/projects/${projectAId}/files/${fileBId}/evidence` },
+      { entry: "file extraction retry", method: "POST", path: () => `/api/projects/${projectAId}/files/${fileBId}/extraction/retry` },
       { entry: "task delete", method: "DELETE", path: () => `/api/projects/${projectAId}/tasks/${taskBId}` },
       { entry: "task comments list", method: "GET", path: () => `/api/projects/${projectAId}/tasks/${taskBId}/comments` },
       { entry: "task comments create", method: "POST", path: () => `/api/projects/${projectAId}/tasks/${taskBId}/comments`, body: () => ({ content: "foreign comment" }) },
@@ -834,13 +958,13 @@ describe("CP0.5 Reproducible Isolated Authorization Acceptance Suite", () => {
       expect(response.status).toBe(404);
     });
 
-    test("member removal uses the route project and cannot remove a member of B", async () => {
+    test("member removal stops at the owner gate and cannot remove a member of B", async () => {
       await prisma.projectMember.create({ data: { projectId: projectBId, userId: userAId } });
       try {
         const response = await fetch(`${baseUrl}/api/projects/${projectAId}/members/${userAId}`, {
           method: "DELETE", headers: { Authorization: tokenDual },
         });
-        expect(response.status).toBe(404);
+        expect(response.status).toBe(403);
         expect(await prisma.projectMember.findUnique({
           where: { projectId_userId: { projectId: projectBId, userId: userAId } },
         })).not.toBeNull();
@@ -931,7 +1055,7 @@ describe("CP0.5 Reproducible Isolated Authorization Acceptance Suite", () => {
 
     test("Task Checklist Item: Dual User calling Project A route with Project B checklist item is denied (404)", async () => {
       const res = await fetch(`${baseUrl}/api/projects/${projectAId}/tasks/${taskAId}/checklist/${itemBId}`, {
-        method: "PUT",
+        method: "PATCH",
         headers: { Authorization: tokenDual, "Content-Type": "application/json" },
         body: JSON.stringify({ checked: true }),
       });
@@ -957,7 +1081,9 @@ describe("CP0.5 Reproducible Isolated Authorization Acceptance Suite", () => {
 
     test("Project Repository: Dual User calling Project A route with Project B repository is denied (404)", async () => {
       const res = await fetch(`${baseUrl}/api/projects/${projectAId}/repositories/${repoBId}`, {
-        headers: { Authorization: tokenDual },
+        method: "PUT",
+        headers: { Authorization: tokenDual, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "foreign repository" }),
       });
       expect(res.status).toBe(404);
     });
@@ -1242,11 +1368,13 @@ describe("CP0.5 Reproducible Isolated Authorization Acceptance Suite", () => {
       await prisma.project.create({ data: { id: authorizedProjectId, name: "Approved A", userId: userAId } });
       await prisma.projectMember.create({ data: { projectId: authorizedProjectId, userId: userDualId } });
       await prisma.projectMember.create({ data: { projectId: projectBId, userId: userAId } });
+      await seedConfirmedLiveBrief(prisma, authorizedProjectId, userAId);
       const requirements = authorityRequirements();
       const approvals = new PlanningApprovalService(prisma);
       const requirementArtifact = await new PlanningArtifactService(prisma).createInitialArtifact({
         projectId: authorizedProjectId, actorId: userAId, title: "Requirements", structuredContent: requirements,
       });
+      await seedRequirementsWorkflowRun(prisma, authorizedProjectId, requirementArtifact.id);
       const reqHash = requirementArtifact.contentHash!;
       await approvals.requestApproval({ projectId: authorizedProjectId, phase: "requirements",
         artifactId: requirementArtifact.id, expectedHash: reqHash, actorId: userAId });

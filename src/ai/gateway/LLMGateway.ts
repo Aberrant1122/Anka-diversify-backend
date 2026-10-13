@@ -33,7 +33,7 @@ import { getActiveTaskRuntimeScope } from "../runtime/TaskRuntimeScope";
 export const MAX_GATEWAY_RETRIES = 5;
 export const DEFAULT_GATEWAY_RETRIES = 2;
 export const DEFAULT_GATEWAY_TIMEOUT_MS = 60000;
-export const MAX_GATEWAY_TIMEOUT_MS = 120000;
+export const MAX_GATEWAY_TIMEOUT_MS = 360000;
 export const DEFAULT_GATEWAY_RETRY_DELAY_MS = 250;
 export const MAX_GATEWAY_RETRY_DELAY_MS = 10000;
 
@@ -241,9 +241,10 @@ export class LLMGateway {
       0,
       Math.min(MAX_GATEWAY_RETRIES, route.maxRetries)
     );
+    const defaultTimeout = route.tier === "REASONING" ? 360000 : DEFAULT_GATEWAY_TIMEOUT_MS;
     const timeoutMs = normalizeBoundedInteger(
       options.timeoutMs,
-      DEFAULT_GATEWAY_TIMEOUT_MS,
+      defaultTimeout,
       1,
       MAX_GATEWAY_TIMEOUT_MS
     );
@@ -342,6 +343,8 @@ export class LLMGateway {
         const attemptKind = nextAttemptKind;
         const attemptsBeforeCall = providerAttempts.length;
 
+        console.log(`[LLMGateway] Invoking ${model} for stage ${stage} (attempt ${attempt}/${maxRetries + 1}, reasoningEffort: ${route.reasoningEffort ?? "none"}, timeout: ${timeoutMs}ms, maxTokens: ${maxTokens})`);
+
         try {
           const result = await this.executeSingleAttempt<T>(
             client,
@@ -360,6 +363,7 @@ export class LLMGateway {
             maxTokens,
             (providerAttempt) => providerAttempts.push(providerAttempt),
           );
+          console.log(`[LLMGateway] Success for ${model} on stage ${stage} (latency: ${Date.now() - startTime}ms)`);
           this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
           return {
             ...result,
@@ -399,6 +403,7 @@ export class LLMGateway {
           }
           lastError = this.normalizeError(err, stage, model, attempt, maxRetries)
             .attachProviderAttempts(providerAttempts);
+          console.error(`[LLMGateway] Attempt ${attempt}/${maxRetries + 1} failed for ${model} on stage ${stage} in ${Date.now() - startTime}ms: ${lastError.code} - ${lastError.message}`);
           this.telemetry.emit("llm.latency", telemetryContext, Date.now() - startTime);
           this.recordErrorTelemetry(lastError, telemetryContext);
 
@@ -570,6 +575,7 @@ export class LLMGateway {
 
       const response = await client.chat.completions.create(requestPayload, {
         signal: controller.signal,
+        timeout: timeoutMs,
         // The gateway owns retry accounting. Disable hidden SDK retries so one
         // gateway attempt always corresponds to one provider request attempt.
         maxRetries: 0,
@@ -895,18 +901,36 @@ export class LLMGateway {
     const errorMessage = typeof err?.message === "string" ? err.message : "";
     const lowerMessage = errorMessage.toLowerCase();
 
-    // SDK connection timeouts and gateway-triggered aborts are timeouts.
+    // SDK connection timeouts, provider timeouts, gateway-triggered aborts, and cancellations.
+    const isSdkConnectionTimeout =
+      err instanceof APIConnectionTimeoutError || errorName === "APIConnectionTimeoutError";
+    const isUserAbort = err instanceof APIUserAbortError || errorName === "APIUserAbortError";
+    const is504ProviderTimeout =
+      err?.status === 504 || lowerMessage.includes("504 gateway time-out") || lowerMessage.includes("504 gateway timeout");
+
     if (
-      err instanceof APIConnectionTimeoutError ||
-      err instanceof APIUserAbortError ||
-      errorName === "APIConnectionTimeoutError" ||
-      errorName === "APIUserAbortError" ||
+      isSdkConnectionTimeout ||
+      isUserAbort ||
+      is504ProviderTimeout ||
       errorName === "AbortError" ||
       lowerMessage.includes("aborted") ||
       lowerMessage.includes("timed out") ||
       lowerMessage.includes("timeout")
     ) {
-      return new LLMTimeoutError(`LLM call timed out: ${err.message}`, details, err);
+      let timeoutKind: "transport_timeout" | "gateway_timeout" | "provider_timeout" | "cancellation" = "gateway_timeout";
+      if (is504ProviderTimeout) {
+        timeoutKind = "provider_timeout";
+      } else if (
+        isSdkConnectionTimeout ||
+        errorCode === "ETIMEDOUT" ||
+        lowerMessage.includes("connecttimeout") ||
+        lowerMessage.includes("headerstimeout")
+      ) {
+        timeoutKind = "transport_timeout";
+      } else if (isUserAbort && !lowerMessage.includes("timed out") && !lowerMessage.includes("timeout")) {
+        timeoutKind = "cancellation";
+      }
+      return new LLMTimeoutError(`LLM call timed out: ${err.message}`, { ...details, timeoutKind }, err);
     }
 
     // Rate limit detection

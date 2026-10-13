@@ -2,6 +2,7 @@ import {
   assembleDocumentationContent,
   collectDocumentationGraphIssues,
   deriveDocumentationRequirementsTraceability,
+  healDocumentationDraft,
   normalizeDocumentationProviderDraft,
 } from "../documentation-assembly";
 import { DocumentationProviderDraft, DocumentationValidationError } from "../documentation-schema";
@@ -134,5 +135,75 @@ describe("Documentation assembly", () => {
     const input = valid(); input.apiContracts.items[0].sourceRequirementIds = [];
     const trace = deriveDocumentationRequirementsTraceability(input, upstream());
     expect(trace.find(({ requirementId }) => requirementId === "NFR-1")).toEqual(expect.objectContaining({ coverageStatus: "uncovered" }));
+  });
+
+  describe("healDocumentationDraft", () => {
+    test("heals uncovered upstream functional requirements, bidirectional API-error links, missing HTTP status, and coverage omissions", () => {
+      const up = upstream();
+      up.functionalRequirements.push({ id: "FR-2", title: "Second Task", description: "Do task 2" });
+      const raw = valid();
+      // Introduce imperfections that LLMs commonly produce:
+      raw.features[0].sourceRequirementIds = ["FR-1"]; // missing FR-2
+      raw.features.push({
+        id: "F-EXTRA",
+        title: "Extra Feature",
+        description: "Extra",
+        workflowSteps: ["step"],
+        actorIds: ["A"],
+        access: "controlled",
+        sourceRequirementIds: [],
+        sourceUserStoryIds: [],
+      }); // missing error behavior, edge case, and permission rule coverage
+      raw.apiContracts.items[0].errorBehaviorIds = ["ERR"];
+      raw.errorBehaviors[0].relatedApiContractIds = []; // inconsistent reverse link
+      raw.errorBehaviors[0].httpStatus = undefined; // missing required httpStatus for HTTP API
+      delete raw.errorBehaviors[0].httpStatus;
+
+      // Before healing, multiple graph issues exist:
+      const issuesBefore = collectDocumentationGraphIssues(raw, up);
+      expect(issuesBefore.length).toBeGreaterThan(0);
+
+      // Heal the draft:
+      const healed = healDocumentationDraft(raw, up);
+      const issuesAfter = collectDocumentationGraphIssues(healed, up);
+      expect(issuesAfter).toEqual([]);
+
+      // Verify healed properties:
+      const allCoveredFrs = healed.features.flatMap((f) => f.sourceRequirementIds);
+      expect(allCoveredFrs).toContain("FR-2");
+      expect(healed.errorBehaviors[0].relatedApiContractIds).toContain(healed.apiContracts.items[0].id);
+      expect(healed.errorBehaviors[0].httpStatus).toBe(400);
+      expect(healed.errorBehaviors.some((e) => e.relatedFeatureIds.includes("F-EXTRA"))).toBe(true);
+      expect(healed.edgeCases.some((e) => e.relatedFeatureIds.includes("F-EXTRA"))).toBe(true);
+      expect(healed.permissionRules.items.some((p) => p.relatedFeatureIds.includes("F-EXTRA"))).toBe(true);
+
+      // assembleDocumentationContent successfully finishes and derives traceability
+      const assembled = assembleDocumentationContent(raw, { artifactId: "REQ", version: 1, contentHash: hashRequirementsContent(up) }, up);
+      expect(assembled.requirementsTraceability.find((r) => r.requirementId === "FR-2")?.coverageStatus).toBe("covered");
+    });
+
+    test("clears HTTP status when error behavior has no HTTP APIs and fixes dangling references", () => {
+      const up = upstream();
+      const raw = valid();
+      raw.errorBehaviors.push({
+        id: "ERR-NON-API",
+        code: "INTERNAL_BACKGROUND_FAIL",
+        scenario: "Background job failure",
+        expectedSystemBehavior: "Log failure",
+        recoveryBehavior: "Retry later",
+        relatedFeatureIds: ["F"],
+        relatedApiContractIds: [],
+        httpStatus: 500, // should be stripped because not related to HTTP API
+      });
+      raw.features[0].sourceRequirementIds.push("NON_EXISTENT_FR");
+      raw.features[0].sourceUserStoryIds.push("NON_EXISTENT_US");
+
+      const healed = healDocumentationDraft(raw, up);
+      const nonApiErr = healed.errorBehaviors.find((e) => e.code.includes("INTERNAL_BACKGROUND_FAIL"));
+      expect(nonApiErr?.httpStatus).toBeUndefined();
+      expect(healed.features[0].sourceRequirementIds).not.toContain("NON_EXISTENT_FR");
+      expect(healed.features[0].sourceUserStoryIds).not.toContain("NON_EXISTENT_US");
+      expect(collectDocumentationGraphIssues(healed, up)).toEqual([]);
+    });
   });
 });

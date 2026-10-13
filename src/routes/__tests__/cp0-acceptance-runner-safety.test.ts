@@ -3,7 +3,7 @@ import { spawnSync } from "child_process";
 
 type TestPrisma = { $executeRawUnsafe: (sql: string) => Promise<unknown> };
 type Runner = {
-  validateSafeTestDatabase: (value?: string) => URL;
+  validateSafeTestDatabase: (value?: string, appDatabaseUrl?: string) => URL;
   assertSafeSchema: (value: string) => string;
   sanitizeOutput: (value: string, url: URL) => string;
   runSuiteWithIsolatedSchema: (
@@ -13,7 +13,7 @@ type Runner = {
 };
 
 const runner: Runner = require(path.resolve(__dirname, "../../../scripts/run-cp0-acceptance.js"));
-const safeUrl = () => runner.validateSafeTestDatabase("postgresql://test-user:test-password@localhost:5432/cp0_test");
+const safeUrl = () => runner.validateSafeTestDatabase("postgresql://test-user:test-password@localhost:5432/cp0_test", "postgresql://test-user:test-password@localhost:5432/app_db");
 
 describe("CP0 acceptance runner safety", () => {
   test("CLI fails closed without the explicit URL even when DATABASE_URL exists", () => {
@@ -37,6 +37,22 @@ describe("CP0 acceptance runner safety", () => {
     expect(result.stderr).toContain("requires local PostgreSQL");
     expect(result.stderr).not.toContain("sentinel-password");
     expect(result.stdout).not.toContain("Applying migrations");
+  });
+
+  test("rejects identity collision when CP0_TEST_DATABASE_URL points to the application database", () => {
+    const appDbUrl = "postgresql://postgres:secret@localhost:5432/anka-diversity-os";
+    const collidingTestUrl = "postgresql://postgres:secret@localhost:5432/anka-diversity-os";
+    expect(() => runner.validateSafeTestDatabase(collidingTestUrl, appDbUrl))
+      .toThrow("CP0 acceptance rejects database identity collision with application database");
+
+    // Case-insensitive database name comparison
+    const collidingUpperCase = "postgresql://postgres:secret@localhost:5432/ANKA-DIVERSITY-OS";
+    expect(() => runner.validateSafeTestDatabase(collidingUpperCase, appDbUrl))
+      .toThrow("CP0 acceptance rejects database identity collision with application database");
+
+    // Safe distinct database passes
+    const distinctTestUrl = "postgresql://postgres:secret@localhost:5432/anka_cp3_verify_test";
+    expect(() => runner.validateSafeTestDatabase(distinctTestUrl, appDbUrl)).not.toThrow();
   });
 
   test("requires an explicit test URL and rejects remote, production-like, and malformed URLs", () => {

@@ -33,6 +33,7 @@ import {
   RequirementsContent,
 } from "../planning/requirements-schema";
 import { PlanningAuthorizationService } from "./planning-authorization.service";
+import { AuthorityCurrentnessService } from "./authority-currentness.service";
 
 export const DOCUMENTATION_PHASE = "documentation" as const;
 
@@ -87,12 +88,15 @@ function isRetryableTransactionError(error: unknown): boolean {
 
 export class PlanningDocumentationArtifactService {
   private readonly authorization: PlanningAuthorizationService;
+  private readonly currentnessService: AuthorityCurrentnessService;
 
   constructor(
     private readonly prisma: PrismaClient,
     authorization?: PlanningAuthorizationService,
+    currentnessService?: AuthorityCurrentnessService,
   ) {
     this.authorization = authorization ?? new PlanningAuthorizationService(prisma);
+    this.currentnessService = currentnessService ?? new AuthorityCurrentnessService(prisma);
   }
 
   async createInitialArtifact(input: CreateInitialDocumentationArtifactInput): Promise<PhaseArtifact> {
@@ -321,6 +325,10 @@ export class PlanningDocumentationArtifactService {
       || !artifact.approvedAt
       || (requireCurrent && state.currentApprovedArtifactId !== artifact.id)) {
       this.invalidArtifact("The Documentation source Requirements authority is invalid.");
+    }
+
+    if (requireCurrent) {
+      await this.currentnessService.assertRequirementsCurrentForHandoff(tx, projectId, artifact);
     }
 
     const requirements = parseRequirementsContent(artifact.structuredContent);

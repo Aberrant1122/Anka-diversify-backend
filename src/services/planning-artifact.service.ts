@@ -21,6 +21,7 @@ import {
 } from "../planning/requirements-schema";
 import { PlanningAuthorizationService } from "./planning-authorization.service";
 import { PlanningTransitionPolicy } from "./planning-transition-policy";
+import { AuthorityCurrentnessService } from "./authority-currentness.service";
 
 const MAX_TRANSACTION_ATTEMPTS = 3;
 
@@ -52,14 +53,17 @@ function isRetryableTransactionError(error: unknown): boolean {
 export class PlanningArtifactService {
   private readonly authorization: PlanningAuthorizationService;
   private readonly transitions: PlanningTransitionPolicy;
+  private readonly currentnessService: AuthorityCurrentnessService;
 
   constructor(
     private readonly prisma: PrismaClient,
     authorization?: PlanningAuthorizationService,
     transitions?: PlanningTransitionPolicy,
+    currentnessService?: AuthorityCurrentnessService,
   ) {
     this.authorization = authorization ?? new PlanningAuthorizationService(prisma);
     this.transitions = transitions ?? new PlanningTransitionPolicy();
+    this.currentnessService = currentnessService ?? new AuthorityCurrentnessService(prisma);
   }
 
   async createInitialArtifact(input: CreateInitialRequirementsArtifactInput): Promise<PhaseArtifact> {
@@ -98,34 +102,66 @@ export class PlanningArtifactService {
       update: {},
       create: { projectId: input.projectId, phase: REQUIREMENTS_PHASE },
     });
-    this.transitions.assertAction(state.status, "create_initial_artifact");
-    this.transitions.assertTransition(state.status, "in_progress");
 
-    const existing = await tx.phaseArtifact.findFirst({
+    const intakeState = await tx.projectIntakeState.findUnique({
+      where: { projectId: input.projectId },
+      include: {
+        currentConfirmation: { include: { briefRevision: true } },
+      },
+    });
+    const activeConf = intakeState?.currentConfirmation;
+    if (!activeConf || activeConf.status !== "ACTIVE" || intakeState?.currentConfirmationId !== activeConf.id) {
+      throw new PlanningDomainError(
+        "PLANNING_BRIEF_REQUIRED",
+        "An active confirmed Live Brief is required before creating Requirements artifacts.",
+        422,
+      );
+    }
+
+    const latest = await tx.phaseArtifact.findFirst({
       where: {
         projectId: input.projectId,
         phase: REQUIREMENTS_PHASE,
         type: REQUIREMENTS_ARTIFACT_TYPE,
       },
-      select: { id: true },
+      orderBy: [{ version: "desc" }, { id: "desc" }],
     });
-    if (existing) {
-      throw new PlanningDomainError(
-        "PLANNING_INITIAL_ARTIFACT_EXISTS",
-        "Requirements already has an initial artifact; create a successor version instead.",
-        409,
-        { currentArtifactId: state.currentArtifactId ?? existing.id },
+
+    let isRecovery = false;
+    if (latest) {
+      const currentness = await this.currentnessService.getRequirementsArtifactCurrentness(
+        tx,
+        input.projectId,
+        latest,
       );
+      if (!currentness.isStale) {
+        throw new PlanningDomainError(
+          "PLANNING_INITIAL_ARTIFACT_EXISTS",
+          "Requirements already has an initial artifact; create a successor version instead.",
+          409,
+          { currentArtifactId: state.currentArtifactId ?? latest.id },
+        );
+      }
+      isRecovery = true;
     }
+
+    if (!isRecovery) {
+      this.transitions.assertAction(state.status, "create_initial_artifact");
+      this.transitions.assertTransition(state.status, "in_progress");
+    }
+
+    const version = latest ? latest.version + 1 : 1;
+    const previousVersionId = latest ? latest.id : null;
+    const title = input.title || `Requirements v${version}`;
 
     const artifact = await this.createVersion(tx, {
       projectId: input.projectId,
       actorId: input.actorId,
-      title: input.title,
+      title,
       content,
-      version: 1,
-      previousVersionId: null,
-      basedOnArtifactId: null,
+      version,
+      previousVersionId,
+      basedOnArtifactId: previousVersionId,
       createdByType: input.createdByType ?? ArtifactActorType.HUMAN,
       changeKind: input.changeKind ?? ArtifactChangeKind.INITIAL_GENERATION,
     });
@@ -185,6 +221,7 @@ export class PlanningArtifactService {
 
     const base = await tx.phaseArtifact.findUnique({ where: { id: input.baseArtifactId } });
     this.assertRequirementsArtifact(base, input.projectId);
+    await this.currentnessService.assertRequirementsCurrentForHandoff(tx, input.projectId, base);
     if (state.currentArtifactId !== base.id) {
       throw new PlanningDomainError(
         "PLANNING_ARTIFACT_BASE_CHANGED",

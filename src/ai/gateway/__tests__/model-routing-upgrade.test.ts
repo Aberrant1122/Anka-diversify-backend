@@ -18,10 +18,16 @@ function success(content: string) {
 
 describe("task-appropriate production model routing", () => {
   const originalArchitectureModel = process.env.OPENAI_ARCHITECTURE_MODEL;
+  const originalArchRevEffort = process.env.OPENAI_ARCHITECTURE_REVISION_REASONING_EFFORT;
+  const originalArchGenEffort = process.env.OPENAI_ARCHITECTURE_GENERATION_REASONING_EFFORT;
 
   afterEach(() => {
     if (originalArchitectureModel === undefined) delete process.env.OPENAI_ARCHITECTURE_MODEL;
     else process.env.OPENAI_ARCHITECTURE_MODEL = originalArchitectureModel;
+    if (originalArchRevEffort === undefined) delete process.env.OPENAI_ARCHITECTURE_REVISION_REASONING_EFFORT;
+    else process.env.OPENAI_ARCHITECTURE_REVISION_REASONING_EFFORT = originalArchRevEffort;
+    if (originalArchGenEffort === undefined) delete process.env.OPENAI_ARCHITECTURE_GENERATION_REASONING_EFFORT;
+    else process.env.OPENAI_ARCHITECTURE_GENERATION_REASONING_EFFORT = originalArchGenEffort;
   });
 
   test("selects the exact model and reasoning effort for every existing target operation", () => {
@@ -30,8 +36,8 @@ describe("task-appropriate production model routing", () => {
     const cases = [
       [PipelineStages.REQUIREMENTS_GENERATION, "gpt-6.1-sol", "high"],
       [PipelineStages.REQUIREMENTS_REVISION, "gpt-6.1-sol", "medium"],
-      [PipelineStages.DOCUMENTATION_GENERATION, "gpt-6.1-sol", "medium"],
-      [PipelineStages.DOCUMENTATION_REVISION, "gpt-6.1-sol", "medium"],
+      [PipelineStages.DOCUMENTATION_GENERATION, "gpt-6.1-sol", "low"],
+      [PipelineStages.DOCUMENTATION_REVISION, "gpt-6.1-sol", "low"],
       [PipelineStages.ARCHITECTURE_GENERATION, "gpt-6-astra", "high"],
       [PipelineStages.ARCHITECTURE_REVISION, "gpt-6-astra", "high"],
       [PipelineStages.IMPLEMENTATION_PLANNING, "gpt-6.1-sol", "high"],
@@ -60,6 +66,33 @@ describe("task-appropriate production model routing", () => {
 
     process.env.OPENAI_ARCHITECTURE_MODEL = "gpt-4o";
     expect(() => new ModelRouter()).toThrow(/Unsupported Architecture model configuration/);
+  });
+
+  test("Architecture supports configurable reasoning effort for revision while keeping generation high by default", () => {
+    delete process.env.OPENAI_ARCHITECTURE_MODEL;
+    delete process.env.OPENAI_ARCHITECTURE_REVISION_REASONING_EFFORT;
+    delete process.env.OPENAI_ARCHITECTURE_GENERATION_REASONING_EFFORT;
+
+    // Default: both high
+    const defaultRouter = new ModelRouter();
+    expect(defaultRouter.route(PipelineStages.ARCHITECTURE_GENERATION).reasoningEffort).toBe("high");
+    expect(defaultRouter.route(PipelineStages.ARCHITECTURE_REVISION).reasoningEffort).toBe("high");
+
+    // Configured via config object
+    const configuredRouter = new ModelRouter({ architectureRevisionReasoningEffort: "medium" });
+    expect(configuredRouter.route(PipelineStages.ARCHITECTURE_GENERATION).reasoningEffort).toBe("high");
+    expect(configuredRouter.route(PipelineStages.ARCHITECTURE_REVISION).reasoningEffort).toBe("medium");
+
+    // Configured via environment variable
+    process.env.OPENAI_ARCHITECTURE_REVISION_REASONING_EFFORT = "medium";
+    const envRouter = new ModelRouter();
+    expect(envRouter.route(PipelineStages.ARCHITECTURE_REVISION).reasoningEffort).toBe("medium");
+    expect(envRouter.route(PipelineStages.ARCHITECTURE_GENERATION).reasoningEffort).toBe("high");
+
+    // Validates allowed values (invalid value falls back to fallback)
+    process.env.OPENAI_ARCHITECTURE_REVISION_REASONING_EFFORT = "invalid_effort";
+    const invalidRouter = new ModelRouter();
+    expect(invalidRouter.route(PipelineStages.ARCHITECTURE_REVISION).reasoningEffort).toBe("high");
   });
 
   test("uses reasoning-compatible Chat Completions parameters and records the immutable route", async () => {

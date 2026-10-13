@@ -87,6 +87,17 @@ model Project {
   architectureDriftRecords ArchitectureDriftRecord[]
   fileReservations FileReservation[]
   implementationTaskExecutions ImplementationTaskExecution[]
+  documentSources              DocumentSource[]
+  documentRegistrationAttempts DocumentRegistrationAttempt[]
+  documentExtractionRuns       DocumentExtractionRun[]
+  evidenceSpans                EvidenceSpan[]
+  intakeState                  ProjectIntakeState?
+  claims                       ProjectClaim[]
+  clarificationQuestions       ProjectClarificationQuestion[]
+  contradictions               ProjectContradiction[]
+  liveBriefRevisions           LiveBriefRevision[]
+  liveBriefConfirmations       LiveBriefConfirmation[]
+  intakeRequests               ProjectIntakeRequest[]
 
   @@map("projects")
 }
@@ -176,6 +187,7 @@ model AiChatSession {
   user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   project  Project?        @relation(fields: [projectId], references: [id], onDelete: Cascade)
   messages AiChatMessage[]
+  intakeRequests ProjectIntakeRequest[]
 
   @@map("ai_chat_sessions")
 }
@@ -462,12 +474,15 @@ model ProjectFile {
   phase      String   @default("development") // 'product-modeling', 'development', 'marketing'
   url        String?
   s3Key      String?
+  confirmedUploadKey String? @unique
   size       String?
   uploadedBy String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  documentSource DocumentSource?
+  documentRegistrationAttempts DocumentRegistrationAttempt[]
 
   @@map("project_files")
 }
@@ -926,4 +941,330 @@ model ClarificationQA {
 
   @@index([taskId, resolved])
   @@map("clarification_qas")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOCUMENT EVIDENCE FOUNDATION (CP1.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum DocumentExtractionStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum DocumentRegistrationStatus {
+  PROCESSING
+  FAILED
+  REGISTERED
+}
+
+model DocumentRegistrationAttempt {
+  id            String                     @id @default(cuid())
+  projectId     String
+  projectFileId String
+  attempt       Int
+  status        DocumentRegistrationStatus @default(PROCESSING)
+  errorCode     String?
+  errorMessage  String?
+  createdAt     DateTime                   @default(now())
+  completedAt   DateTime?
+
+  project     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectFile ProjectFile @relation(fields: [projectFileId], references: [id], onDelete: Cascade)
+
+  @@unique([projectFileId, attempt])
+  @@index([projectId])
+  @@map("document_registration_attempts")
+}
+
+enum EvidenceLocatorType {
+  PDF_PAGE
+  DOCX_PARAGRAPH
+}
+
+model DocumentSource {
+  id               String   @id @default(cuid())
+  projectId        String
+  projectFileId    String   @unique
+  sourceVersion    Int      @default(1)
+  originalFilename String
+  mimeType         String
+  s3Key            String
+  byteSize         Int
+  contentHash      String
+  createdAt        DateTime @default(now())
+
+  project        Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectFile    ProjectFile             @relation(fields: [projectFileId], references: [id], onDelete: Cascade)
+  extractionRuns DocumentExtractionRun[]
+  evidenceSpans  EvidenceSpan[]
+
+  @@index([projectId])
+  @@map("document_sources")
+}
+
+model DocumentExtractionRun {
+  id           String                   @id @default(cuid())
+  projectId    String
+  sourceId     String
+  attempt      Int
+  status       DocumentExtractionStatus @default(PENDING)
+  parser       String
+  errorCode    String?
+  errorMessage String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime                 @default(now())
+
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  source        DocumentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  evidenceSpans EvidenceSpan[]
+
+  @@unique([sourceId, attempt])
+  @@index([projectId])
+  @@index([sourceId])
+  @@map("document_extraction_runs")
+}
+
+model EvidenceSpan {
+  id              String              @id @default(cuid())
+  projectId       String
+  sourceId        String
+  extractionRunId String
+  ordinal         Int
+  locatorType     EvidenceLocatorType
+  pageNumber      Int?
+  paragraphNumber Int?
+  startOffset     Int?
+  endOffset       Int?
+  text            String              @db.Text
+  textHash        String
+  createdAt       DateTime            @default(now())
+
+  project       Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  source        DocumentSource        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  extractionRun DocumentExtractionRun @relation(fields: [extractionRunId], references: [id], onDelete: Cascade)
+
+  @@unique([extractionRunId, ordinal])
+  @@index([projectId])
+  @@index([sourceId])
+  @@index([extractionRunId])
+  @@map("evidence_spans")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CP2: Collaborative Live Brief & Requirements Intake Data Foundation
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum IntakeStateStatus {
+  EMPTY
+  EXPLORING
+  READY_FOR_CONFIRMATION
+  CONFIRMED
+}
+
+enum ClaimCategory {
+  GOAL
+  USER_PERSONA
+  WORKFLOW
+  SCOPE_IN
+  SCOPE_OUT
+  CONSTRAINT
+  ACCEPTANCE_CRITERION
+}
+
+enum ClaimProvenance {
+  DOCUMENT_EVIDENCE
+  USER_STATED
+  MODEL_PROPOSED
+}
+
+enum ClaimStatus {
+  PROPOSED
+  ACCEPTED
+  CONTESTED
+  SUPERSEDED
+  REJECTED
+}
+
+enum QuestionStatus {
+  OPEN
+  ANSWERED
+  DISMISSED
+}
+
+enum ContradictionStatus {
+  ACTIVE
+  RESOLVED
+  DISMISSED
+}
+
+enum BriefRevisionActorType {
+  USER
+  ASSISTANT_CONVERSATION
+  SYSTEM_INITIALIZATION
+}
+
+enum BriefConfirmationStatus {
+  ACTIVE
+  STALE
+}
+
+model ProjectIntakeState {
+  id                     String            @id @default(cuid())
+  projectId              String            @unique
+  status                 IntakeStateStatus @default(EMPTY)
+  currentBriefRevisionId String?
+  currentConfirmationId  String?
+  activeSessionId        String?
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+
+  project              Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  currentBriefRevision LiveBriefRevision?     @relation("IntakeStateCurrentRevision", fields: [currentBriefRevisionId], references: [id], onDelete: SetNull)
+  currentConfirmation  LiveBriefConfirmation? @relation("IntakeStateCurrentConfirmation", fields: [currentConfirmationId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([currentBriefRevisionId])
+  @@index([currentConfirmationId])
+  @@index([activeSessionId])
+  @@map("project_intake_states")
+}
+
+model ProjectIntakeRequest {
+  id         String   @id @default(cuid())
+  projectId  String
+  sessionId  String
+  requestKey String
+  status     String   @default("PROCESSING")
+  response   Json?
+  errorCode  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  project Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  session AiChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, requestKey])
+  @@index([projectId, status])
+  @@index([sessionId])
+  @@map("project_intake_requests")
+}
+
+model ProjectClaim {
+  id             String          @id @default(cuid())
+  projectId      String
+  claimKey       String
+  version        Int             @default(1)
+  category       ClaimCategory
+  title          String
+  content        String          @db.Text
+  provenance     ClaimProvenance
+  status         ClaimStatus     @default(PROPOSED)
+  confidence     Float?
+  sourceSpanIds  String[]        @default([])
+  createdById    String
+  createdByType  String          @default("HUMAN")
+  supersededById String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, claimKey, version])
+  @@index([projectId, status])
+  @@index([projectId, category, status])
+  @@index([projectId, claimKey])
+  @@map("project_claims")
+}
+
+model ProjectClarificationQuestion {
+  id               String         @id @default(cuid())
+  projectId        String
+  category         ClaimCategory  @default(GOAL)
+  question         String         @db.Text
+  suggestedOptions String[]       @default([])
+  status           QuestionStatus @default(OPEN)
+  answer           String?        @db.Text
+  answeredById     String?
+  answeredAt       DateTime?
+  relatedClaimKeys String[]       @default([])
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+  @@index([projectId, category])
+  @@map("project_clarification_questions")
+}
+
+model ProjectContradiction {
+  id             String              @id @default(cuid())
+  projectId      String
+  claimKeyA      String
+  claimKeyB      String
+  description    String              @db.Text
+  status         ContradictionStatus @default(ACTIVE)
+  resolutionNote String?             @db.Text
+  resolvedById   String?
+  resolvedAt     DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+  @@index([projectId, claimKeyA])
+  @@index([projectId, claimKeyB])
+  @@map("project_contradictions")
+}
+
+model LiveBriefRevision {
+  id               String                 @id @default(cuid())
+  projectId        String
+  revisionNumber   Int
+  title            String
+  markdownContent  String                 @db.Text
+  structuredClaims Json
+  evidenceManifest Json
+  contentHash      String
+  changeSummary    String
+  createdById      String
+  createdByType    BriefRevisionActorType
+  createdAt        DateTime               @default(now())
+
+  project                Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  confirmation           LiveBriefConfirmation?
+  currentForIntakeStates ProjectIntakeState[]    @relation("IntakeStateCurrentRevision")
+
+  @@unique([projectId, revisionNumber])
+  @@index([projectId, createdAt])
+  @@index([projectId, contentHash])
+  @@map("live_brief_revisions")
+}
+
+model LiveBriefConfirmation {
+  id                  String                  @id @default(cuid())
+  projectId           String
+  briefRevisionId     String                  @unique
+  briefRevisionNumber Int
+  briefContentHash    String
+  confirmedById       String
+  confirmedAt         DateTime                @default(now())
+  status              BriefConfirmationStatus @default(ACTIVE)
+  notes               String?
+  supersededAt        DateTime?
+  supersededById      String?
+
+  project                Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  briefRevision          LiveBriefRevision    @relation(fields: [briefRevisionId], references: [id], onDelete: Cascade)
+  currentForIntakeStates ProjectIntakeState[] @relation("IntakeStateCurrentConfirmation")
+
+  @@index([projectId, status])
+  @@index([projectId, briefRevisionNumber])
+  @@index([briefRevisionId])
+  @@map("live_brief_confirmations")
 }

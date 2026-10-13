@@ -66,7 +66,7 @@ describe("Checkpoint 2 runtime managers", () => {
         [PipelineStages.MANIFEST_GENERATION, "STANDARD", "standard-model", 8_000],
         [PipelineStages.MANIFEST_CORRECTION, "STANDARD", "standard-model", 8_000],
         [PipelineStages.ROADMAP_PLANNING, "STANDARD", "standard-model", 4_000],
-        [PipelineStages.CODE_GENERATION, "REASONING", "reasoning-model", 12_000],
+        [PipelineStages.CODE_GENERATION, "REASONING", "reasoning-model", 32_000],
         [PipelineStages.CODE_CORRECTION, "REASONING", "reasoning-model", 12_000],
         [PipelineStages.REPAIR, "REASONING", "reasoning-model", 12_000],
         [PipelineStages.STATIC_REVIEW, "STANDARD", "standard-model", 4_000],
@@ -82,7 +82,9 @@ describe("Checkpoint 2 runtime managers", () => {
         expect(decision.contextWindowTokens).toBe(
           decision.maxInputTokens + decision.maxOutputTokens + CONTEXT_SAFETY_RESERVE_TOKENS
         );
-        expect(decision.fallbackModels).toEqual(["fallback-model"]);
+        expect(decision.fallbackModels).toEqual(
+          stage === PipelineStages.CODE_GENERATION ? [] : ["fallback-model"]
+        );
       }
     });
 
@@ -270,9 +272,32 @@ describe("Checkpoint 2 runtime managers", () => {
       ["emoji", "🔒🧪🚀"],
       ["compact source", "const f=(x:number)=>x*x;export{f}"],
       ["JSON", JSON.stringify({ nested: { values: [1, 2, 3], enabled: true } })],
-    ])("uses UTF-8 bytes as a conservative representation for %s", (_label, value) => {
-      expect(estimateTextTokens(value)).toBe(Buffer.byteLength(value, "utf8"));
-      expect(estimateTextTokens(value)).toBeGreaterThanOrEqual(value.length);
+    ])("uses conservative BPE token estimation for %s", (_label, value) => {
+      const estimated = estimateTextTokens(value);
+      expect(estimated).toBeGreaterThan(0);
+      expect(estimated).toBeLessThanOrEqual(Buffer.byteLength(value, "utf8"));
+    });
+
+    test("never underestimates punctuation or JSON delimiters and prevents false overflow rejections", () => {
+      // 1. Punctuation delimiters: exactly 1 token each
+      expect(estimateTextTokens("{}[]:,\"'")).toBe(8);
+
+      // 2. Large JSON artifact does not cause false context overflow
+      const largeArtifact = JSON.stringify({
+        projectGoal: "Build a scalable enterprise platform",
+        functionalRequirements: Array.from({ length: 40 }, (_, i) => ({
+          id: `FR-${String(i + 1).padStart(3, "0")}`,
+          title: `Requirement number ${i + 1} with standard enterprise semantics`,
+          description: "Deliver a reliable, fully authenticated service implementing deterministic validations.",
+        })),
+      });
+      const byteSize = Buffer.byteLength(largeArtifact, "utf8");
+      const estimated = estimateTextTokens(largeArtifact);
+      // Byte size is substantial (> 6,000 bytes)
+      expect(byteSize).toBeGreaterThan(6000);
+      // Token estimate is conservative but significantly more realistic than raw byte size (~0.4 - 0.6 of bytes)
+      expect(estimated).toBeLessThan(byteSize);
+      expect(estimated).toBeGreaterThan(Math.floor(largeArtifact.length / 4));
     });
 
     test("enforces exact input/output/reserve boundary and one unit over", () => {
@@ -371,7 +396,7 @@ describe("Checkpoint 2 runtime managers", () => {
       await expect(gateway.callWithTools({
         stage: PipelineStages.APPLICATION_SUPPORT,
         messages: [{ role: "user", content: "Goal" }],
-        tools: [{ type: "function", function: { name: "huge", description: "x".repeat(40_000), parameters: { type: "object" } } }],
+        tools: [{ type: "function", function: { name: "huge", description: "x".repeat(100_000), parameters: { type: "object" } } }],
         validateToolCall: () => ({ valid: true }),
         openaiClient: clientWithCreate(create),
       })).rejects.toThrow(LLMContextOverflowError);
@@ -379,7 +404,7 @@ describe("Checkpoint 2 runtime managers", () => {
         stage: PipelineStages.APPLICATION_SUPPORT,
         messages: [{ role: "user", content: "Goal" }],
         schema: {
-          name: "HugeSchema", schema: { type: "object", description: "x".repeat(40_000) },
+          name: "HugeSchema", schema: { type: "object", description: "x".repeat(100_000) },
           validate: () => ({ valid: true }),
         },
         openaiClient: clientWithCreate(create),
@@ -447,7 +472,7 @@ describe("Checkpoint 2 runtime managers", () => {
       await expect(gateway.call({
         stage: PipelineStages.APPLICATION_SUPPORT,
         messages: [{ role: "user", content: "Current goal" }],
-        repositoryEvidence: [{ id: "materialized:huge", content: "x".repeat(40_000), required: true }],
+        repositoryEvidence: [{ id: "materialized:huge", content: "x".repeat(100_000), required: true }],
         openaiClient: clientWithCreate(create),
       })).rejects.toThrow(LLMContextOverflowError);
       expect(create).not.toHaveBeenCalled();

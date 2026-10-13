@@ -34,6 +34,13 @@ function initialContext(): InitialRequirementsContextPayload {
     operation: "INITIAL_GENERATION",
     project: { id: "project-1", name: HOSTILE, description: HOSTILE, currentPhase: "requirements" },
     brief: HOSTILE,
+    briefAuthority: {
+      confirmationId: "conf-1",
+      revisionId: "rev-1",
+      revisionNumber: 1,
+      contentHash: "hash-1",
+      evidenceManifest: [],
+    },
     initiator: { id: "actor-1", type: "HUMAN" },
     versions: { builder: "builder-v1", schema: 1, prompt: "prompt-v2", providerSchema: "schema-v1" },
   };

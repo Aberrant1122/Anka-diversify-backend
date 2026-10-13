@@ -9,7 +9,7 @@ const SUITES = [
   ["planning_checkpoint_1a", "src/services/__tests__/planning-data-foundation.test.ts"],
 ];
 
-function validateSafeTestDatabase(value) {
+function validateSafeTestDatabase(value, appDatabaseUrl = process.env.DATABASE_URL) {
   if (!value) throw new Error("CP0_TEST_DATABASE_URL is required for CP0 acceptance.");
   let parsed;
   try {
@@ -33,6 +33,17 @@ function validateSafeTestDatabase(value) {
   }
   if (!database || /prod|railway|supabase/i.test(`${database} ${username}`)) {
     throw new Error("CP0 acceptance rejects production-like database identifiers.");
+  }
+  if (appDatabaseUrl) {
+    try {
+      const appParsed = new URL(appDatabaseUrl);
+      const appDbName = decodeURIComponent(appParsed.pathname.slice(1));
+      if (appDbName && database.toLowerCase() === appDbName.toLowerCase()) {
+        throw new Error(`CP0 acceptance rejects database identity collision with application database '${database}'. Tests must run against a separate disposable test database.`);
+      }
+    } catch (err) {
+      if (err.message.includes("rejects database identity collision")) throw err;
+    }
   }
   if (parsed.searchParams.has("schema") && parsed.searchParams.get("schema") !== "public") {
     throw new Error("CP0 acceptance requires the base database URL to use the public schema.");

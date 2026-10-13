@@ -24,6 +24,14 @@ import { PlanningArchitectureArtifactService, CreateArchitectureInput } from "./
 import { GenerateInitialArchitectureInput, PlanningArchitectureGenerationService, ReviseArchitectureInput } from "./planning-architecture-generation.service";
 import { PlanningArchitectureRunService } from "./planning-architecture-run.service";
 import { resolveImplementationAuthority } from "../planning/implementation-authority-preflight";
+import { AuthorityCurrentnessService, ARCHITECTURE_PHASE, ArtifactCurrentnessResult } from "./authority-currentness.service";
+import { DOCUMENTATION_PHASE } from "../planning/documentation-run-config";
+import { parseRequirementsContent } from "../planning/requirements-schema";
+import { computeRequirementsDiff } from "../planning/requirements-revision-policy";
+import { parseDocumentationContent } from "../planning/documentation-schema";
+import { computeDocumentationDiff } from "../planning/documentation-revision-policy";
+import { parseArchitectureContent } from "../planning/architecture-schema";
+import { computeArchitectureDiff } from "../planning/architecture-revision-policy";
 
 export const PHASE_ORDER = [
   "requirements",
@@ -48,6 +56,7 @@ export class PhaseService {
   private readonly architectureArtifacts: PlanningArchitectureArtifactService;
   private readonly architectureGeneration: PlanningArchitectureGenerationService;
   private readonly architectureRuns: PlanningArchitectureRunService;
+  private readonly currentness: AuthorityCurrentnessService;
 
   constructor(private readonly prisma: PrismaClient = new PrismaClient()) {
     this.authorization = new PlanningAuthorizationService(prisma);
@@ -86,11 +95,31 @@ export class PhaseService {
       authorization: this.authorization, artifacts: this.architectureArtifacts,
     });
     this.architectureGeneration = new PlanningArchitectureGenerationService(prisma, { runs: this.architectureRuns });
+    this.currentness = new AuthorityCurrentnessService(prisma);
   }
 
   async getPhaseStates(projectId: string, actorId: string) {
     await this.authorization.assertCanRead(projectId, actorId);
-    return this.prisma.projectPhaseState.findMany({ where: { projectId }, orderBy: { phase: "asc" } });
+    const states = await this.prisma.projectPhaseState.findMany({ where: { projectId }, orderBy: { phase: "asc" } });
+    return Promise.all(
+      states.map(async (state) => {
+        const currentness = await this.currentness.getPhaseAuthorityCurrentness(
+          this.prisma,
+          projectId,
+          state.phase,
+        );
+        return {
+          ...state,
+          isCurrent: currentness.isCurrent,
+          hasUsableAuthority: currentness.hasUsableAuthority,
+          isStale: currentness.isStale,
+          staleReason: currentness.staleReason,
+          upstreamPhase: currentness.upstreamPhase,
+          activeConfirmationId: currentness.activeConfirmationId,
+          artifactConfirmationId: currentness.artifactConfirmationId,
+        };
+      })
+    );
   }
 
   async ensurePhaseStates(projectId: string, actorId: string) {
@@ -377,5 +406,148 @@ export class PhaseService {
 
   async reviseDocumentation(input: ReviseDocumentationInput) {
     return this.documentationGeneration.reviseDocumentation(input);
+  }
+
+  async getArtifactCurrentness(projectId: string, artifactId: string, actorId: string) {
+    await this.authorization.assertCanRead(projectId, actorId);
+    const artifact = await this.prisma.phaseArtifact.findUnique({
+      where: { id: artifactId },
+    });
+    if (!artifact || artifact.projectId !== projectId) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_NOT_FOUND",
+        "Artifact was not found in this project.",
+        404,
+        { artifactId },
+      );
+    }
+    let currentness: ArtifactCurrentnessResult;
+    if (artifact.phase === REQUIREMENTS_PHASE) {
+      currentness = await this.currentness.getRequirementsArtifactCurrentness(
+        this.prisma,
+        projectId,
+        artifact,
+      );
+    } else if (artifact.phase === DOCUMENTATION_PHASE) {
+      currentness = await this.currentness.getDocumentationArtifactCurrentness(
+        this.prisma,
+        projectId,
+        artifact,
+      );
+    } else if (artifact.phase === ARCHITECTURE_PHASE) {
+      currentness = await this.currentness.getArchitectureArtifactCurrentness(
+        this.prisma,
+        projectId,
+        artifact,
+      );
+    } else {
+      currentness = {
+        isCurrent: true,
+        isStale: false,
+        status: "CURRENT",
+        staleReason: null,
+        upstreamPhase: null,
+      };
+    }
+    return {
+      artifactId: artifact.id,
+      phase: artifact.phase,
+      version: artifact.version,
+      ...currentness,
+    };
+  }
+
+  async compareArtifactVersions(
+    projectId: string,
+    artifactId: string,
+    compareArtifactId: string,
+    actorId: string,
+  ) {
+    await this.authorization.assertCanRead(projectId, actorId);
+    if (!compareArtifactId || !compareArtifactId.trim()) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        "compareArtifactId is required for artifact version comparison.",
+        422,
+        { field: "compareArtifactId" },
+      );
+    }
+    const [art1, art2] = await Promise.all([
+      this.prisma.phaseArtifact.findUnique({ where: { id: artifactId } }),
+      this.prisma.phaseArtifact.findUnique({ where: { id: compareArtifactId.trim() } }),
+    ]);
+    if (!art1 || art1.projectId !== projectId) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_NOT_FOUND",
+        "Primary artifact was not found in this project.",
+        404,
+        { artifactId },
+      );
+    }
+    if (!art2 || art2.projectId !== projectId) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_NOT_FOUND",
+        "Comparison artifact was not found in this project.",
+        404,
+        { artifactId: compareArtifactId },
+      );
+    }
+    if (art1.phase !== art2.phase) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        `Cannot compare artifacts from different phases: '${art1.phase}' vs '${art2.phase}'.`,
+        422,
+        { phase1: art1.phase, phase2: art2.phase },
+      );
+    }
+    if (!art1.structuredContent || !art2.structuredContent) {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        "Both artifacts must have structured content for comparison.",
+        422,
+      );
+    }
+
+    const base = art1.version <= art2.version ? art1 : art2;
+    const target = art1.version <= art2.version ? art2 : art1;
+
+    let diff: unknown;
+    if (art1.phase === REQUIREMENTS_PHASE) {
+      const baseContent = parseRequirementsContent(base.structuredContent);
+      const targetContent = parseRequirementsContent(target.structuredContent);
+      diff = computeRequirementsDiff(baseContent, targetContent);
+    } else if (art1.phase === DOCUMENTATION_PHASE) {
+      const baseContent = parseDocumentationContent(base.structuredContent);
+      const targetContent = parseDocumentationContent(target.structuredContent);
+      diff = computeDocumentationDiff(baseContent, targetContent);
+    } else if (art1.phase === ARCHITECTURE_PHASE) {
+      const baseContent = parseArchitectureContent(base.structuredContent);
+      const targetContent = parseArchitectureContent(target.structuredContent);
+      diff = computeArchitectureDiff(baseContent, targetContent);
+    } else {
+      throw new PlanningDomainError(
+        "PLANNING_ARTIFACT_INVALID",
+        `Diff comparison is not supported for phase '${art1.phase}'.`,
+        422,
+        { phase: art1.phase },
+      );
+    }
+
+    return {
+      phase: art1.phase,
+      baseArtifact: {
+        id: base.id,
+        version: base.version,
+        title: base.title,
+        contentHash: base.contentHash,
+      },
+      targetArtifact: {
+        id: target.id,
+        version: target.version,
+        title: target.title,
+        contentHash: target.contentHash,
+      },
+      diff,
+    };
   }
 }

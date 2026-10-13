@@ -4,6 +4,7 @@ import { RequirementsContent } from "../../planning/requirements-schema";
 import { REQUIREMENTS_INPUT_LIMITS } from "../../planning/requirements-run-config";
 import { PlanningArtifactService } from "../planning-artifact.service";
 import { PlanningRequirementsRunService } from "../planning-requirements-run.service";
+import { seedConfirmedLiveBrief } from "./test-brief-fixtures";
 
 const databaseUrl = process.env.DATABASE_URL;
 const isolatedSchema = databaseUrl ? new URL(databaseUrl).searchParams.get("schema") : null;
@@ -36,6 +37,7 @@ async function project(owner = ownerId, member = false): Promise<string> {
   const id = `checkpoint-1c-b-project-${crypto.randomUUID()}`;
   await prisma.project.create({ data: { id, name: "Checkpoint 1C-B", description: "Metadata only", userId: owner } });
   if (member) await prisma.projectMember.create({ data: { projectId: id, userId: memberId } });
+  await seedConfirmedLiveBrief(prisma, id, owner);
   projectIds.push(id);
   return id;
 }

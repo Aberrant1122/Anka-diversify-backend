@@ -50,8 +50,46 @@ interface PrioritizedMessage {
   mandatory: boolean;
 }
 
+/**
+ * Conservative token estimator adhering to BPE characteristics:
+ * - Punctuation / delimiters / symbols: 1 token each (never underestimates JSON, schema, or code symbols)
+ * - Words / identifiers: Math.max(1, Math.ceil(length / 2.5)) tokens (conservative upper bound)
+ * - Numbers / digits: Math.max(1, Math.ceil(length / 2)) tokens
+ * - Whitespace runs: Math.max(1, Math.ceil(length / 4)) tokens
+ * - Non-ASCII / Unicode codepoints: 2 tokens per codepoint
+ *
+ * This guarantees:
+ * 1. Punctuation and JSON syntax tokens are NEVER underestimated.
+ * 2. Words and numbers have a conservative safety margin over actual BPE subword tokens.
+ * 3. Structured JSON payloads do not produce false context-overflow rejections.
+ */
 export function estimateTextTokens(text: string): number {
-  return Buffer.byteLength(text, "utf8");
+  if (!text || typeof text !== "string") return 0;
+
+  let tokens = 0;
+  const regex = /([a-zA-Z]+)|([0-9]+)|([ \t\r\n]+)|([^\x00-\x7F])|([\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E])/g;
+  let match: RegExpExecArray | null;
+  let matchedLength = 0;
+
+  while ((match = regex.exec(text)) !== null) {
+    matchedLength += match[0].length;
+    if (match[1]) {
+      tokens += Math.max(1, Math.ceil(match[1].length / 2.5));
+    } else if (match[2]) {
+      tokens += Math.max(1, Math.ceil(match[2].length / 2));
+    } else if (match[3]) {
+      tokens += Math.max(1, Math.ceil(match[3].length / 4));
+    } else if (match[4]) {
+      tokens += 2;
+    } else if (match[5]) {
+      tokens += 1;
+    }
+  }
+
+  const remaining = text.length - matchedLength;
+  if (remaining > 0) tokens += remaining;
+
+  return Math.max(1, tokens);
 }
 
 export function estimateMessageTokens(message: OpenAI.Chat.Completions.ChatCompletionMessageParam): number {

@@ -16,7 +16,15 @@
     "db:studio": "prisma studio",
     "setup-s3": "npx ts-node scripts/setup-s3.ts",
     "eval:real": "ts-node scripts/run-ai-evals.ts",
-    "test:cp0:acceptance": "node scripts/run-cp0-acceptance.js"
+    "test:cp0:acceptance": "node scripts/run-cp0-acceptance.js",
+    "test:cp1:integration": "node scripts/run-document-evidence-integration.js",
+    "test:cp1:browser": "node scripts/run-cp1-browser-acceptance.js",
+    "test:cp2:data-foundation": "node scripts/run-cp2-data-foundation-integration.js",
+    "test:cp2:live-brief": "node scripts/run-cp2-live-brief-integration.js",
+    "test:cp2:browser": "node scripts/run-cp2-browser-acceptance.js",
+    "test:cp2:adversarial": "node scripts/run-cp2-adversarial-acceptance.js",
+    "test:cp2:real-provider": "node scripts/test-real-provider-intake.js",
+    "test:cp3:authority-currentness": "node scripts/run-cp3-authority-currentness.js"
   },
   "keywords": [],
   "author": "",

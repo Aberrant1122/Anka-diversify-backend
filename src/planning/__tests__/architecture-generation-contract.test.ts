@@ -49,7 +49,7 @@ describe("Architecture generation contract", () => {
     expect(() => assertArchitectureCapacity(messages, ARCHITECTURE_PROVIDER_JSON_SCHEMA, "repair",
       new ModelRouter({ architectureModel: "gpt-6.1-sol" }))).not.toThrow();
     expect(() => new ModelRouter({ architectureModel: "unverified-model" })).toThrow(/Unsupported Architecture model configuration/);
-    expect(() => assertArchitectureCapacity([messages[0], { role: "user", content: "x".repeat(65_000) }],
+    expect(() => assertArchitectureCapacity([messages[0], { role: "user", content: "x".repeat(405_000) }],
       ARCHITECTURE_PROVIDER_JSON_SCHEMA, "repair")).toThrow();
   });
 

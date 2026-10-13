@@ -60,6 +60,7 @@ import {
   DocumentationReadiness,
   PlanningDocumentationReadinessService,
 } from "./planning-documentation-readiness.service";
+import { AuthorityCurrentnessService } from "./authority-currentness.service";
 
 const MAX_TRANSACTION_ATTEMPTS = 3;
 type PersistedManifest = (DocumentationContextManifest | DocumentationRevisionContextManifest) & { requestFingerprint: string };
@@ -191,17 +192,20 @@ export class PlanningDocumentationRunService {
   private readonly contexts: PlanningDocumentationContextBuilder;
   private readonly artifacts: PlanningDocumentationArtifactService;
   private readonly readiness: PlanningDocumentationReadinessService;
+  private readonly currentness: AuthorityCurrentnessService;
 
   constructor(private readonly prisma: PrismaClient, dependencies: {
     authorization?: PlanningAuthorizationService;
     contexts?: PlanningDocumentationContextBuilder;
     artifacts?: PlanningDocumentationArtifactService;
     readiness?: PlanningDocumentationReadinessService;
+    currentness?: AuthorityCurrentnessService;
   } = {}) {
     this.authorization = dependencies.authorization ?? new PlanningAuthorizationService(prisma);
     this.contexts = dependencies.contexts ?? new PlanningDocumentationContextBuilder();
     this.artifacts = dependencies.artifacts ?? new PlanningDocumentationArtifactService(prisma, this.authorization);
     this.readiness = dependencies.readiness ?? new PlanningDocumentationReadinessService();
+    this.currentness = dependencies.currentness ?? new AuthorityCurrentnessService(prisma);
   }
 
   async start(input: StartDocumentationRunInput): Promise<StartDocumentationRunResult> {
@@ -403,6 +407,8 @@ export class PlanningDocumentationRunService {
             throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Documentation authority changed before generation could be persisted.", 409, { runId: run.id });
           }
 
+          await this.currentness.assertRequirementsCurrentForHandoff(tx, input.projectId, requirementsArtifact);
+
           const requirements = parseRequirementsContent(requirementsArtifact.structuredContent);
           if (
             hashRequirementsContent(requirements) !== manifest.sourceRequirements.contentHash ||
@@ -536,6 +542,8 @@ export class PlanningDocumentationRunService {
             throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "Documentation authority changed before revision could be persisted.", 409, { runId: run.id });
           }
 
+          await this.currentness.assertRequirementsCurrentForHandoff(tx, input.projectId, requirementsArtifact);
+
           const requirements = parseRequirementsContent(requirementsArtifact.structuredContent);
           if (
             hashRequirementsContent(requirements) !== manifest.sourceRequirements.contentHash ||
@@ -582,11 +590,15 @@ export class PlanningDocumentationRunService {
               requirements,
             );
           } catch (error) {
+            console.error(`[Planning Documentation] assembleDocumentationContent failed in finalizeRevision for runId: ${run.id}:`, error);
             const size = error instanceof DocumentationValidationError && error.code === "DOCUMENTATION_SIZE_EXCEEDED";
             throw new PlanningDomainError(
               size ? "PLANNING_AI_OUTPUT_TOO_LARGE" : "PLANNING_AI_INVALID_RESPONSE",
-              size ? "Generated Documentation exceeds the canonical size limit." : "The model returned invalid Documentation content.",
+              size
+                ? "Generated Documentation exceeds the canonical size limit."
+                : `The model returned invalid Documentation content: ${error instanceof Error ? error.message : String(error)}`,
               502,
+              error instanceof DocumentationValidationError ? error.details : undefined,
             );
           }
 

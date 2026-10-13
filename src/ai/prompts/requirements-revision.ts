@@ -14,6 +14,8 @@ export const REQUIREMENTS_REVISION_POLICY = [
   "Every user-story acceptanceCriteriaIds value must reference an acceptance criterion in the same response.",
   "Every acceptance-criterion relatedRequirementIds value must reference a functional or non-functional requirement in the same response.",
   "Retain unresolved ambiguity as unresolvedQuestions. Keep assumptions explicitly in assumptions and never present them as confirmed requirements.",
+  "When the revision instruction provides answers to unresolved questions, requests resolving questions with sensible defaults, or asks to clear questions, incorporate those decisions into the requirements, acceptance criteria, or assumptions, and remove the resolved questions from unresolvedQuestions.",
+  "Unresolved questions must ONLY pertain to domain product requirements of the project. Never generate meta-questions about internal Anka OS architecture, document versioning, content hashing, database storage, schema properties, or verification tooling.",
   "Do not choose or invent architecture, frameworks, databases, service topology, APIs, cloud providers, queues, RAG design, or implementation details unless explicitly constrained by authoritative source content.",
   "Return one complete canonical Requirements object with every required field and no additional fields.",
   "Emit no commentary, JSON Patch, markdown fence, or text outside the structured output.",

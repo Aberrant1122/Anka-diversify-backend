@@ -24,12 +24,27 @@ export function assertArchitectureCapacity(
 ): void {
   const route = router.route(stage);
   if (route.maxInputTokens !== ARCHITECTURE_MAX_INPUT_TOKENS || route.maxOutputTokens < ARCHITECTURE_MAX_OUTPUT_TOKENS) {
-    throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "Architecture model route capacity is invalid.", 413);
+    const details = {
+      stage,
+      routeMaxInputTokens: route.maxInputTokens,
+      expectedMaxInputTokens: ARCHITECTURE_MAX_INPUT_TOKENS,
+      routeMaxOutputTokens: route.maxOutputTokens,
+      expectedMaxOutputTokens: ARCHITECTURE_MAX_OUTPUT_TOKENS,
+    };
+    console.error("[ArchitectureCapacity] Architecture model route capacity is invalid:", details);
+    throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "Architecture model route capacity is invalid.", 413, details);
   }
   for (const model of [route.primaryModel, ...route.fallbackModels]) {
     const capability = MODEL_CAPABILITIES[model];
     if (!capability || capability.context < route.contextWindowTokens || capability.output < ARCHITECTURE_MAX_OUTPUT_TOKENS) {
-      throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "An Architecture model has unknown or insufficient capacity.", 413);
+      const details = {
+        model,
+        capability: capability ?? null,
+        requiredContextWindowTokens: route.contextWindowTokens,
+        requiredMaxOutputTokens: ARCHITECTURE_MAX_OUTPUT_TOKENS,
+      };
+      console.error("[ArchitectureCapacity] Architecture model has unknown or insufficient capacity:", details);
+      throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "An Architecture model has unknown or insufficient capacity.", 413, details);
     }
   }
   try {
@@ -45,8 +60,25 @@ export function assertArchitectureCapacity(
         { id: "structured-repair-instructions", value: repairInstructions },
       ],
     });
-    if (result.truncated) throw new Error("Architecture context was truncated.");
-  } catch {
-    throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "Architecture generation context is too large.", 413);
+    if (result.truncated) {
+      const details = {
+        truncated: true,
+        estimatedTokens: result.estimatedTokens,
+        inputLimitTokens: result.inputLimitTokens,
+        omittedMessageIndexes: result.omittedMessageIndexes,
+      };
+      console.error("[ArchitectureCapacity] Architecture context was truncated:", details);
+      throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "Architecture context was truncated.", 413, details);
+    }
+  } catch (error) {
+    if (error instanceof PlanningDomainError) throw error;
+    const details = error && typeof error === "object" && "details" in error && typeof (error as Record<string, unknown>).details === "object"
+      ? ((error as { details: Record<string, unknown> }).details ?? undefined)
+      : (error instanceof Error ? { error: error.message } : undefined);
+    console.error("[ArchitectureCapacity] Architecture generation context capacity check failed:", {
+      message: error instanceof Error ? error.message : String(error),
+      details,
+    });
+    throw new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "Architecture generation context is too large.", 413, details);
   }
 }

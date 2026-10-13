@@ -40,20 +40,26 @@ function actualLLMError(error: unknown): LLMError | null {
   return error instanceof LLMError ? error : null;
 }
 function providerError(error: unknown): PlanningDomainError {
-  const code = actualLLMError(error)?.code;
-  switch (code) {
-    case "LLM_TIMEOUT": return new PlanningDomainError("PLANNING_AI_TIMEOUT", "Architecture generation timed out.", 504);
-    case "LLM_NETWORK_ERROR": return new PlanningDomainError("PLANNING_AI_NETWORK_ERROR", "Architecture generation could not reach the model provider.", 503);
-    case "LLM_RATE_LIMIT": return new PlanningDomainError("PLANNING_AI_RATE_LIMITED", "Architecture generation was rate limited.", 429);
+  const llm = actualLLMError(error);
+  const details = llm ? { gatewayCode: llm.code, ...(llm.stage ? { stage: llm.stage } : {}), ...(llm.model ? { model: llm.model } : {}) } : undefined;
+  console.error("[PlanningArchitectureGeneration] LLM Provider error occurred:", {
+    code: llm?.code,
+    message: llm?.message,
+    details,
+  });
+  switch (llm?.code) {
+    case "LLM_TIMEOUT": return new PlanningDomainError("PLANNING_AI_TIMEOUT", "Architecture generation timed out.", 504, details);
+    case "LLM_NETWORK_ERROR": return new PlanningDomainError("PLANNING_AI_NETWORK_ERROR", "Architecture generation could not reach the model provider.", 503, details);
+    case "LLM_RATE_LIMIT": return new PlanningDomainError("PLANNING_AI_RATE_LIMITED", "Architecture generation was rate limited.", 429, details);
     case "LLM_BUDGET_EXHAUSTED":
-    case "LLM_BUDGET_INVALID": return new PlanningDomainError("PLANNING_AI_BUDGET_EXHAUSTED", "Architecture generation exceeded its model budget.", 429);
-    case "LLM_CONTEXT_OVERFLOW": return new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "Architecture generation context is too large.", 413);
+    case "LLM_BUDGET_INVALID": return new PlanningDomainError("PLANNING_AI_BUDGET_EXHAUSTED", "Architecture generation exceeded its model budget.", 429, details);
+    case "LLM_CONTEXT_OVERFLOW": return new PlanningDomainError("PLANNING_AI_CONTEXT_TOO_LARGE", "Architecture generation context is too large.", 413, details);
     case "LLM_INVALID_JSON":
-    case "LLM_SCHEMA_INVALID": return new PlanningDomainError("PLANNING_AI_INVALID_RESPONSE", "The model returned invalid Architecture content.", 502);
-    case "LLM_REFUSAL": return new PlanningDomainError("PLANNING_AI_REFUSED", "The model refused to generate Architecture.", 422);
-    case "LLM_CONTENT_FILTER": return new PlanningDomainError("PLANNING_AI_CONTENT_FILTERED", "Architecture generation was blocked by the provider content filter.", 422);
-    case "LLM_TRUNCATED": return new PlanningDomainError("PLANNING_AI_TRUNCATED", "The Architecture response was truncated.", 502);
-    default: return new PlanningDomainError("PLANNING_AI_PROVIDER_ERROR", "Architecture generation failed at the model provider.", 502);
+    case "LLM_SCHEMA_INVALID": return new PlanningDomainError("PLANNING_AI_INVALID_RESPONSE", "The model returned invalid Architecture content.", 502, details);
+    case "LLM_REFUSAL": return new PlanningDomainError("PLANNING_AI_REFUSED", "The model refused to generate Architecture.", 422, details);
+    case "LLM_CONTENT_FILTER": return new PlanningDomainError("PLANNING_AI_CONTENT_FILTERED", "Architecture generation was blocked by the provider content filter.", 422, details);
+    case "LLM_TRUNCATED": return new PlanningDomainError("PLANNING_AI_TRUNCATED", "The Architecture response was truncated.", 502, details);
+    default: return new PlanningDomainError("PLANNING_AI_PROVIDER_ERROR", "Architecture generation failed at the model provider.", 502, details);
   }
 }
 
@@ -89,6 +95,7 @@ export class PlanningArchitectureGenerationService {
         context: { runId: started.run.id, projectId: input.projectId },
       });
     } catch (error) {
+      console.error(`[PlanningArchitectureGeneration] Initial generation error for project ${input.projectId}:`, error);
       const mapped = error instanceof PlanningDomainError ? error : providerError(error);
       await this.tryFinish(input.projectId, started.run.id, "failed", mapped, this.auditForError(error, manifest.promptVersion));
       throw mapped;
@@ -157,6 +164,7 @@ export class PlanningArchitectureGenerationService {
         context: { runId: started.run.id, projectId: input.projectId },
       });
     } catch (error) {
+      console.error(`[PlanningArchitectureGeneration] Revision error for project ${input.projectId}:`, error);
       const mapped = error instanceof PlanningDomainError ? error : providerError(error);
       await this.tryFinish(input.projectId, started.run.id, "failed", mapped, this.auditForError(error, manifest.promptVersion));
       throw mapped;
@@ -210,12 +218,14 @@ export class PlanningArchitectureGenerationService {
     if (!status || run.status !== expected) throw new PlanningDomainError(
       "PLANNING_RUN_INVARIANT", "Stored Architecture run cannot be replayed safely.", 500);
     let message = "The previous Architecture generation attempt failed.";
+    let details: unknown = undefined;
     try {
-      const stored = run.errorMessage ? JSON.parse(run.errorMessage) as { message?: unknown } : null;
+      const stored = run.errorMessage ? JSON.parse(run.errorMessage) as { message?: unknown; details?: unknown } : null;
       if (typeof stored?.message === "string") message = stored.message;
+      if (stored?.details !== undefined) details = stored.details;
     } catch { throw new PlanningDomainError("PLANNING_RUN_INVARIANT", "Stored Architecture run cannot be replayed safely.", 500); }
     throw new PlanningDomainError(run.errorCode === "PLANNING_AUTHORIZATION_CHANGED" ? "PLANNING_RUN_CANCELLED" : run.errorCode! as PlanningErrorCode,
-      message, status, { runId: run.id, reused: true });
+      message, status, { runId: run.id, reused: true, ...(details !== undefined ? { details } : {}) });
   }
 
   private attempts(completion: LLMCallResult<ArchitectureAuthoredDraft>): LLMProviderAttempt[] {
@@ -257,10 +267,14 @@ export class PlanningArchitectureGenerationService {
   }
   private async tryFinish(projectId: string, runId: string, status: "failed" | "conflicted" | "cancelled",
     error: PlanningDomainError, audit?: ArchitectureRunAudit): Promise<void> {
-    try { await this.runs.finish(projectId, runId, status,
-      { code: status === "cancelled" ? "PLANNING_AUTHORIZATION_CHANGED" : error.code,
-        message: status === "cancelled" ? "Architecture generation was cancelled because access changed." : error.message }, audit); }
-    catch (cleanupError) { console.error("Failed to terminalize Architecture generation", {
+    try {
+      console.log(`[PlanningArchitectureGeneration] Ending run ${runId} with status=${status}: [${error.code}] ${error.message}`, error.details ? { details: error.details } : "");
+      await this.runs.finish(projectId, runId, status,
+        { code: status === "cancelled" ? "PLANNING_AUTHORIZATION_CHANGED" : error.code,
+          message: status === "cancelled" ? "Architecture generation was cancelled because access changed." : error.message,
+          details: error.details }, audit);
+    }
+    catch (cleanupError) { console.error("[PlanningArchitectureGeneration] Failed to terminalize Architecture generation", {
       projectId, runId, reason: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
     }); }
   }

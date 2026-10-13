@@ -12,7 +12,7 @@ import {
   buildRevisionDocumentationMessages,
   buildRevisionDocumentationStructuredRepairPolicy,
 } from "../ai/prompts/documentation-revision";
-import { assembleDocumentationContent } from "../planning/documentation-assembly";
+import { assembleDocumentationContent, collectDocumentationGraphIssues, healDocumentationDraft } from "../planning/documentation-assembly";
 import {
   BuiltDocumentationRevisionContext,
 } from "../planning/documentation-context";
@@ -152,21 +152,39 @@ export class PlanningDocumentationGenerationService {
     if (started.reused) return this.replay(input, started.run);
 
     const initialContext = started.context;
+    const sourceRequirementsContent = (initialContext.payload as any).sourceRequirements.content;
+    console.log(`[Planning Documentation] Starting INITIAL_GENERATION for project ${input.projectId} (runId: ${started.run.id})`);
     let completion: LLMCallResult<DocumentationProviderDraft>;
     try {
+      console.log(`[Planning Documentation] Calling AI gateway for runId: ${started.run.id}...`);
       completion = await this.gateway.callStructured<DocumentationProviderDraft>({
         stage: PipelineStages.DOCUMENTATION_GENERATION,
         messages: buildInitialDocumentationMessages(initialContext.payload as any),
         schema: {
           name: "anka_initial_documentation", description: "Initial Anka OS Documentation & Specs provider draft",
-          schema: DOCUMENTATION_PROVIDER_JSON_SCHEMA, strict: true, validate: validateGeneratedDocumentation,
+          schema: DOCUMENTATION_PROVIDER_JSON_SCHEMA, strict: true,
+          validate: (parsed: unknown) => {
+            const parsedResult = validateGeneratedDocumentation(parsed);
+            if (!parsedResult.valid || !parsedResult.data) return parsedResult;
+            const healed = healDocumentationDraft(parsedResult.data, sourceRequirementsContent);
+            const graphIssues = collectDocumentationGraphIssues(healed, sourceRequirementsContent);
+            if (graphIssues.length > 0) {
+              return {
+                valid: false,
+                errors: graphIssues.map((i) => `[${i.code}] ${i.path}: ${i.message}`),
+              };
+            }
+            return { valid: true, data: healed };
+          },
         },
         structuredRepair: { instructions: DOCUMENTATION_STRUCTURED_REPAIR_POLICY },
         maxTokens: DOCUMENTATION_MAX_OUTPUT_TOKENS,
         maxRetries: 1,
         context: { runId: started.run.id, projectId: input.projectId },
       });
+      console.log(`[Planning Documentation] AI gateway returned for runId: ${started.run.id} in ${completion.latencyMs}ms (finishReason: ${completion.finishReason})`);
     } catch (error) {
+      console.error(`[Planning Documentation] AI gateway error for runId: ${started.run.id}:`, error instanceof Error ? error.message : error);
       const mapped = providerError(error);
       await this.tryFinish(input.projectId, started.run.id, "failed", mapped, this.auditForError(error, initialContext.manifest.promptVersion));
       throw mapped;
@@ -185,11 +203,15 @@ export class PlanningDocumentationGenerationService {
         (initialContext.payload as any).sourceRequirements.content,
       );
     } catch (error) {
+      console.error(`[Planning Documentation] assembleDocumentationContent failed for runId: ${started.run.id}:`, error);
       const size = error instanceof DocumentationValidationError && error.code === "DOCUMENTATION_SIZE_EXCEEDED";
       const mapped = new PlanningDomainError(
         size ? "PLANNING_AI_OUTPUT_TOO_LARGE" : "PLANNING_AI_INVALID_RESPONSE",
-        size ? "Generated Documentation exceeds the canonical size limit." : "The model returned invalid Documentation content.",
+        size
+          ? "Generated Documentation exceeds the canonical size limit."
+          : `The model returned invalid Documentation content: ${error instanceof Error ? error.message : String(error)}`,
         502,
+        error instanceof DocumentationValidationError ? error.details : undefined,
       );
       await this.tryFinish(input.projectId, started.run.id, "failed", mapped, audit);
       throw mapped;
@@ -230,6 +252,7 @@ export class PlanningDocumentationGenerationService {
     if (started.reused) return this.replayRevision(input, started.run);
 
     const revisionContext = started.context as BuiltDocumentationRevisionContext;
+    const revisionRequirementsContent = revisionContext.payload.sourceRequirements.content;
     let completion: LLMCallResult<DocumentationProviderDraft>;
     try {
       completion = await this.gateway.callStructured<DocumentationProviderDraft>({
@@ -240,7 +263,19 @@ export class PlanningDocumentationGenerationService {
           description: "Anka OS Documentation & Specs revision provider draft",
           schema: DOCUMENTATION_PROVIDER_JSON_SCHEMA,
           strict: true,
-          validate: validateGeneratedDocumentation,
+          validate: (parsed: unknown) => {
+            const parsedResult = validateGeneratedDocumentation(parsed);
+            if (!parsedResult.valid || !parsedResult.data) return parsedResult;
+            const healed = healDocumentationDraft(parsedResult.data, revisionRequirementsContent);
+            const graphIssues = collectDocumentationGraphIssues(healed, revisionRequirementsContent);
+            if (graphIssues.length > 0) {
+              return {
+                valid: false,
+                errors: graphIssues.map((i) => `[${i.code}] ${i.path}: ${i.message}`),
+              };
+            }
+            return { valid: true, data: healed };
+          },
         },
         structuredRepair: {
           instructions: buildRevisionDocumentationStructuredRepairPolicy(revisionContext.payload),
@@ -266,9 +301,15 @@ export class PlanningDocumentationGenerationService {
       });
       return { ...finalized, reused: false, httpStatus: 201 };
     } catch (error) {
+      console.error(`[Planning Documentation] Revision failed for runId: ${started.run.id}:`, error);
       const mapped = error instanceof PlanningDomainError
         ? error
-        : new PlanningDomainError("PLANNING_PERSISTENCE_FAILED", "Revised Documentation could not be persisted atomically.", 503);
+        : new PlanningDomainError(
+            "PLANNING_PERSISTENCE_FAILED",
+            `Revised Documentation could not be persisted atomically: ${error instanceof Error ? error.message : String(error)}`,
+            503,
+            error instanceof DocumentationValidationError ? error.details : undefined,
+          );
       const status = mapped.code === "PLANNING_CONTEXT_CHANGED" || mapped.code === "PLANNING_CONCURRENT_UPDATE"
         ? "conflicted"
         : mapped.code === "PLANNING_PROJECT_NOT_FOUND"

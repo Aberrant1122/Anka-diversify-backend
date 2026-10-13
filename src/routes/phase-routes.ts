@@ -19,6 +19,14 @@ router.get("/artifacts", phaseController.listArtifacts.bind(phaseController));
 // GET    /api/projects/:projectId/phases/artifacts/:artifactId
 router.get("/artifacts/:artifactId", phaseController.getArtifact.bind(phaseController));
 
+// GET    /api/projects/:projectId/phases/artifacts/:artifactId/currentness
+router.get("/artifacts/:artifactId/currentness", phaseController.getArtifactCurrentness.bind(phaseController));
+router.get("/:phase/artifacts/:artifactId/currentness", phaseController.getArtifactCurrentness.bind(phaseController));
+
+// GET    /api/projects/:projectId/phases/artifacts/:artifactId/diff
+router.get("/artifacts/:artifactId/diff", phaseController.getArtifactDiff.bind(phaseController));
+router.get("/:phase/artifacts/:artifactId/diff", phaseController.getArtifactDiff.bind(phaseController));
+
 // GET    /api/projects/:projectId/phases/requirements/artifacts/:artifactId/readiness
 router.get("/requirements/artifacts/:artifactId/readiness", phaseController.getRequirementsReadiness.bind(phaseController));
 

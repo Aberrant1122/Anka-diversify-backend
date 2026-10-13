@@ -8,7 +8,7 @@ export function isProjectStorageKey(projectId: string, key: unknown): key is str
 
 export function isProjectUploadKey(projectId: string, key: unknown, fileUrl: unknown): boolean {
   if (!isProjectStorageKey(projectId, key) || typeof fileUrl !== "string") return false;
-  const bucket = process.env.AWS_S3_BUCKET || "anka-os-documents";
+  const bucket = process.env.AWS_S3_BUCKET || process.env.AWS_S3_BUCKET_NAME || "anka-os-documents";
   const region = process.env.AWS_REGION || "ap-south-1";
   return fileUrl === `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
 }

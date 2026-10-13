@@ -114,7 +114,7 @@ export class PlanningAuthorizationService {
     if (access.isMember || access.isSystemAdmin) {
       throw new PlanningDomainError(
         "PLANNING_OWNER_REQUIRED",
-        "Only the project owner may make Requirements approval decisions.",
+        "Only the project owner may perform this action.",
         403,
       );
     }

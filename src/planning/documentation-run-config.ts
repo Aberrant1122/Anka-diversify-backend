@@ -17,3 +17,6 @@ export const DOCUMENTATION_INPUT_LIMITS = REQUIREMENTS_INPUT_LIMITS;
 export const DOCUMENTATION_MEMORY_MAX_BYTES = REQUIREMENTS_INPUT_LIMITS.memorySummaryBytes;
 // Reasoning tokens and visible JSON share this limit for current reasoning models.
 export const DOCUMENTATION_MAX_OUTPUT_TOKENS = 32_000;
+// Input tokens accommodate both upstream Requirements and base Documentation artifacts.
+export const DOCUMENTATION_MAX_INPUT_TOKENS = 400_000;
+

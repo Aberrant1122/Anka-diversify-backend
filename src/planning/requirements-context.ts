@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { PrismaClient, WorkflowOperation } from "@prisma/client";
 import { PlanningDomainError } from "./planning-errors";
+import { AuthorityCurrentnessService } from "../services/authority-currentness.service";
 import {
   parseRequirementsContent,
   REQUIREMENTS_ARTIFACT_TYPE,
@@ -58,7 +59,14 @@ export interface RequirementsContextManifest {
   operation: RequirementsRunOperation;
   project: RequirementsProjectSnapshot;
   initiator: { id: string; type: "HUMAN" };
-  brief?: { normalizedText: string; byteLength: number; hash: string; source: "submitted_brief" };
+  brief?: { normalizedText: string; byteLength: number; hash: string; source: "confirmed_live_brief" };
+  briefAuthority?: {
+    confirmationId: string;
+    revisionId: string;
+    revisionNumber: number;
+    contentHash: string;
+    evidenceManifest: unknown[];
+  };
   baseArtifact?: { id: string; version: number; hash: string };
   instruction?: { normalizedText: string; byteLength: number; hash: string; source: "submitted_feedback" };
   memory?: RequirementsMemoryContext;
@@ -76,6 +84,13 @@ export interface InitialRequirementsContextPayload {
   operation: "INITIAL_GENERATION";
   project: RequirementsProjectSnapshot;
   brief: string;
+  briefAuthority: {
+    confirmationId: string;
+    revisionId: string;
+    revisionNumber: number;
+    contentHash: string;
+    evidenceManifest: unknown[];
+  };
   initiator: { id: string; type: "HUMAN" };
   memory?: RequirementsMemoryContext;
   versions: { builder: string; schema: number; prompt: string; providerSchema: string };
@@ -156,23 +171,44 @@ function boundedText(value: string, kind: "brief" | "feedback" | "memory"): stri
 }
 
 export class PlanningRequirementsContextBuilder {
-  constructor(private readonly prisma: PrismaClient) {}
+  private readonly currentness: AuthorityCurrentnessService;
+
+  constructor(private readonly prisma: PrismaClient) {
+    this.currentness = new AuthorityCurrentnessService(prisma);
+  }
 
   async buildInitial(input: {
     projectId: string;
     actorId: string;
-    brief: string;
+    briefConfirmationId: string;
     includeMemory?: boolean;
   }): Promise<BuiltRequirementsContext<InitialRequirementsContextPayload>> {
-    const brief = boundedText(input.brief, "brief");
-    const { project, memory } = await this.loadProject(input.projectId, input.includeMemory === true);
+    const [{ project, memory }, authority] = await Promise.all([
+      this.loadProject(input.projectId, input.includeMemory === true),
+      this.loadBriefAuthority(input.projectId, input.briefConfirmationId),
+    ]);
+    const brief = boundedText([
+      authority.revision.markdownContent,
+      "\n## Accepted structured claims\n",
+      canonicalJson(authority.revision.structuredClaims),
+      "\n## Verified evidence manifest\n",
+      canonicalJson(authority.revision.evidenceManifest),
+    ].join("\n"), "brief");
     const initiator = { id: input.actorId, type: "HUMAN" as const };
     const versions = this.versions();
+    const briefAuthority = {
+      confirmationId: authority.confirmation.id,
+      revisionId: authority.revision.id,
+      revisionNumber: authority.revision.revisionNumber,
+      contentHash: authority.revision.contentHash,
+      evidenceManifest: authority.revision.evidenceManifest as unknown[],
+    };
     const payload: InitialRequirementsContextPayload = {
       target: "requirements",
       operation: WorkflowOperation.INITIAL_GENERATION,
       project,
       brief,
+      briefAuthority,
       initiator,
       ...(memory ? { memory } : {}),
       versions,
@@ -186,8 +222,9 @@ export class PlanningRequirementsContextBuilder {
         normalizedText: brief,
         byteLength: Buffer.byteLength(brief, "utf8"),
         hash: sha256(brief),
-        source: "submitted_brief" as const,
+        source: "confirmed_live_brief" as const,
       },
+      briefAuthority,
       ...(memory ? { memory } : {}),
       builderVersion: versions.builder,
       schemaVersion: versions.schema,
@@ -195,6 +232,40 @@ export class PlanningRequirementsContextBuilder {
       providerSchemaVersion: versions.providerSchema,
     };
     return this.finish(payload, unsigned);
+  }
+
+  private async loadBriefAuthority(projectId: string, confirmationId: string) {
+    if (!confirmationId?.trim()) {
+      throw new PlanningDomainError("PLANNING_BRIEF_REQUIRED", "An exact confirmed Live Brief is required.", 422);
+    }
+    const confirmation = await this.prisma.liveBriefConfirmation.findFirst({
+      where: { id: confirmationId, projectId }, include: { briefRevision: true },
+    });
+    const state = await this.prisma.projectIntakeState.findUnique({ where: { projectId }, select: { currentConfirmationId: true } });
+    if (!confirmation || confirmation.status !== "ACTIVE" || state?.currentConfirmationId !== confirmation.id
+      || confirmation.briefRevision.projectId !== projectId) {
+      throw new PlanningDomainError("PLANNING_CONTEXT_CHANGED", "The confirmed Live Brief is missing, foreign, or stale.", 409);
+    }
+    const claims = Array.isArray(confirmation.briefRevision.structuredClaims)
+      ? [...confirmation.briefRevision.structuredClaims].sort((left, right) => {
+        const a = left && typeof left === "object" && !Array.isArray(left) ? left as Record<string, unknown> : {};
+        const b = right && typeof right === "object" && !Array.isArray(right) ? right as Record<string, unknown> : {};
+        return String(a.category ?? "").localeCompare(String(b.category ?? "")) || String(a.key ?? "").localeCompare(String(b.key ?? ""));
+      }) : [];
+    const evidence = Array.isArray(confirmation.briefRevision.evidenceManifest)
+      ? [...confirmation.briefRevision.evidenceManifest].sort((left, right) => {
+        const a = left && typeof left === "object" && !Array.isArray(left) ? left as Record<string, unknown> : {};
+        const b = right && typeof right === "object" && !Array.isArray(right) ? right as Record<string, unknown> : {};
+        return String(a.sourceId ?? "").localeCompare(String(b.sourceId ?? "")) || String(a.spanId ?? "").localeCompare(String(b.spanId ?? ""));
+      }) : [];
+    const recomputed = hashCanonical({
+      projectId, title: confirmation.briefRevision.title,
+      markdownContent: confirmation.briefRevision.markdownContent, claims, evidenceManifest: evidence,
+    });
+    if (recomputed !== confirmation.briefRevision.contentHash || recomputed !== confirmation.briefContentHash) {
+      throw new PlanningDomainError("PLANNING_ARTIFACT_HASH_MISMATCH", "The confirmed Live Brief hash is invalid.", 409);
+    }
+    return { confirmation, revision: confirmation.briefRevision };
   }
 
   async buildRevision(input: {
@@ -222,6 +293,7 @@ export class PlanningRequirementsContextBuilder {
         404,
       );
     }
+    await this.currentness.assertRequirementsCurrentForHandoff(this.prisma, input.projectId, artifact);
     if (!artifact.contentHash || artifact.structuredContent === null) {
       throw new PlanningDomainError(
         "PLANNING_ARTIFACT_INVALID",

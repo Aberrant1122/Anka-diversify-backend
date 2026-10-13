@@ -19,7 +19,10 @@ export interface ModelRouterConfig {
   requirementsRevisionModel: string;
   documentationGenerationModel: string;
   documentationRevisionModel: string;
+  documentationReasoningEffort?: ModelReasoningEffort;
   architectureModel: string;
+  architectureGenerationReasoningEffort?: ModelReasoningEffort;
+  architectureRevisionReasoningEffort?: ModelReasoningEffort;
   implementationPlanningModel: string;
   codeGenerationModel: string;
 }
@@ -55,16 +58,16 @@ const STAGE_POLICIES: Record<PipelineStage, ModelRoutePolicy> = {
   [PipelineStages.REQUIREMENTS_GENERATION]: reasoningPolicy(32_000, 32_000),
   [PipelineStages.REQUIREMENTS_REVISION]: reasoningPolicy(32_000, 32_000),
   [PipelineStages.DOCUMENTATION_PLANNING]: standardPolicy(8_000),
-  [PipelineStages.DOCUMENTATION_GENERATION]: reasoningPolicy(32_000, 32_000),
-  [PipelineStages.DOCUMENTATION_REVISION]: reasoningPolicy(32_000, 32_000),
+  [PipelineStages.DOCUMENTATION_GENERATION]: reasoningPolicy(32_000, 32_000, 400_000),
+  [PipelineStages.DOCUMENTATION_REVISION]: reasoningPolicy(32_000, 32_000, 400_000),
   [PipelineStages.ARCHITECTURE_PLANNING]: {
     tier: "STANDARD", contextWindowTokens: 64_000 + 12_000 + 512,
     maxInputTokens: 64_000, defaultMaxOutputTokens: 12_000,
     maxOutputTokens: 12_000, defaultTemperature: 0.2,
     maxTemperature: 0.7, maxRetries: 1,
   },
-  [PipelineStages.ARCHITECTURE_GENERATION]: reasoningPolicy(32_000, 32_000),
-  [PipelineStages.ARCHITECTURE_REVISION]: reasoningPolicy(32_000, 32_000),
+  [PipelineStages.ARCHITECTURE_GENERATION]: reasoningPolicy(32_000, 32_000, 400_000),
+  [PipelineStages.ARCHITECTURE_REVISION]: reasoningPolicy(32_000, 32_000, 400_000),
   [PipelineStages.IMPLEMENTATION_PLANNING]: reasoningPolicy(32_000, 32_000),
   [PipelineStages.CODE_GENERATION]: reasoningPolicy(32_000, 32_000),
   [PipelineStages.CODE_CORRECTION]: reasoningPolicy(12_000),
@@ -102,11 +105,15 @@ function standardPolicy(maxOutputTokens: number): ModelRoutePolicy {
   };
 }
 
-function reasoningPolicy(maxOutputTokens: number, defaultMaxOutputTokens = Math.min(8_000, maxOutputTokens)): ModelRoutePolicy {
+function reasoningPolicy(
+  maxOutputTokens: number,
+  defaultMaxOutputTokens = Math.min(8_000, maxOutputTokens),
+  maxInputTokens = 64_000,
+): ModelRoutePolicy {
   return {
     tier: "REASONING",
-    contextWindowTokens: 64_000 + maxOutputTokens + 512,
-    maxInputTokens: 64_000,
+    contextWindowTokens: maxInputTokens + maxOutputTokens + 512,
+    maxInputTokens,
     defaultMaxOutputTokens,
     maxOutputTokens,
     defaultTemperature: 0.1,
@@ -140,6 +147,18 @@ function configuredAllowedModel(
   return model;
 }
 
+function configuredReasoningEffort(
+  value: string | undefined,
+  fallback: ModelReasoningEffort
+): ModelReasoningEffort {
+  if (!value) return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["low", "medium", "high", "xhigh"].includes(normalized)) {
+    return normalized as ModelReasoningEffort;
+  }
+  return fallback;
+}
+
 const SOL_MODEL = "gpt-6.1-sol";
 const ASTRA_MODEL = "gpt-6-astra";
 
@@ -165,11 +184,27 @@ export class ModelRouter {
       requirementsRevisionModel: configuredAllowedModel(config.requirementsRevisionModel, SOL_MODEL, "Requirements revision", [SOL_MODEL]),
       documentationGenerationModel: configuredAllowedModel(config.documentationGenerationModel, SOL_MODEL, "Documentation generation", [SOL_MODEL]),
       documentationRevisionModel: configuredAllowedModel(config.documentationRevisionModel, SOL_MODEL, "Documentation revision", [SOL_MODEL]),
+      documentationReasoningEffort: configuredReasoningEffort(
+        config.documentationReasoningEffort ?? process.env.OPENAI_DOCUMENTATION_REASONING_EFFORT,
+        "low"
+      ),
       architectureModel: configuredAllowedModel(
         config.architectureModel ?? process.env.OPENAI_ARCHITECTURE_MODEL,
         ASTRA_MODEL,
         "Architecture",
         [ASTRA_MODEL, SOL_MODEL],
+      ),
+      architectureGenerationReasoningEffort: configuredReasoningEffort(
+        config.architectureGenerationReasoningEffort ??
+          process.env.OPENAI_ARCHITECTURE_GENERATION_REASONING_EFFORT ??
+          process.env.OPENAI_ARCHITECTURE_REASONING_EFFORT,
+        "high"
+      ),
+      architectureRevisionReasoningEffort: configuredReasoningEffort(
+        config.architectureRevisionReasoningEffort ??
+          process.env.OPENAI_ARCHITECTURE_REVISION_REASONING_EFFORT ??
+          process.env.OPENAI_ARCHITECTURE_REASONING_EFFORT,
+        "high"
       ),
       implementationPlanningModel: configuredAllowedModel(config.implementationPlanningModel, SOL_MODEL, "Implementation planning", [SOL_MODEL]),
       codeGenerationModel: configuredAllowedModel(
@@ -236,12 +271,25 @@ export class ModelRouter {
       case PipelineStages.REQUIREMENTS_REVISION:
         return { model: this.config.requirementsRevisionModel, reasoningEffort: "medium" };
       case PipelineStages.DOCUMENTATION_GENERATION:
-        return { model: this.config.documentationGenerationModel, reasoningEffort: "medium" };
+        return {
+          model: this.config.documentationGenerationModel,
+          reasoningEffort: this.config.documentationReasoningEffort ?? "low",
+        };
       case PipelineStages.DOCUMENTATION_REVISION:
-        return { model: this.config.documentationRevisionModel, reasoningEffort: "medium" };
+        return {
+          model: this.config.documentationRevisionModel,
+          reasoningEffort: this.config.documentationReasoningEffort ?? "low",
+        };
       case PipelineStages.ARCHITECTURE_GENERATION:
+        return {
+          model: this.config.architectureModel,
+          reasoningEffort: this.config.architectureGenerationReasoningEffort ?? "high",
+        };
       case PipelineStages.ARCHITECTURE_REVISION:
-        return { model: this.config.architectureModel, reasoningEffort: "high" };
+        return {
+          model: this.config.architectureModel,
+          reasoningEffort: this.config.architectureRevisionReasoningEffort ?? "high",
+        };
       case PipelineStages.IMPLEMENTATION_PLANNING:
         return { model: this.config.implementationPlanningModel, reasoningEffort: "high" };
       case PipelineStages.CODE_GENERATION:

@@ -19,6 +19,7 @@ import { PlanningAuthorizationService } from "../planning-authorization.service"
 import { PlanningGenerationService } from "../planning-generation.service";
 import { PlanningReadinessService } from "../planning-readiness.service";
 import { PlanningRequirementsRunService } from "../planning-requirements-run.service";
+import { seedConfirmedLiveBrief } from "./test-brief-fixtures";
 
 const databaseUrl = process.env.DATABASE_URL;
 const isolatedSchema = databaseUrl ? new URL(databaseUrl).searchParams.get("schema") : null;
@@ -140,6 +141,7 @@ function services(gateway: Pick<LLMGateway, "callStructured">) {
 async function createProject(): Promise<string> {
   const id = `checkpoint-1c-d2-project-${crypto.randomUUID()}`;
   await prisma.project.create({ data: { id, name: "Checkpoint 1C-D2", description: "Section revisions", userId: ownerId } });
+  await seedConfirmedLiveBrief(prisma, id, ownerId);
   projectIds.push(id);
   return id;
 }
