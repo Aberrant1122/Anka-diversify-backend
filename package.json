@@ -24,7 +24,10 @@
     "test:cp2:browser": "node scripts/run-cp2-browser-acceptance.js",
     "test:cp2:adversarial": "node scripts/run-cp2-adversarial-acceptance.js",
     "test:cp2:real-provider": "node scripts/test-real-provider-intake.js",
-    "test:cp3:authority-currentness": "node scripts/run-cp3-authority-currentness.js"
+    "test:cp3:authority-currentness": "node scripts/run-cp3-authority-currentness.js",
+    "test:cp41:integration": "node scripts/run-cp41-architecture-kanban.js",
+    "test:cp42:integration": "node scripts/run-cp42-repository-bootstrap.js",
+    "test:cp42:browser": "node scripts/run-cp42-browser-acceptance.js"
   },
   "keywords": [],
   "author": "",

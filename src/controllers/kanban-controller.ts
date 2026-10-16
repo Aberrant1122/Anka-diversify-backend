@@ -36,12 +36,11 @@ export class KanbanController {
       const projectId = Array.isArray(req.params.projectId) ? req.params.projectId[0] : req.params.projectId;
       const actorId = req.user?.userId as string | undefined;
       if (!actorId) return res.status(401).json({ success: false, error: "Authentication required" });
-      await currentImplementationAuthority(prisma, projectId, actorId);
-      const board = await kanbanService.generateBoardFromWorkflow(projectId, actorId);
+      const idempotencyKey = ((req.headers["idempotency-key"] || req.body?.idempotencyKey) as string | undefined)?.trim();
+      const board = await kanbanService.generateBoardFromWorkflow(projectId, actorId, { idempotencyKey });
       return res.json({ success: true, data: board });
-    } catch (err: any) {
-      if (isPlanningDomainError(err)) return res.status(err.httpStatus).json({ success: false, error: err.code, message: err.message });
-      return res.status(500).json({ success: false, error: err.message });
+    } catch (err: unknown) {
+      return respondError(res, err);
     }
   }
 

@@ -98,6 +98,7 @@ model Project {
   liveBriefRevisions           LiveBriefRevision[]
   liveBriefConfirmations       LiveBriefConfirmation[]
   intakeRequests               ProjectIntakeRequest[]
+  repositoryBootstrapAttempts  RepositoryBootstrapAttempt[]
 
   @@map("projects")
 }
@@ -1267,4 +1268,28 @@ model LiveBriefConfirmation {
   @@index([projectId, briefRevisionNumber])
   @@index([briefRevisionId])
   @@map("live_brief_confirmations")
+}
+
+model RepositoryBootstrapAttempt {
+  id                      String    @id @default(cuid())
+  projectId               String
+  idempotencyKey          String
+  status                  String    @default("PREPARED") // PREPARED | AUTHORIZED | INITIALIZING | BASELINE_READY | BOUND | FAILED
+  repositoryRoot          String
+  templateId              String
+  selectedStack           Json?
+  architectureFingerprint String?
+  baselineCommitSha       String?
+  baseBranch              String    @default("main")
+  repositoryId            String?
+  errorCode               String?
+  errorMessage            String?   @db.Text
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, status])
+  @@map("repository_bootstrap_attempts")
 }

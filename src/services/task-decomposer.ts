@@ -16,6 +16,37 @@ import {
 } from "../ai/planning/RepositoryArchitectureDetector";
 import { LLMGateway } from "../ai/gateway/LLMGateway";
 import { PipelineStages } from "../ai/gateway/PipelineStage";
+import { ImplementationAuthority } from "../planning/implementation-authority-preflight";
+import { PlanningDomainError } from "../planning/planning-errors";
+import { WorkflowContextService } from "./workflow-context.service";
+
+export interface KanbanTaskProposal {
+  key: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+  targetFiles: string[];
+  architectureComponentIds: string[];
+  dependencyKeys: string[];
+  repositoryId?: string;
+}
+
+export interface KanbanStageProposal {
+  title: string;
+  order: number;
+  tasks: KanbanTaskProposal[];
+}
+
+export interface KanbanBoardProposal {
+  stages: KanbanStageProposal[];
+}
+
+function isSafeRelativePath(value: string): boolean {
+  if (!value || value !== value.trim() || value.includes("\0")) return false;
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return false;
+  return normalized.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
 
 export class TaskDecomposer {
   private openai: OpenAI;
@@ -367,5 +398,212 @@ export class TaskDecomposer {
     graph.executionOrder = this.topologicalSort(graph);
 
     return graph;
+  }
+
+  /**
+   * Decomposes approved Architecture into a structured Kanban board proposal.
+   *
+   * Invariants (CP4.1):
+   * 1. Requires authoritative ImplementationAuthority.
+   * 2. Component references must belong to approved Architecture.
+   * 3. Repository IDs must belong to the authorized project scope (no fabricated IDs).
+   * 4. Enforces strict DAG validation (acyclic) and topological sorting.
+   * 5. Fails closed with typed PlanningDomainError on validation errors.
+   */
+  public async decomposeArchitecture(
+    authority: ImplementationAuthority,
+    options?: {
+      availableRepositories?: Array<{ id: string; name: string; role: string; githubUrl?: string }>;
+    }
+  ): Promise<KanbanBoardProposal> {
+    const workflowContextService = new WorkflowContextService();
+    const ctx = {
+      projectId: authority.projectId,
+      requirements: authority.requirements.artifact.content,
+      documentation: authority.documentation.artifact.content,
+      architecture: authority.architecture.artifact.content,
+    };
+    const boundaryPrompt = workflowContextService.buildSystemBoundaryPrompt(ctx);
+
+    const availableRepositories = options?.availableRepositories || [];
+    let repoContext = "";
+    if (availableRepositories.length > 0) {
+      repoContext = `AUTHORIZED PROJECT REPOSITORIES:\n`;
+      for (const repo of availableRepositories) {
+        repoContext += `- repositoryId "${repo.id}": "${repo.name}" (role: ${repo.role})\n`;
+      }
+      repoContext += `Tasks may specify a "repositoryId" field set ONLY to one of the exact IDs above. Do not invent repository IDs.\n\n`;
+    } else {
+      repoContext = `NO REPOSITORIES LINKED: Do NOT include a "repositoryId" field on tasks. Repositories will be bound prior to execution.\n\n`;
+    }
+
+    const prompt = `
+${boundaryPrompt}
+
+${repoContext}Based STRICTLY on the Project Workflow Documents above:
+Decompose this project into logical, step-by-step Kanban tasks categorized into stages.
+Ensure every task has explicit titles, descriptions, acceptance criteria, and target files.
+Each task must have a unique stable key, one or more exact Architecture component IDs,
+and dependencyKeys containing only keys of prerequisite tasks. Do not invent component IDs.
+
+Return ONLY a valid JSON object matching this schema:
+{
+  "stages": [
+    {
+      "title": "Stage 1: Core Setup & Models",
+      "order": 0,
+      "tasks": [
+        {
+          "key": "TASK-USER-SCHEMA",
+          "title": "Define User and Project Prisma Schemas",
+          "description": "Create data models as specified in Architecture document.",
+          "acceptanceCriteria": ["Prisma schema passes validation", "Exported types compile"],
+          "targetFiles": ["prisma/schema.prisma"],
+          "architectureComponentIds": ["ARCH-COMP-DATA"],
+          "dependencyKeys": []
+        }
+      ]
+    }
+  ]
+}
+`;
+
+    const gateway = LLMGateway.getInstance();
+    const result = await gateway.callStructured<KanbanBoardProposal>({
+      stage: PipelineStages.IMPLEMENTATION_PLANNING,
+      messages: [{ role: "user", content: prompt }],
+      schema: {
+        name: "KanbanBoardProposalSchema",
+        strict: false,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["stages"],
+          properties: {
+            stages: {
+              type: "array",
+              minItems: 1,
+              maxItems: 20,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["title", "order", "tasks"],
+                properties: {
+                  title: { type: "string", minLength: 1, maxLength: 200 },
+                  order: { type: "integer", minimum: 0, maximum: 1000 },
+                  tasks: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 100,
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["key", "title", "description", "acceptanceCriteria", "targetFiles", "architectureComponentIds", "dependencyKeys"],
+                      properties: {
+                        key: { type: "string", pattern: "^[A-Z0-9][A-Z0-9_-]{0,79}$" },
+                        title: { type: "string", minLength: 1, maxLength: 200 },
+                        description: { type: "string", minLength: 1, maxLength: 2000 },
+                        acceptanceCriteria: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1, maxLength: 500 } },
+                        targetFiles: { type: "array", maxItems: 50, items: { type: "string", minLength: 1 } },
+                        architectureComponentIds: { type: "array", minItems: 1, maxItems: 50, items: { type: "string", minLength: 1 } },
+                        dependencyKeys: { type: "array", maxItems: 100, items: { type: "string", minLength: 1 } },
+                        repositoryId: { type: "string" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        validate: (value: unknown) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) {
+            return { valid: false, errors: ["Kanban proposal must be an object"] };
+          }
+          const board = value as Record<string, unknown>;
+          if (!Array.isArray(board.stages) || board.stages.length === 0 || board.stages.length > 20) {
+            return { valid: false, errors: ["Invalid stages array"] };
+          }
+          return { valid: true, data: board as unknown as KanbanBoardProposal };
+        },
+      },
+    });
+
+    this.validateArchitectureProposal(result.content, authority, availableRepositories);
+    return result.content;
+  }
+
+  /**
+   * Deterministically validates an architecture decomposition proposal against authority.
+   */
+  public validateArchitectureProposal(
+    board: KanbanBoardProposal,
+    authority: ImplementationAuthority,
+    availableRepositories?: Array<{ id: string }>
+  ): void {
+    if (!board || typeof board !== "object" || !Array.isArray(board.stages) || board.stages.length === 0) {
+      throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Kanban proposal must contain at least one stage.", 422);
+    }
+    const validComponentIds = new Set(authority.architecture.content.components.map((c) => c.id));
+    const validRepoIds = new Set((availableRepositories || []).map((r) => r.id));
+    const tasks = board.stages.flatMap((stage) => stage.tasks);
+    if (tasks.length === 0) {
+      throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Kanban proposal must contain at least one task.", 422);
+    }
+    const keys = new Set<string>();
+    for (const task of tasks) {
+      if (!task || typeof task !== "object" || typeof task.key !== "string" || !task.key.trim() || !Array.isArray(task.dependencyKeys) || !Array.isArray(task.architectureComponentIds)) {
+        throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Generated task omitted required implementation references.", 422);
+      }
+      if (keys.has(task.key)) {
+        throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Generated tasks contain a duplicate key.", 422);
+      }
+      keys.add(task.key);
+
+      // Verify architecture component references
+      if (task.architectureComponentIds.length === 0 || task.architectureComponentIds.some((id) => !validComponentIds.has(id))) {
+        throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Generated task references an unknown Architecture component.", 422);
+      }
+
+      // Verify target files are safe relative paths
+      if (Array.isArray(task.targetFiles)) {
+        for (const file of task.targetFiles) {
+          if (!isSafeRelativePath(file)) {
+            throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", `Unsafe or invalid target file path: ${file}`, 422);
+          }
+        }
+      }
+
+      // Verify repository references
+      if (task.repositoryId) {
+        if (!validRepoIds.has(task.repositoryId)) {
+          throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Generated task references an unauthorized or foreign repository.", 422);
+        }
+      }
+    }
+
+    // Verify dependencies exist and are not self-referential
+    for (const task of tasks) {
+      if (task.dependencyKeys.includes(task.key) || task.dependencyKeys.some((k) => !keys.has(k))) {
+        throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Generated task dependency reference is invalid.", 422);
+      }
+    }
+
+    // Verify acyclicity using DAG validation
+    const executionGraph: DependencyExecutionGraph = {
+      nodes: tasks.map((t) => ({
+        id: t.key,
+        category: "types_and_interfaces",
+        description: t.description,
+        targetFiles: t.targetFiles,
+        dependencies: t.dependencyKeys,
+        estimatedComplexity: "SMALL",
+      })),
+      executionOrder: [],
+      graphVersion: "1.0.0",
+    };
+    if (!this.validateDAG(executionGraph)) {
+      throw new PlanningDomainError("PLANNING_ARTIFACT_INVALID", "Generated task dependencies contain a cycle.", 422);
+    }
   }
 }
