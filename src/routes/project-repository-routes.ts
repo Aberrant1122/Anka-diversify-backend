@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { ProjectRepositoryController } from "../controllers/project-repository-controller";
 
+import { bindProjectResources } from '../middleware/project-owner';
 const router = Router({ mergeParams: true });
+bindProjectResources(router, {"repoId":"projectRepository"});
 const repoController = new ProjectRepositoryController();
 
 // GET    /api/projects/:projectId/repositories

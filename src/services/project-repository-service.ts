@@ -1,3 +1,4 @@
+import { assertOwner, ProjectActor } from "../security/project-access";
 import fs from "fs";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
@@ -38,7 +39,10 @@ function redact<T extends { githubToken?: string | null }>(repo: T) {
   return { ...rest, hasToken: Boolean(githubToken) };
 }
 
-function deriveRepoName(githubUrl?: string | null, fallbackName?: string | null): string {
+function deriveRepoName(
+  githubUrl?: string | null,
+  fallbackName?: string | null,
+): string {
   if (githubUrl) {
     try {
       const parsed = new URL(githubUrl.trim());
@@ -55,36 +59,11 @@ function deriveRepoName(githubUrl?: string | null, fallbackName?: string | null)
   return fallbackName || "main";
 }
 
-function resolveLocalPath(githubUrl?: string | null, localPath?: string | null): string | null {
-  if (localPath && fs.existsSync(localPath)) {
-    return localPath;
-  }
-  if (githubUrl) {
-    const candidateDirs = [
-      path.resolve(process.cwd(), "..", "anka evaluation"),
-      path.resolve(process.env.USERPROFILE || "C:\\Users\\PCC", "Desktop", "anka evaluation"),
-    ];
-    for (const parentDir of candidateDirs) {
-      if (fs.existsSync(parentDir)) {
-        try {
-          const entries = fs.readdirSync(parentDir);
-          for (const entry of entries) {
-            const fullPath = path.join(parentDir, entry);
-            try {
-              const gitConfigPath = path.join(fullPath, ".git", "config");
-              if (fs.existsSync(gitConfigPath)) {
-                const configContent = fs.readFileSync(gitConfigPath, "utf8");
-                const cleanUrl = githubUrl.trim().replace(/\.git$/, "").toLowerCase();
-                if (configContent.toLowerCase().includes(cleanUrl)) {
-                  return fullPath;
-                }
-              }
-            } catch {}
-          }
-        } catch {}
-      }
-    }
-  }
+function resolveLocalPath(
+  _githubUrl?: string | null,
+  localPath?: string | null,
+): string | null {
+  // Never discover unrelated desktop checkouts from a matching remote string.
   return localPath || null;
 }
 
@@ -97,13 +76,17 @@ export class ProjectRepositoryService {
    * 2. If the project has no githubUrl, returns null safely.
    * 3. If the project has a githubUrl, creates and returns the primary row.
    */
-  async ensurePrimaryRepository(projectId: string) {
+  async ensurePrimaryRepository(projectId: string, actorId: string) {
+    await assertOwner(prisma, projectId, actorId);
     const existing = await prisma.projectRepository.findFirst({
       where: { projectId, isPrimary: true },
     });
     if (existing) {
       if (!existing.localPath) {
-        const resolved = resolveLocalPath(existing.githubUrl, existing.localPath);
+        const resolved = resolveLocalPath(
+          existing.githubUrl,
+          existing.localPath,
+        );
         if (resolved) {
           return prisma.projectRepository.update({
             where: { id: existing.id },
@@ -151,8 +134,9 @@ export class ProjectRepositoryService {
     return repo;
   }
 
-  async list(projectId: string) {
-    await this.ensurePrimaryRepository(projectId);
+  async list(projectId: string, actorId: string) {
+    await assertOwner(prisma, projectId, actorId);
+    await this.ensurePrimaryRepository(projectId, actorId);
 
     const repos = await prisma.projectRepository.findMany({
       where: { projectId },
@@ -164,10 +148,12 @@ export class ProjectRepositoryService {
       if (!r.localPath) {
         const resolved = resolveLocalPath(r.githubUrl, r.localPath);
         if (resolved) {
-          await prisma.projectRepository.update({
-            where: { id: r.id },
-            data: { localPath: resolved },
-          }).catch(() => {});
+          await prisma.projectRepository
+            .update({
+              where: { id: r.id },
+              data: { localPath: resolved },
+            })
+            .catch(() => {});
           r.localPath = resolved;
         }
       }
@@ -176,7 +162,12 @@ export class ProjectRepositoryService {
     return repos.map(redact);
   }
 
-  async create(projectId: string, input: CreateProjectRepositoryInput) {
+  async create(
+    projectId: string,
+    input: CreateProjectRepositoryInput,
+    actorId: string,
+  ) {
+    await assertOwner(prisma, projectId, actorId);
     if (!input.name || !input.githubUrl) {
       throw new Error("name and githubUrl are required");
     }
@@ -206,15 +197,23 @@ export class ProjectRepositoryService {
         testCommand: input.testCommand,
         lintCommand: input.lintCommand,
         typecheckCommand: input.typecheckCommand,
-        ownerUserId: input.ownerUserId,
+        ownerUserId: actorId,
         isPrimary: false,
       },
     });
     return redact(repo);
   }
 
-  async update(projectId: string, repoId: string, input: Partial<CreateProjectRepositoryInput>) {
-    const existing = await prisma.projectRepository.findFirst({ where: { id: repoId, projectId } });
+  async update(
+    projectId: string,
+    repoId: string,
+    input: Partial<CreateProjectRepositoryInput>,
+    actorId: string,
+  ) {
+    await assertOwner(prisma, projectId, actorId);
+    const existing = await prisma.projectRepository.findFirst({
+      where: { id: repoId, projectId },
+    });
     if (!existing) throw new Error("Repository not found");
 
     let encryptedToken: string | undefined | null = undefined;
@@ -230,7 +229,10 @@ export class ProjectRepositoryService {
       where: { id: repoId },
       data: {
         name: input.name,
-        role: input.role && VALID_ROLES.includes(input.role) ? input.role : undefined,
+        role:
+          input.role && VALID_ROLES.includes(input.role)
+            ? input.role
+            : undefined,
         githubUrl: input.githubUrl,
         githubToken: encryptedToken,
         localPath: input.localPath,
@@ -241,38 +243,58 @@ export class ProjectRepositoryService {
         testCommand: input.testCommand,
         lintCommand: input.lintCommand,
         typecheckCommand: input.typecheckCommand,
-        ownerUserId: input.ownerUserId,
+        ownerUserId: actorId,
       },
     });
     return redact(repo);
   }
 
-  async remove(projectId: string, repoId: string) {
-    const existing = await prisma.projectRepository.findFirst({ where: { id: repoId, projectId } });
+  async remove(projectId: string, repoId: string, actorId: string) {
+    await assertOwner(prisma, projectId, actorId);
+    const existing = await prisma.projectRepository.findFirst({
+      where: { id: repoId, projectId },
+    });
     if (!existing) throw new Error("Repository not found");
     if (existing.isPrimary) {
-      throw new Error("Cannot delete the primary repository — update the project's main GitHub connection instead");
+      throw new Error(
+        "Cannot delete the primary repository — update the project's main GitHub connection instead",
+      );
     }
     await prisma.projectRepository.delete({ where: { id: repoId } });
   }
 
   // Internal helper for future coordinator/repo-worker use — decrypted token, not exposed over HTTP.
-  async getDecryptedToken(repoId: string): Promise<string | undefined> {
-    const repo = await prisma.projectRepository.findUnique({ where: { id: repoId } });
+  async getDecryptedToken(
+    repoId: string,
+    actor: ProjectActor,
+  ): Promise<string | undefined> {
+    await assertOwner(prisma, actor.projectId, actor.userId);
+    const repo = await prisma.projectRepository.findFirst({
+      where: { id: repoId, projectId: actor.projectId },
+    });
     if (!repo?.githubToken) return undefined;
     return decrypt(repo.githubToken);
   }
 
   // Pulls a fresh repo snapshot into RepositorySnapshot so the AI agent can be
   // pointed at this repo (see ai-service.ts runCodingAgent's repositoryId param).
-  async sync(projectId: string, repoId: string) {
-    const repo = await prisma.projectRepository.findFirst({ where: { id: repoId, projectId } });
+  async sync(projectId: string, repoId: string, actorId: string) {
+    await assertOwner(prisma, projectId, actorId);
+    const repo = await prisma.projectRepository.findFirst({
+      where: { id: repoId, projectId },
+    });
     if (!repo) throw new Error("Repository not found");
 
     const token = repo.githubToken ? decrypt(repo.githubToken) : undefined;
-    await ProjectGitHubService.buildRepositoryContext(repo.id, repo.githubUrl, token);
+    await ProjectGitHubService.buildRepositoryContext(
+      repo.id,
+      repo.githubUrl,
+      token,
+    );
 
-    const snapshot = await prisma.repositorySnapshot.findUnique({ where: { repositoryId: repo.id } });
+    const snapshot = await prisma.repositorySnapshot.findUnique({
+      where: { repositoryId: repo.id },
+    });
     return snapshot;
   }
 
@@ -281,13 +303,20 @@ export class ProjectRepositoryService {
    * If repositoryId is supplied, queries the specific ProjectRepository.
    * If repositoryId is omitted, queries the primary project repository.
    */
-  async resolveRepositoryForAgent(projectId: string, repositoryId?: string) {
+  async resolveRepositoryForAgent(
+    projectId: string,
+    repositoryId: string | undefined,
+    actorId: string,
+  ) {
+    await assertOwner(prisma, projectId, actorId);
     if (repositoryId) {
       const repo = await prisma.projectRepository.findFirst({
         where: { id: repositoryId, projectId },
       });
       if (!repo) {
-        throw new Error(`[REPOSITORY_NOT_FOUND] Repository "${repositoryId}" does not belong to project "${projectId}".`);
+        throw new Error(
+          `[REPOSITORY_NOT_FOUND] Repository "${repositoryId}" does not belong to project "${projectId}".`,
+        );
       }
       return {
         id: repo.id,

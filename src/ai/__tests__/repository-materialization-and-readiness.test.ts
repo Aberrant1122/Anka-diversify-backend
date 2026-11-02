@@ -43,7 +43,7 @@ describe("AI Step 17 — Repository Materialization, Readiness & Fail-Closed Val
     diffCriticEnabled: false,
   };
 
-  test("A & C. Repository project with localPath=null and no githubUrl fails closed with REPOSITORY_NOT_READY", async () => {
+  test("A & C. Repository project with localPath=null and no githubUrl fails closed before repository access without document authority", async () => {
     jest.spyOn(prisma.project, "findUnique").mockResolvedValue({
       id: "proj-unready",
       name: "Unready Project",
@@ -53,7 +53,7 @@ describe("AI Step 17 — Repository Materialization, Readiness & Fail-Closed Val
 
     await expect(
       CodingAgent.runCodingAgent("user-1", "proj-unready", { message: "build something" })
-    ).rejects.toThrow(/\[REPOSITORY_NOT_READY\]/);
+    ).rejects.toThrow(/DOCUMENT_AUTHORITY_REQUIRED/);
   });
 
   test("B. Project with githubUrl is materialized and localPath persisted", async () => {
@@ -256,6 +256,6 @@ describe("AI Step 17 — Repository Materialization, Readiness & Fail-Closed Val
     // User-controlled context MUST be ignored, failing with REPOSITORY_NOT_READY
     await expect(
       CodingAgent.runCodingAgent("user-1", "proj-secure", maliciousRequest)
-    ).rejects.toThrow(/\[REPOSITORY_NOT_READY\]/);
+    ).rejects.toThrow(/DOCUMENT_AUTHORITY_REQUIRED/);
   });
 });

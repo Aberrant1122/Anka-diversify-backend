@@ -1,3 +1,5 @@
+import { sessionVersion } from "../../security/session-version";
+jest.mock("../../services/database", () => ({ prisma: { user: { findUnique: jest.fn(async ({ where }: any) => ({ id: where.id, email: 'fixture@example.test', role: 'developer', status: 'active', password: 'fixture-hash' })) }, phaseArtifact: { findFirst: jest.fn(async () => ({ id: 'artifact' })) }, workflowRun: { findFirst: jest.fn(async () => ({ id: 'run' })) } } }));
 import express from "express";
 import http from "http";
 import jwt from "jsonwebtoken";
@@ -28,7 +30,7 @@ function result(httpStatus: 200 | 201 | 202): GenerationResult {
 describe("Requirements initial-generation HTTP endpoint", () => {
   let server: http.Server;
   let baseUrl: string;
-  const token = jwt.sign({ userId: "member-1" }, JWT_SECRET);
+  const token = jwt.sign({ userId: "member-1", sessionVersion: sessionVersion({ id: "member-1", password: "fixture-hash" }) }, JWT_SECRET);
   let generationSpy: jest.SpyInstance;
   let legacyRunSpy: jest.SpyInstance;
 

@@ -1,10 +1,19 @@
 import { Request, Response } from "express";
 import { ProjectService } from "../services/project-service";
 import { ProjectGitHubService } from "../services/github.service";
-import { generatePresignedUrl, generateDownloadUrl, deleteFromS3, detectType } from "../services/upload.service";
+import {
+  generatePresignedUrl,
+  generateDownloadUrl,
+  deleteFromS3,
+  detectType,
+} from "../services/upload.service";
 import { notificationService } from "../services/notification-service";
 import { PrismaClient } from "@prisma/client";
-import { encrypt, decrypt, validateGitHubToken as validateToken } from "../utils/encryption";
+import {
+  encrypt,
+  decrypt,
+  validateGitHubToken as validateToken,
+} from "../utils/encryption";
 const prisma = new PrismaClient();
 
 const projectService = new ProjectService();
@@ -33,38 +42,58 @@ export class ProjectController {
       res.json({ success: true, data: projects, count: projects.length });
     } catch (error) {
       console.error("Error fetching projects:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch projects" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch projects" });
     }
   }
 
   async getProjectById(req: Request, res: Response) {
     try {
-      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      const project = await projectService.getProjectById(
+        param(req, "id"),
+        getUserId(req),
+      );
       if (!project) {
-        return res.status(404).json({ success: false, error: "Project not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Project not found" });
       }
       res.json({ success: true, data: project });
     } catch (error) {
       console.error("Error fetching project:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch project" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch project" });
     }
   }
 
   async createProject(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      const { name, description, phase, priority, githubUrl, githubToken, localPath, dueDate } = req.body;
+      const {
+        name,
+        description,
+        phase,
+        priority,
+        githubUrl,
+        githubToken,
+        localPath,
+        dueDate,
+      } = req.body;
 
       // Validate required fields
       if (!name) {
-        return res.status(400).json({ success: false, error: "Project name is required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "Project name is required" });
       }
 
       // If GitHub URL is provided, token is required
       if (githubUrl && !githubToken) {
-        return res.status(400).json({ 
-          success: false, 
-          error: "GitHub token is required when providing a GitHub URL" 
+        return res.status(400).json({
+          success: false,
+          error: "GitHub token is required when providing a GitHub URL",
         });
       }
 
@@ -74,9 +103,9 @@ export class ProjectController {
         // Validate token with GitHub API
         const validation = await validateToken(githubToken);
         if (!validation.valid) {
-          return res.status(400).json({ 
-            success: false, 
-            error: validation.error || "Invalid GitHub token" 
+          return res.status(400).json({
+            success: false,
+            error: validation.error || "Invalid GitHub token",
           });
         }
 
@@ -93,14 +122,20 @@ export class ProjectController {
           githubUrl,
           githubToken: encryptedToken,
           localPath,
-          dueDate: dueDate || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
+          dueDate:
+            dueDate ||
+            new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
         },
         userId,
       );
 
       // Kick off GitHub context sync in background (don't block the response)
       if (githubUrl && githubToken) {
-        ProjectGitHubService.buildProjectContext(project.id, githubUrl, githubToken).catch((err) =>
+        ProjectGitHubService.buildProjectContext(
+          project.id,
+          githubUrl,
+          githubToken,
+        ).catch((err) =>
           console.error("GitHub sync failed for project", project.id, err),
         );
       }
@@ -108,31 +143,45 @@ export class ProjectController {
       // Don't return the encrypted token in response
       const { githubToken: _, ...projectWithoutToken } = project;
 
-      res.status(201).json({ 
-        success: true, 
-        data: projectWithoutToken, 
-        message: "Project created successfully" 
+      res.status(201).json({
+        success: true,
+        data: projectWithoutToken,
+        message: "Project created successfully",
       });
     } catch (error) {
       console.error("Error creating project:", error);
-      res.status(500).json({ success: false, error: "Failed to create project" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to create project" });
     }
   }
 
   async updateProject(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      const project = await projectService.updateProject(param(req, "id"), req.body, userId);
+      const project = await projectService.updateProject(
+        param(req, "id"),
+        req.body,
+        userId,
+      );
 
       if (!project) {
-        return res.status(404).json({ success: false, error: "Project not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Project not found" });
       }
 
       if (req.body.githubUrl) {
         // Get the decrypted token for syncing
-        const token = project.githubToken ? decrypt(project.githubToken) : undefined;
-        
-        ProjectGitHubService.buildProjectContext(project.id, req.body.githubUrl, token).catch((err) =>
+        const token = project.githubToken
+          ? decrypt(project.githubToken)
+          : undefined;
+
+        ProjectGitHubService.buildProjectContext(
+          project.id,
+          req.body.githubUrl,
+          token,
+        ).catch((err) =>
           console.error("GitHub sync failed for project", project.id, err),
         );
       }
@@ -140,10 +189,16 @@ export class ProjectController {
       // Don't return the encrypted token in response
       const { githubToken: _, ...projectWithoutToken } = project;
 
-      res.json({ success: true, data: projectWithoutToken, message: "Project updated successfully" });
+      res.json({
+        success: true,
+        data: projectWithoutToken,
+        message: "Project updated successfully",
+      });
     } catch (error) {
       console.error("Error updating project:", error);
-      res.status(500).json({ success: false, error: "Failed to update project" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to update project" });
     }
   }
 
@@ -153,31 +208,43 @@ export class ProjectController {
       const { githubToken } = req.body;
 
       if (!githubToken) {
-        return res.status(400).json({ success: false, error: "GitHub token is required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "GitHub token is required" });
       }
 
       // Validate token with GitHub API
       const validation = await validateToken(githubToken);
       if (!validation.valid) {
-        return res.status(400).json({ 
-          success: false, 
-          error: validation.error || "Invalid GitHub token" 
+        return res.status(400).json({
+          success: false,
+          error: validation.error || "Invalid GitHub token",
         });
       }
 
       // Encrypt and save
       const encryptedToken = encrypt(githubToken);
-      await projectService.updateProjectGitHubToken(param(req, "id"), encryptedToken, userId);
+      await projectService.updateProjectGitHubToken(
+        param(req, "id"),
+        encryptedToken,
+        userId,
+      );
 
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         message: "GitHub token updated successfully",
-        data: { username: validation.username, scopes: validation.scopes }
+        data: { username: validation.username, scopes: validation.scopes },
       });
     } catch (error: any) {
       console.error("Error updating GitHub token:", error);
-      res.status(error.message === 'Unauthorized to update this project' ? 403 : 500)
-        .json({ success: false, error: error.message || "Failed to update GitHub token" });
+      res
+        .status(
+          error.message === "Unauthorized to update this project" ? 403 : 500,
+        )
+        .json({
+          success: false,
+          error: error.message || "Failed to update GitHub token",
+        });
     }
   }
 
@@ -186,51 +253,60 @@ export class ProjectController {
       const { githubToken } = req.body;
 
       if (!githubToken) {
-        return res.status(400).json({ success: false, error: "GitHub token is required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "GitHub token is required" });
       }
 
       const validation = await validateToken(githubToken);
 
-      console.log('Token validation result:', { 
-        valid: validation.valid, 
+      console.log("Token validation result:", {
+        valid: validation.valid,
         username: validation.username,
-        error: validation.error 
+        error: validation.error,
       });
 
       if (validation.valid) {
-        res.json({ 
-          success: true, 
-          data: { 
-            valid: true, 
+        res.json({
+          success: true,
+          data: {
+            valid: true,
             username: validation.username,
-            scopes: validation.scopes 
-          } 
+            scopes: validation.scopes,
+          },
         });
       } else {
-        res.status(400).json({ 
-          success: false, 
-          error: validation.error || "Invalid GitHub token" 
+        res.status(400).json({
+          success: false,
+          error: validation.error || "Invalid GitHub token",
         });
       }
     } catch (error: any) {
       console.error("Error validating GitHub token:", error);
-      res.status(500).json({ 
-        success: false, 
-        error: error?.message || "Failed to validate GitHub token" 
+      res.status(500).json({
+        success: false,
+        error: error?.message || "Failed to validate GitHub token",
       });
     }
   }
 
   async deleteProject(req: Request, res: Response) {
     try {
-      const deleted = await projectService.deleteProject(param(req, "id"), getUserId(req));
+      const deleted = await projectService.deleteProject(
+        param(req, "id"),
+        getUserId(req),
+      );
       if (!deleted) {
-        return res.status(404).json({ success: false, error: "Project not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Project not found" });
       }
       res.json({ success: true, message: "Project deleted successfully" });
     } catch (error) {
       console.error("Error deleting project:", error);
-      res.status(500).json({ success: false, error: "Failed to delete project" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to delete project" });
     }
   }
 
@@ -238,20 +314,40 @@ export class ProjectController {
 
   async getRepoFile(req: Request, res: Response) {
     try {
-      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      const project = await projectService.getProjectById(
+        param(req, "id"),
+        getUserId(req),
+      );
       if (!project?.githubUrl) {
-        return res.status(400).json({ success: false, error: "No GitHub repository connected" });
+        return res
+          .status(400)
+          .json({ success: false, error: "No GitHub repository connected" });
       }
       const filePath = req.query.path as string;
-      if (!filePath) return res.status(400).json({ success: false, error: "path query param required" });
+      if (!filePath)
+        return res
+          .status(400)
+          .json({ success: false, error: "path query param required" });
 
       // Decrypt the GitHub token
-      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+      const token = project.githubToken
+        ? decrypt(project.githubToken)
+        : undefined;
 
-      const file = await ProjectGitHubService.getFileContent(project.githubUrl, filePath, token);
-      if (!file) return res.status(404).json({ success: false, error: "File not found" });
+      const file = await ProjectGitHubService.getFileContent(
+        project.githubUrl,
+        filePath,
+        token,
+      );
+      if (!file)
+        return res
+          .status(404)
+          .json({ success: false, error: "File not found" });
 
-      res.json({ success: true, data: { path: filePath, content: file.content, sha: file.sha } });
+      res.json({
+        success: true,
+        data: { path: filePath, content: file.content, sha: file.sha },
+      });
     } catch (error) {
       console.error("Error reading repo file:", error);
       res.status(500).json({ success: false, error: "Failed to read file" });
@@ -263,19 +359,32 @@ export class ProjectController {
     return res.status(409).json({
       success: false,
       error: "GIT_WORKFLOW_REQUIRED",
-      message: "Repository edits must be applied through CP10 and shipped from a verified isolated task branch.",
+      message:
+        "Repository edits must be applied through CP10 and shipped from a verified isolated task branch.",
     });
   }
 
   async applyLocalChanges(req: Request, res: Response) {
     try {
-      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      const project = await projectService.getProjectById(
+        param(req, "id"),
+        getUserId(req),
+      );
       if (!project?.localPath) {
-        return res.status(400).json({ success: false, error: "No local path configured for this project" });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: "No local path configured for this project",
+          });
       }
-      const { changes } = req.body as { changes: { path: string; content: string }[] };
+      const { changes } = req.body as {
+        changes: { path: string; content: string }[];
+      };
       if (!changes?.length) {
-        return res.status(400).json({ success: false, error: "No changes provided" });
+        return res
+          .status(400)
+          .json({ success: false, error: "No changes provided" });
       }
       // Authentication permits project access, not request-defined filesystem authority.
       // This endpoint has no independent server-side local-edit policy yet, so it must
@@ -287,42 +396,67 @@ export class ProjectController {
       });
     } catch (error) {
       console.error("Error applying local changes:", error);
-      res.status(500).json({ success: false, error: "Failed to write local files" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to write local files" });
     }
   }
 
   async syncGithub(req: Request, res: Response) {
     try {
       const userId = getUserId(req);
-      const project = await projectService.getProjectById(param(req, "id"), userId);
+      const project = await projectService.getProjectById(
+        param(req, "id"),
+        userId,
+      );
 
       if (!project) {
-        return res.status(404).json({ success: false, error: "Project not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Project not found" });
       }
 
       const githubUrl = req.body.githubUrl || project.githubUrl;
       if (!githubUrl) {
-        return res.status(400).json({ success: false, error: "No GitHub URL provided" });
+        return res
+          .status(400)
+          .json({ success: false, error: "No GitHub URL provided" });
       }
 
       // Decrypt the GitHub token
-      const token = project.githubToken ? decrypt(project.githubToken) : undefined;
+      const token = project.githubToken
+        ? decrypt(project.githubToken)
+        : undefined;
 
-      await ProjectGitHubService.buildProjectContext(project.id, githubUrl, token);
-      res.json({ success: true, message: "GitHub context synced successfully" });
+      await ProjectGitHubService.buildProjectContext(
+        project.id,
+        githubUrl,
+        token,
+      );
+      res.json({
+        success: true,
+        message: "GitHub context synced successfully",
+      });
     } catch (error) {
       console.error("Error syncing GitHub context:", error);
-      res.status(500).json({ success: false, error: "Failed to sync GitHub context" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to sync GitHub context" });
     }
   }
 
   async getProjectTasks(req: Request, res: Response) {
     try {
-      const tasks = await projectService.getProjectTasks(param(req, "id"), getUserId(req));
+      const tasks = await projectService.getProjectTasks(
+        param(req, "id"),
+        getUserId(req),
+      );
       res.json({ success: true, data: tasks, count: tasks.length });
     } catch (error) {
       console.error("Error fetching project tasks:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch project tasks" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch project tasks" });
     }
   }
 
@@ -341,7 +475,13 @@ export class ProjectController {
         },
         actor,
       );
-      res.status(201).json({ success: true, data: task, message: "Task created successfully" });
+      res
+        .status(201)
+        .json({
+          success: true,
+          data: task,
+          message: "Task created successfully",
+        });
     } catch (error) {
       console.error("Error creating task:", error);
       res.status(500).json({ success: false, error: "Failed to create task" });
@@ -350,10 +490,20 @@ export class ProjectController {
 
   async updateTask(req: Request, res: Response) {
     try {
-      const actor = { userId: getUserId(req), userName: getUserName(req), projectId: param(req, "id") };
-      const task = await projectService.updateTask(param(req, "taskId"), req.body, actor);
+      const actor = {
+        userId: getUserId(req),
+        userName: getUserName(req),
+        projectId: param(req, "id"),
+      };
+      const task = await projectService.updateTask(
+        param(req, "taskId"),
+        req.body,
+        actor,
+      );
       if (!task) {
-        return res.status(404).json({ success: false, error: "Task not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Task not found" });
       }
       res.json({ success: true, data: task });
     } catch (error) {
@@ -364,10 +514,19 @@ export class ProjectController {
 
   async deleteTask(req: Request, res: Response) {
     try {
-      const actor = { userId: getUserId(req), userName: getUserName(req), projectId: param(req, "id") };
-      const deleted = await projectService.deleteTask(param(req, "taskId"), actor);
+      const actor = {
+        userId: getUserId(req),
+        userName: getUserName(req),
+        projectId: param(req, "id"),
+      };
+      const deleted = await projectService.deleteTask(
+        param(req, "taskId"),
+        actor,
+      );
       if (!deleted) {
-        return res.status(404).json({ success: false, error: "Task not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Task not found" });
       }
       res.json({ success: true, message: "Task deleted successfully" });
     } catch (error) {
@@ -378,23 +537,37 @@ export class ProjectController {
 
   async getProjectMembers(req: Request, res: Response) {
     try {
-      const members = await projectService.getProjectMembers(param(req, "id"));
+      const members = await projectService.getProjectMembers(
+        param(req, "id"),
+        getUserId(req),
+      );
       res.json({ success: true, data: members });
     } catch (error) {
       console.error("Error fetching members:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch members" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch members" });
     }
   }
 
   async addProjectMember(req: Request, res: Response) {
     try {
       const { userId } = req.body;
-      if (!userId) return res.status(400).json({ success: false, error: "userId required" });
-      const member = await projectService.addProjectMember(param(req, "id"), userId);
+      if (!userId)
+        return res
+          .status(400)
+          .json({ success: false, error: "userId required" });
+      const member = await projectService.addProjectMember(
+        param(req, "id"),
+        userId,
+        getUserId(req),
+      );
       res.status(201).json({ success: true, data: member });
     } catch (error: any) {
       if (error?.code === "P2002") {
-        return res.status(409).json({ success: false, error: "User is already a member" });
+        return res
+          .status(409)
+          .json({ success: false, error: "User is already a member" });
       }
       console.error("Error adding member:", error);
       res.status(500).json({ success: false, error: "Failed to add member" });
@@ -403,22 +576,36 @@ export class ProjectController {
 
   async removeProjectMember(req: Request, res: Response) {
     try {
-      const removed = await projectService.removeProjectMember(param(req, "id"), param(req, "userId"));
-      if (!removed) return res.status(404).json({ success: false, error: "Member not found" });
+      const removed = await projectService.removeProjectMember(
+        param(req, "id"),
+        param(req, "userId"),
+        getUserId(req),
+      );
+      if (!removed)
+        return res
+          .status(404)
+          .json({ success: false, error: "Member not found" });
       res.json({ success: true, message: "Member removed" });
     } catch (error) {
       console.error("Error removing member:", error);
-      res.status(500).json({ success: false, error: "Failed to remove member" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to remove member" });
     }
   }
 
   async getChatMessages(req: Request, res: Response) {
     try {
-      const messages = await projectService.getChatMessages(param(req, "id"));
+      const messages = await projectService.getChatMessages(
+        param(req, "id"),
+        getUserId(req),
+      );
       res.json({ success: true, data: messages });
     } catch (error) {
       console.error("Error fetching chat messages:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch messages" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch messages" });
     }
   }
 
@@ -426,7 +613,9 @@ export class ProjectController {
     try {
       const { content } = req.body;
       if (!content?.trim()) {
-        return res.status(400).json({ success: false, error: "content is required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "content is required" });
       }
       const message = await projectService.sendChatMessage({
         projectId: param(req, "id"),
@@ -443,21 +632,31 @@ export class ProjectController {
 
   async getActivities(req: Request, res: Response) {
     try {
-      const activities = await projectService.getActivities(param(req, "id"));
+      const activities = await projectService.getActivities(
+        param(req, "id"),
+        getUserId(req),
+      );
       res.json({ success: true, data: activities, count: activities.length });
     } catch (error) {
       console.error("Error fetching activities:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch activities" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch activities" });
     }
   }
 
   async getComments(req: Request, res: Response) {
     try {
-      const comments = await projectService.getComments(param(req, "taskId"));
+      const comments = await projectService.getComments(param(req, "taskId"), {
+        projectId: param(req, "id"),
+        userId: getUserId(req),
+      });
       res.json({ success: true, data: comments, count: comments.length });
     } catch (error) {
       console.error("Error fetching comments:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch comments" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch comments" });
     }
   }
 
@@ -465,7 +664,9 @@ export class ProjectController {
     try {
       const { content } = req.body;
       if (!content?.trim()) {
-        return res.status(400).json({ success: false, error: "content is required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "content is required" });
       }
       const taskId = param(req, "taskId");
       const projectId = param(req, "id");
@@ -482,41 +683,70 @@ export class ProjectController {
       // Fire-and-forget @mention notifications
       if (content.includes("@")) {
         Promise.all([
-          prisma.projectTask.findUnique({ where: { id: taskId }, select: { title: true } }),
-          prisma.project.findUnique({ where: { id: projectId }, select: { name: true } }),
-        ]).then(([task, project]) =>
-          notificationService.handleMentions(content.trim(), userId, userName, {
-            taskTitle: task?.title || "a task",
-            projectName: project?.name || "a project",
-            taskId,
-            projectId,
-          })
-        ).catch(() => {});
+          prisma.projectTask.findUnique({
+            where: { id: taskId },
+            select: { title: true },
+          }),
+          prisma.project.findUnique({
+            where: { id: projectId },
+            select: { name: true },
+          }),
+        ])
+          .then(([task, project]) =>
+            notificationService.handleMentions(
+              content.trim(),
+              userId,
+              userName,
+              {
+                taskTitle: task?.title || "a task",
+                projectName: project?.name || "a project",
+                taskId,
+                projectId,
+              },
+            ),
+          )
+          .catch(() => {});
       }
 
       res.status(201).json({ success: true, data: comment });
     } catch (error) {
       console.error("Error creating comment:", error);
-      res.status(500).json({ success: false, error: "Failed to create comment" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to create comment" });
     }
   }
 
   async deleteComment(req: Request, res: Response) {
     try {
-      const deleted = await projectService.deleteComment(param(req, "commentId"));
+      const deleted = await projectService.deleteComment(
+        param(req, "commentId"),
+        {
+          projectId: param(req, "id"),
+          userId: getUserId(req),
+          taskId: param(req, "taskId"),
+        },
+      );
       if (!deleted) {
-        return res.status(404).json({ success: false, error: "Comment not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Comment not found" });
       }
       res.json({ success: true, message: "Comment deleted" });
     } catch (error) {
       console.error("Error deleting comment:", error);
-      res.status(500).json({ success: false, error: "Failed to delete comment" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to delete comment" });
     }
   }
 
   async getProjectFiles(req: Request, res: Response) {
     try {
-      const files = await projectService.getProjectFiles(param(req, "id"));
+      const files = await projectService.getProjectFiles(
+        param(req, "id"),
+        getUserId(req),
+      );
       res.json({ success: true, data: files, count: files.length });
     } catch (error) {
       console.error("Error fetching project files:", error);
@@ -526,15 +756,18 @@ export class ProjectController {
 
   async createFile(req: Request, res: Response) {
     try {
-      const file = await projectService.createFile({
-        projectId: param(req, "id"),
-        name: req.body.name,
-        type: req.body.type,
-        phase: req.body.phase,
-        url: req.body.url,
-        size: req.body.size,
-        uploadedBy: req.body.uploadedBy,
-      });
+      const file = await projectService.createFile(
+        {
+          projectId: param(req, "id"),
+          name: req.body.name,
+          type: req.body.type,
+          phase: req.body.phase,
+          url: req.body.url,
+          size: req.body.size,
+          uploadedBy: getUserId(req),
+        },
+        getUserId(req),
+      );
       res.status(201).json({ success: true, data: file });
     } catch (error) {
       console.error("Error creating file:", error);
@@ -547,14 +780,25 @@ export class ProjectController {
     try {
       const { filename, mimetype, phase, size } = req.body;
       if (!filename || !mimetype) {
-        return res.status(400).json({ success: false, error: "filename and mimetype required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "filename and mimetype required" });
       }
       const projectId = param(req, "id");
-      const { uploadUrl, fileUrl, key } = await generatePresignedUrl(projectId, filename, mimetype);
-      res.json({ success: true, data: { uploadUrl, fileUrl, key, type: detectType(mimetype) } });
+      const { uploadUrl, fileUrl, key } = await generatePresignedUrl(
+        projectId,
+        filename,
+        mimetype,
+      );
+      res.json({
+        success: true,
+        data: { uploadUrl, fileUrl, key, type: detectType(mimetype) },
+      });
     } catch (error) {
       console.error("Error generating presigned URL:", error);
-      res.status(500).json({ success: false, error: "Failed to generate upload URL" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to generate upload URL" });
     }
   }
 
@@ -563,18 +807,23 @@ export class ProjectController {
     try {
       const { name, type, phase, url, s3Key, size } = req.body;
       if (!name || !url) {
-        return res.status(400).json({ success: false, error: "name and url required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "name and url required" });
       }
-      const file = await projectService.createFile({
-        projectId: param(req, "id"),
-        name,
-        type,
-        phase,
-        url,
-        s3Key,
-        size,
-        uploadedBy: getUserId(req),
-      });
+      const file = await projectService.createFile(
+        {
+          projectId: param(req, "id"),
+          name,
+          type,
+          phase,
+          url,
+          s3Key,
+          size,
+          uploadedBy: getUserId(req),
+        },
+        getUserId(req),
+      );
       res.status(201).json({ success: true, data: file });
     } catch (error) {
       console.error("Error confirming upload:", error);
@@ -584,12 +833,19 @@ export class ProjectController {
 
   async deleteFile(req: Request, res: Response) {
     try {
-      const s3Key = await projectService.deleteFile(param(req, "fileId"));
+      const s3Key = await projectService.deleteFile(param(req, "fileId"), {
+        projectId: param(req, "id"),
+        userId: getUserId(req),
+      });
       if (s3Key === undefined) {
-        return res.status(404).json({ success: false, error: "File not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "File not found" });
       }
       if (s3Key) {
-        deleteFromS3(s3Key).catch((err) => console.error("S3 delete failed:", err));
+        deleteFromS3(s3Key).catch((err) =>
+          console.error("S3 delete failed:", err),
+        );
       }
       res.json({ success: true, message: "File deleted successfully" });
     } catch (error) {
@@ -602,18 +858,29 @@ export class ProjectController {
   async getFileDownloadUrl(req: Request, res: Response) {
     try {
       const fileId = param(req, "fileId");
-      const file = await prisma.projectFile.findUnique({ where: { id: fileId } });
+      const file = await prisma.projectFile.findUnique({
+        where: { id: fileId, projectId: param(req, "id") },
+      });
       if (!file) {
-        return res.status(404).json({ success: false, error: "File not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "File not found" });
       }
       if (!file.s3Key) {
-        return res.status(400).json({ success: false, error: "File has no S3 key" });
+        return res
+          .status(400)
+          .json({ success: false, error: "File has no S3 key" });
       }
       const downloadUrl = await generateDownloadUrl(file.s3Key, 3600);
-      res.json({ success: true, data: { downloadUrl, filename: file.name, url: downloadUrl } });
+      res.json({
+        success: true,
+        data: { downloadUrl, filename: file.name, url: downloadUrl },
+      });
     } catch (error) {
       console.error("Error generating download URL:", error);
-      res.status(500).json({ success: false, error: "Failed to generate download URL" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to generate download URL" });
     }
   }
 
@@ -622,20 +889,28 @@ export class ProjectController {
       const blockedTaskId = param(req, "taskId");
       const { blockingTaskId } = req.body;
       if (!blockingTaskId) {
-        return res.status(400).json({ success: false, error: "blockingTaskId is required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "blockingTaskId is required" });
       }
       if (blockingTaskId === blockedTaskId) {
-        return res.status(400).json({ success: false, error: "A task cannot block itself" });
+        return res
+          .status(400)
+          .json({ success: false, error: "A task cannot block itself" });
       }
       await prisma.taskDependency.upsert({
-        where: { blockingTaskId_blockedTaskId: { blockingTaskId, blockedTaskId } },
+        where: {
+          blockingTaskId_blockedTaskId: { blockingTaskId, blockedTaskId },
+        },
         update: {},
         create: { blockingTaskId, blockedTaskId, projectId: param(req, "id") },
       });
       res.status(201).json({ success: true });
     } catch (error) {
       console.error("Error adding dependency:", error);
-      res.status(500).json({ success: false, error: "Failed to add dependency" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to add dependency" });
     }
   }
 
@@ -650,7 +925,9 @@ export class ProjectController {
       res.json({ success: true });
     } catch (error) {
       console.error("Error removing dependency:", error);
-      res.status(500).json({ success: false, error: "Failed to remove dependency" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to remove dependency" });
     }
   }
 
@@ -664,15 +941,20 @@ export class ProjectController {
       });
       res.json({ success: true, data: items });
     } catch (error) {
-      res.status(500).json({ success: false, error: "Failed to get checklist" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to get checklist" });
     }
   }
 
   async addChecklistItem(req: Request, res: Response) {
     try {
       const { text } = req.body;
-      if (!text) return res.status(400).json({ success: false, error: "text required" });
-      const count = await prisma.taskChecklistItem.count({ where: { taskId: param(req, "taskId") } });
+      if (!text)
+        return res.status(400).json({ success: false, error: "text required" });
+      const count = await prisma.taskChecklistItem.count({
+        where: { taskId: param(req, "taskId") },
+      });
       const item = await prisma.taskChecklistItem.create({
         data: {
           taskId: param(req, "taskId"),
@@ -683,7 +965,9 @@ export class ProjectController {
       });
       res.json({ success: true, data: item });
     } catch (error) {
-      res.status(500).json({ success: false, error: "Failed to add checklist item" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to add checklist item" });
     }
   }
 
@@ -693,20 +977,29 @@ export class ProjectController {
       const { checked, text } = req.body;
       const item = await prisma.taskChecklistItem.update({
         where: { id: itemId },
-        data: { ...(checked !== undefined ? { checked } : {}), ...(text !== undefined ? { text } : {}) },
+        data: {
+          ...(checked !== undefined ? { checked } : {}),
+          ...(text !== undefined ? { text } : {}),
+        },
       });
       res.json({ success: true, data: item });
     } catch (error) {
-      res.status(500).json({ success: false, error: "Failed to update checklist item" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to update checklist item" });
     }
   }
 
   async deleteChecklistItem(req: Request, res: Response) {
     try {
-      await prisma.taskChecklistItem.delete({ where: { id: param(req, "itemId") } });
+      await prisma.taskChecklistItem.delete({
+        where: { id: param(req, "itemId") },
+      });
       res.json({ success: true });
     } catch (error) {
-      res.status(500).json({ success: false, error: "Failed to delete checklist item" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to delete checklist item" });
     }
   }
 
@@ -729,7 +1022,9 @@ export class ProjectController {
       res.json({ success: true, data: config });
     } catch (error) {
       console.error("Error checking S3 config:", error);
-      res.status(500).json({ success: false, error: "Failed to check S3 config" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to check S3 config" });
     }
   }
 
@@ -744,7 +1039,9 @@ export class ProjectController {
       res.json({ success: true, data: docs });
     } catch (error) {
       console.error("Error fetching project documents:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch documents" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch documents" });
     }
   }
 
@@ -763,17 +1060,23 @@ export class ProjectController {
       res.status(201).json({ success: true, data: doc });
     } catch (error) {
       console.error("Error creating project document:", error);
-      res.status(500).json({ success: false, error: "Failed to create document" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to create document" });
     }
   }
 
   async deleteProjectDocument(req: Request, res: Response) {
     try {
-      await prisma.projectDocument.delete({ where: { id: param(req, "docId") } });
+      await prisma.projectDocument.delete({
+        where: { id: param(req, "docId") },
+      });
       res.json({ success: true });
     } catch (error) {
       console.error("Error deleting project document:", error);
-      res.status(500).json({ success: false, error: "Failed to delete document" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to delete document" });
     }
   }
 
@@ -785,12 +1088,7 @@ export class ProjectController {
       // Get all files from projects where user is owner or member
       const files = await prisma.projectFile.findMany({
         where: {
-          project: {
-            OR: [
-              { userId },
-              { members: { some: { userId } } },
-            ],
-          },
+          project: { userId },
         },
         include: {
           project: {
@@ -802,61 +1100,106 @@ export class ProjectController {
         },
         orderBy: { updatedAt: "desc" },
       });
-      
+
       res.json({
         success: true,
-        data: files.map(f => ({
+        data: files.map((f) => ({
           ...f,
           projectName: f.project.name,
         })),
-        count: files.length
+        count: files.length,
       });
     } catch (error) {
       console.error("Error fetching all documents:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch documents" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch documents" });
     }
   }
 
   async getGitCommits(req: Request, res: Response) {
     try {
-      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      const project = await projectService.getProjectById(
+        param(req, "id"),
+        getUserId(req),
+      );
       if (!project?.githubUrl) {
-        return res.status(400).json({ success: false, error: "No GitHub URL configured for this project" });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: "No GitHub URL configured for this project",
+          });
       }
       const branch = req.query.branch as string | undefined;
-      const commits = await ProjectGitHubService.listCommits(project.githubUrl, branch);
+      const commits = await ProjectGitHubService.listCommits(
+        project.githubUrl,
+        branch,
+      );
       res.json({ success: true, data: commits });
     } catch (error) {
       console.error("Error fetching git commits:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch commits from GitHub" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch commits from GitHub" });
     }
   }
 
   async getGitBranches(req: Request, res: Response) {
     try {
-      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      const project = await projectService.getProjectById(
+        param(req, "id"),
+        getUserId(req),
+      );
       if (!project?.githubUrl) {
-        return res.status(400).json({ success: false, error: "No GitHub URL configured for this project" });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: "No GitHub URL configured for this project",
+          });
       }
-      const branches = await ProjectGitHubService.listBranches(project.githubUrl);
+      const branches = await ProjectGitHubService.listBranches(
+        project.githubUrl,
+      );
       res.json({ success: true, data: branches });
     } catch (error) {
       console.error("Error fetching git branches:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch branches from GitHub" });
+      res
+        .status(500)
+        .json({
+          success: false,
+          error: "Failed to fetch branches from GitHub",
+        });
     }
   }
 
   async getGitPulls(req: Request, res: Response) {
     try {
-      const project = await projectService.getProjectById(param(req, "id"), getUserId(req));
+      const project = await projectService.getProjectById(
+        param(req, "id"),
+        getUserId(req),
+      );
       if (!project?.githubUrl) {
-        return res.status(400).json({ success: false, error: "No GitHub URL configured for this project" });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: "No GitHub URL configured for this project",
+          });
       }
-      const pulls = await ProjectGitHubService.listAllPullRequests(project.githubUrl);
+      const pulls = await ProjectGitHubService.listAllPullRequests(
+        project.githubUrl,
+      );
       res.json({ success: true, data: pulls });
     } catch (error) {
       console.error("Error fetching pull requests:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch pull requests from GitHub" });
+      res
+        .status(500)
+        .json({
+          success: false,
+          error: "Failed to fetch pull requests from GitHub",
+        });
     }
   }
 
@@ -866,14 +1209,19 @@ export class ProjectController {
     try {
       const { title, description, priority } = req.body;
       if (!title) {
-        return res.status(400).json({ success: false, error: "title is required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "title is required" });
       }
-      const rule = await projectService.createProjectRule({
-        projectId: param(req, "id"),
-        title,
-        description: description || "",
-        priority,
-      });
+      const rule = await projectService.createProjectRule(
+        {
+          projectId: param(req, "id"),
+          title,
+          description: description || "",
+          priority,
+        },
+        getUserId(req),
+      );
       res.status(201).json({ success: true, data: rule });
     } catch (error) {
       console.error("Error creating project rule:", error);
@@ -883,9 +1231,15 @@ export class ProjectController {
 
   async updateProjectRule(req: Request, res: Response) {
     try {
-      const rule = await projectService.updateProjectRule(param(req, "ruleId"), req.body);
+      const rule = await projectService.updateProjectRule(
+        param(req, "ruleId"),
+        req.body,
+        { projectId: param(req, "id"), userId: getUserId(req) },
+      );
       if (!rule) {
-        return res.status(404).json({ success: false, error: "Rule not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Rule not found" });
       }
       res.json({ success: true, data: rule });
     } catch (error) {
@@ -896,9 +1250,14 @@ export class ProjectController {
 
   async deleteProjectRule(req: Request, res: Response) {
     try {
-      const deleted = await projectService.deleteProjectRule(param(req, "ruleId"));
+      const deleted = await projectService.deleteProjectRule(
+        param(req, "ruleId"),
+        { projectId: param(req, "id"), userId: getUserId(req) },
+      );
       if (!deleted) {
-        return res.status(404).json({ success: false, error: "Rule not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Rule not found" });
       }
       res.json({ success: true, message: "Rule deleted" });
     } catch (error) {
@@ -913,46 +1272,71 @@ export class ProjectController {
     try {
       const { title, description, impact, artifactId } = req.body;
       if (!title || !description) {
-        return res.status(400).json({ success: false, error: "title and description are required" });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: "title and description are required",
+          });
       }
-      const decision = await projectService.createProjectDecision({
-        projectId: param(req, "id"),
-        title,
-        description,
-        impact,
-        madeBy: getUserName(req),
-        artifactId,
-      });
+      const decision = await projectService.createProjectDecision(
+        {
+          projectId: param(req, "id"),
+          title,
+          description,
+          impact,
+          madeBy: getUserName(req),
+          artifactId,
+        },
+        getUserId(req),
+      );
       res.status(201).json({ success: true, data: decision });
     } catch (error) {
       console.error("Error creating project decision:", error);
-      res.status(500).json({ success: false, error: "Failed to create decision" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to create decision" });
     }
   }
 
   async updateProjectDecision(req: Request, res: Response) {
     try {
-      const decision = await projectService.updateProjectDecision(param(req, "decisionId"), req.body);
+      const decision = await projectService.updateProjectDecision(
+        param(req, "decisionId"),
+        req.body,
+        { projectId: param(req, "id"), userId: getUserId(req) },
+      );
       if (!decision) {
-        return res.status(404).json({ success: false, error: "Decision not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Decision not found" });
       }
       res.json({ success: true, data: decision });
     } catch (error) {
       console.error("Error updating project decision:", error);
-      res.status(500).json({ success: false, error: "Failed to update decision" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to update decision" });
     }
   }
 
   async deleteProjectDecision(req: Request, res: Response) {
     try {
-      const deleted = await projectService.deleteProjectDecision(param(req, "decisionId"));
+      const deleted = await projectService.deleteProjectDecision(
+        param(req, "decisionId"),
+        { projectId: param(req, "id"), userId: getUserId(req) },
+      );
       if (!deleted) {
-        return res.status(404).json({ success: false, error: "Decision not found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "Decision not found" });
       }
       res.json({ success: true, message: "Decision deleted" });
     } catch (error) {
       console.error("Error deleting project decision:", error);
-      res.status(500).json({ success: false, error: "Failed to delete decision" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to delete decision" });
     }
   }
 
@@ -962,13 +1346,21 @@ export class ProjectController {
     try {
       const { summary } = req.body;
       if (!summary) {
-        return res.status(400).json({ success: false, error: "summary is required" });
+        return res
+          .status(400)
+          .json({ success: false, error: "summary is required" });
       }
-      const result = await projectService.saveMemorySummary(param(req, "id"), summary);
+      const result = await projectService.saveMemorySummary(
+        param(req, "id"),
+        summary,
+        getUserId(req),
+      );
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Error saving memory summary:", error);
-      res.status(500).json({ success: false, error: "Failed to save memory summary" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to save memory summary" });
     }
   }
 
@@ -976,12 +1368,16 @@ export class ProjectController {
 
   async getTaskStats(req: Request, res: Response) {
     try {
-      const stats = await projectService.getTaskStats(param(req, "id"));
+      const stats = await projectService.getTaskStats(
+        param(req, "id"),
+        getUserId(req),
+      );
       res.json({ success: true, data: stats });
     } catch (error) {
       console.error("Error fetching task stats:", error);
-      res.status(500).json({ success: false, error: "Failed to fetch task stats" });
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch task stats" });
     }
   }
 }
-

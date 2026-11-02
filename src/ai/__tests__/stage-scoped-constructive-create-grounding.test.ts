@@ -1,3 +1,5 @@
+import { MemoryPersistence } from "../memory/MemoryPersistence";
+import * as SharedUtils from "../shared/utils";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -67,6 +69,13 @@ describe("Stage-Scoped Constructive CREATE Grounding Regression & Authority Hard
   };
 
   beforeEach(() => {
+    // The manifest method is mocked below; its unused provider constructor must
+    // also be deterministic. This object has no transport and cannot call a provider.
+    jest.spyOn(SharedUtils,"getOpenAI").mockReturnValue({} as never);
+
+    jest.spyOn(MemoryPersistence,"saveMessage").mockResolvedValue(undefined);
+    jest.spyOn(MemoryPersistence,"persistProjectMemory").mockResolvedValue(undefined);
+    jest.spyOn(MemoryPersistence,"updateSessionTitle").mockResolvedValue(undefined);
     root = fs.mkdtempSync(path.join(os.tmpdir(), "stage-scoped-create-"));
     store = new RepositoryEvidenceStore("test-repo", root);
     store.isAuthorityEligible = productionIsAuthorityEligible.bind(store);

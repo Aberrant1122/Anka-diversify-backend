@@ -1,3 +1,4 @@
+import { assertOwner, ProjectActor } from "../security/project-access";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
@@ -15,7 +16,8 @@ function mapTask(t: any) {
 }
 
 export class SprintService {
-  async getSprints(projectId: string) {
+  async getSprints(projectId: string, actorId: string) {
+    await assertOwner(prisma, projectId, actorId);
     const sprints = await prisma.sprint.findMany({
       where: { projectId },
       include: {
@@ -51,7 +53,9 @@ export class SprintService {
       status?: string;
       velocity?: number;
     },
+    actorId: string,
   ) {
+    await assertOwner(prisma, projectId, actorId);
     const sprint = await prisma.sprint.create({
       data: {
         projectId,
@@ -94,13 +98,17 @@ export class SprintService {
       status: string;
       velocity: number;
     }>,
+    actor: ProjectActor,
   ) {
+    await assertOwner(prisma, actor.projectId, actor.userId);
     const sprint = await prisma.sprint.update({
-      where: { id: sprintId },
+      where: { id: sprintId, projectId: actor.projectId },
       data: {
         ...(data.name !== undefined && { name: data.name }),
         ...(data.goal !== undefined && { goal: data.goal }),
-        ...(data.startDate !== undefined && { startDate: new Date(data.startDate) }),
+        ...(data.startDate !== undefined && {
+          startDate: new Date(data.startDate),
+        }),
         ...(data.endDate !== undefined && { endDate: new Date(data.endDate) }),
         ...(data.status !== undefined && { status: data.status }),
         ...(data.velocity !== undefined && { velocity: data.velocity }),
@@ -127,11 +135,26 @@ export class SprintService {
     };
   }
 
-  async deleteSprint(sprintId: string) {
-    await prisma.sprint.delete({ where: { id: sprintId } });
+  async deleteSprint(sprintId: string, actor: ProjectActor) {
+    await assertOwner(prisma, actor.projectId, actor.userId);
+    await prisma.sprint.delete({
+      where: { id: sprintId, projectId: actor.projectId },
+    });
   }
 
-  async addTaskToSprint(sprintId: string, taskId: string) {
+  async addTaskToSprint(sprintId: string, taskId: string, actor: ProjectActor) {
+    await assertOwner(prisma, actor.projectId, actor.userId);
+    if (
+      !(await prisma.sprint.findFirst({
+        where: { id: sprintId, projectId: actor.projectId },
+        select: { id: true },
+      })) ||
+      !(await prisma.projectTask.findFirst({
+        where: { id: taskId, projectId: actor.projectId },
+        select: { id: true },
+      }))
+    )
+      throw new Error("Sprint task outside project");
     try {
       await prisma.sprintTask.create({ data: { sprintId, taskId } });
     } catch (err: any) {
@@ -140,7 +163,23 @@ export class SprintService {
     }
   }
 
-  async removeTaskFromSprint(sprintId: string, taskId: string) {
+  async removeTaskFromSprint(
+    sprintId: string,
+    taskId: string,
+    actor: ProjectActor,
+  ) {
+    await assertOwner(prisma, actor.projectId, actor.userId);
+    if (
+      !(await prisma.sprint.findFirst({
+        where: { id: sprintId, projectId: actor.projectId },
+        select: { id: true },
+      })) ||
+      !(await prisma.projectTask.findFirst({
+        where: { id: taskId, projectId: actor.projectId },
+        select: { id: true },
+      }))
+    )
+      throw new Error("Sprint task outside project");
     await prisma.sprintTask.deleteMany({ where: { sprintId, taskId } });
   }
 }

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node scripts/copy-wasm.js && nodemon src/index.ts",
     "build": "prisma generate && tsc && node scripts/copy-wasm.js",
-    "test": "jest --config jest.config.json --forceExit",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.json --forceExit",
     "copy:wasm": "node scripts/copy-wasm.js",
     "start": "node scripts/db-startup.js && node dist/index.js",
     "db:generate": "prisma generate",
@@ -14,7 +14,9 @@
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "setup-s3": "npx ts-node scripts/setup-s3.ts",
-    "eval:real": "ts-node scripts/run-ai-evals.ts"
+    "eval:real": "ts-node scripts/run-ai-evals.ts",
+    "test:workspace": "node scripts/test-workspace.cjs",
+    "rehearsal:workspace": "ts-node --project tsconfig.rehearsal.json scripts/workspace-rehearsal.ts"
   },
   "keywords": [],
   "author": "",
@@ -50,6 +52,8 @@
     "seed": "ts-node --project tsconfig.seed.json prisma/seed.ts"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
+    "@electric-sql/pglite-socket": "^0.2.14",
     "@types/bcryptjs": "^2.4.6",
     "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.19",

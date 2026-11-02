@@ -1,4 +1,5 @@
 import fs from "fs";
+import { assertTerminalAvailable } from "../config/terminal-policy";
 import path from "path";
 import { spawn, ChildProcess, exec } from "child_process";
 import { randomUUID } from "crypto";
@@ -234,71 +235,8 @@ export class TerminalSessionManager {
   /**
    * Creates a new terminal session bound to a verified repository.
    */
-  public async createSession(projectId: string, repositoryId?: string): Promise<TerminalSessionInfo> {
-    if (!projectId) {
-      throw new Error("projectId is required to create a terminal session");
-    }
-
-    // Enforce global cap
-    if (this.sessions.size >= TerminalSessionManager.MAX_GLOBAL_SESSIONS) {
-      throw new Error("Global terminal session limit reached (max 25). Close unused sessions.");
-    }
-
-    // Enforce per-project cap
-    const projectSessions = Array.from(this.sessions.values()).filter((s) => s.projectId === projectId);
-    if (projectSessions.length >= TerminalSessionManager.MAX_SESSIONS_PER_PROJECT) {
-      throw new Error(`Project terminal session limit reached (max ${TerminalSessionManager.MAX_SESSIONS_PER_PROJECT}). Close an existing session.`);
-    }
-
-    const repoService = new ProjectRepositoryService();
-    const repos = await repoService.list(projectId);
-
-    if (!repos || repos.length === 0) {
-      throw new Error("REPOSITORY_NOT_MATERIALIZED");
-    }
-
-    let targetRepo = repositoryId
-      ? repos.find((r) => r.id === repositoryId)
-      : repos.find((r) => r.isPrimary) || repos[0];
-
-    if (!targetRepo) {
-      throw new Error("Repository not found for this project");
-    }
-
-    if (!targetRepo.localPath || !fs.existsSync(targetRepo.localPath)) {
-      throw new Error("REPOSITORY_NOT_MATERIALIZED");
-    }
-
-    const canonicalRoot = path.resolve(fs.realpathSync(targetRepo.localPath));
-    const sessionId = randomUUID();
-
-    // Environment sanitization: neutral repository environment without ANKA backend runtime contamination
-    const sanitizedEnv = TerminalSessionManager.buildTerminalEnv();
-
-    const session: TerminalSession = {
-      sessionId,
-      projectId,
-      repositoryId: targetRepo.id,
-      repositoryName: targetRepo.name,
-      rootPath: canonicalRoot,
-      cwd: canonicalRoot,
-      env: sanitizedEnv,
-      activeProcess: null,
-      createdAt: Date.now(),
-      lastActivityAt: Date.now(),
-      status: "idle",
-    };
-
-    this.sessions.set(sessionId, session);
-
-    return {
-      sessionId: session.sessionId,
-      projectId: session.projectId,
-      repositoryId: session.repositoryId,
-      repositoryName: session.repositoryName,
-      cwd: session.cwd,
-      status: session.status,
-    };
+  public async createSession(_projectId: string, _repositoryId?: string): Promise<TerminalSessionInfo> {
+    throw new Error("TERMINAL_ISOLATION_REQUIRED");
   }
 
   public getSession(sessionId: string, projectId: string): TerminalSessionInfo | null {
@@ -328,6 +266,7 @@ export class TerminalSessionManager {
     onStdout: (chunk: string) => void,
     onStderr: (chunk: string) => void
   ): Promise<CommandExitResult> {
+    assertTerminalAvailable();
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error("Terminal session not found");

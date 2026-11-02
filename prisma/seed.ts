@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { ownerBootstrap } from "../src/config/owner-bootstrap";
 
 const prisma = new PrismaClient();
 
@@ -23,11 +24,8 @@ async function seedRoles() {
 }
 
 async function main() {
+  const { email, password, name } = ownerBootstrap();
   await seedRoles();
-
-  const email = process.env.ADMIN_EMAIL || "admin@anka.os";
-  const password = process.env.ADMIN_PASSWORD || "admin@123";
-  const name = process.env.ADMIN_NAME || "Admin";
 
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {

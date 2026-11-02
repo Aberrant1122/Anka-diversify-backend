@@ -3,6 +3,7 @@ dotenv.config({ override: true });
 
 import express from "express";
 import cors from "cors";
+import { createCorsOptions } from "./config/cors-policy";
 import helmet from "helmet";
 import morgan from "morgan";
 import compression from "compression";
@@ -12,6 +13,7 @@ import { createServer } from "http";
 // Fails fast if JWT_SECRET / ENCRYPTION_KEY are missing — must run before any
 // module that signs/verifies tokens or encrypts data is imported.
 import "./config/env";
+import { healthCheck } from "./controllers/health-controller";
 
 
 import { errorHandler, requestLogger } from "./middleware";
@@ -38,45 +40,10 @@ app.use(express.urlencoded({ extended: true }));
 app.use(requestLogger);
 
 // CORS configuration
-const allowedOrigins = [
-  process.env.FRONTEND_URL || "http://localhost:3000",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "http://localhost:3001",
-  "http://127.0.0.1:3001",
-];
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
-        callback(null, true);
-      } else {
-        callback(null, true); // Dev fallback
-      }
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Origin",
-      "X-Requested-With",
-      "Content-Type",
-      "Accept",
-      "Authorization",
-      "X-User-ID",
-      "X-User-Name",
-    ],
-  }),
-);
+app.use(cors(createCorsOptions()));
 
 // Health check
-app.get("/health", (req, res) => {
-  res.json({
-    status: "OK",
-    timestamp: new Date().toISOString(),
-    version: "1.0.0",
-  });
-});
+app.get("/health", healthCheck);
 
 // API Routes
 // authRoutes and inviteRoutes contain their own public endpoints (signup,

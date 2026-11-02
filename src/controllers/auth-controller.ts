@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { sessionVersion } from "../security/session-version";
 import { prisma } from "../services/database";
 import { User } from "../types";
 import { JWT_SECRET } from "../config/env";
@@ -48,7 +49,7 @@ export class AuthController {
 
       // Generate JWT token
       const token = jwt.sign(
-        { userId: user.id, email: user.email, role: user.role },
+        { userId: user.id, sessionVersion: sessionVersion(user) },
         JWT_SECRET,
         { expiresIn: process.env.JWT_EXPIRES_IN || "7d" } as jwt.SignOptions,
       );
@@ -88,13 +89,14 @@ export class AuthController {
           name: true,
           email: true,
           password: true,
+          status: true,
           role: true,
           createdAt: true,
           updatedAt: true,
         },
       });
 
-      if (!user) {
+      if (!user || user.status !== "active") {
         return res.status(401).json({ message: "Invalid email or password" });
       }
 
@@ -110,7 +112,7 @@ export class AuthController {
 
       // Generate JWT token
       const token = jwt.sign(
-        { userId: user.id, email: user.email, role: user.role },
+        { userId: user.id, sessionVersion: sessionVersion(user) },
         JWT_SECRET,
         { expiresIn: process.env.JWT_EXPIRES_IN || "7d" } as jwt.SignOptions,
       );

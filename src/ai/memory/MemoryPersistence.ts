@@ -190,11 +190,14 @@ export class MemoryPersistence {
     });
   }
 
-  static async getSessionMessages(sessionId: string, userId: string) {
+  static async getSessionMessages(sessionId: string, userId: string, scope: { type: "general" } | { type: "project"; projectId: string }) {
     const session = await prisma.aiChatSession.findFirst({
       where: {
         id: sessionId,
         userId,
+        type: scope.type,
+        projectId: scope.type === "general" ? null : scope.projectId,
+        ...(scope.type === "project" ? { project: { userId } } : {}),
       },
       include: {
         messages: {

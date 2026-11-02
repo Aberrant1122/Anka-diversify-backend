@@ -1,3 +1,4 @@
+import { assertOwner, ProjectActor } from "../security/project-access";
 import { PrismaClient } from "@prisma/client";
 import { WorkflowContextService } from "./workflow-context.service";
 import { LLMGateway } from "../ai/gateway/LLMGateway";
@@ -26,15 +27,21 @@ interface KanbanBoardProposal {
 function isSafeRelativePath(value: string): boolean {
   if (!value || value !== value.trim() || value.includes("\0")) return false;
   const normalized = value.replace(/\\/g, "/");
-  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return false;
-  return normalized.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized))
+    return false;
+  return normalized
+    .split("/")
+    .every(
+      (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+    );
 }
 
 export class KanbanService {
   /**
    * Retrieves or initializes the Kanban board for a given project ID.
    */
-  async getBoard(projectId: string) {
+  async getBoard(projectId: string, actorId: string) {
+    await assertOwner(prisma, projectId, actorId);
     let board = await prisma.kanbanBoard.findUnique({
       where: { projectId },
       include: {
@@ -89,9 +96,12 @@ export class KanbanService {
    * Generates Kanban stages & tasks based strictly on the project's Workflow Phase Artifacts
    * (Requirements, Documentation, Architecture, Implementation).
    */
-  async generateBoardFromWorkflow(projectId: string) {
-    const ctx = await workflowContextService.getProjectWorkflowContext(projectId);
-    const boundaryPrompt = workflowContextService.buildSystemBoundaryPrompt(ctx);
+  async generateBoardFromWorkflow(projectId: string, actorId: string) {
+    await assertOwner(prisma, projectId, actorId);
+    const ctx =
+      await workflowContextService.getProjectWorkflowContext(projectId);
+    const boundaryPrompt =
+      workflowContextService.buildSystemBoundaryPrompt(ctx);
 
     const prompt = `
 ${boundaryPrompt}
@@ -119,41 +129,69 @@ Return ONLY a valid JSON object matching this schema:
 }
 `;
 
-    const result = await LLMGateway.getInstance().callStructured<KanbanBoardProposal>({
-      stage: PipelineStages.TASK_DECOMPOSITION,
-      messages: [{ role: "user", content: prompt }],
-      schema: {
-        name: "KanbanBoardProposalSchema",
-        strict: true,
+    const result =
+      await LLMGateway.getInstance().callStructured<KanbanBoardProposal>({
+        stage: PipelineStages.TASK_DECOMPOSITION,
+        messages: [{ role: "user", content: prompt }],
         schema: {
-          type: "object",
-          additionalProperties: false,
-          required: ["stages"],
-          properties: {
-            stages: {
-              type: "array",
-              minItems: 1,
-              maxItems: 20,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["title", "order", "tasks"],
-                properties: {
-                  title: { type: "string", minLength: 1, maxLength: 200 },
-                  order: { type: "integer", minimum: 0, maximum: 1000 },
-                  tasks: {
-                    type: "array",
-                    minItems: 1,
-                    maxItems: 100,
-                    items: {
-                      type: "object",
-                      additionalProperties: false,
-                      required: ["title", "description", "acceptanceCriteria", "targetFiles"],
-                      properties: {
-                        title: { type: "string", minLength: 1, maxLength: 200 },
-                        description: { type: "string", minLength: 1, maxLength: 2000 },
-                        acceptanceCriteria: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1, maxLength: 500 } },
-                        targetFiles: { type: "array", maxItems: 50, items: { type: "string", minLength: 1 } },
+          name: "KanbanBoardProposalSchema",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["stages"],
+            properties: {
+              stages: {
+                type: "array",
+                minItems: 1,
+                maxItems: 20,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["title", "order", "tasks"],
+                  properties: {
+                    title: { type: "string", minLength: 1, maxLength: 200 },
+                    order: { type: "integer", minimum: 0, maximum: 1000 },
+                    tasks: {
+                      type: "array",
+                      minItems: 1,
+                      maxItems: 100,
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        required: [
+                          "title",
+                          "description",
+                          "acceptanceCriteria",
+                          "targetFiles",
+                        ],
+                        properties: {
+                          title: {
+                            type: "string",
+                            minLength: 1,
+                            maxLength: 200,
+                          },
+                          description: {
+                            type: "string",
+                            minLength: 1,
+                            maxLength: 2000,
+                          },
+                          acceptanceCriteria: {
+                            type: "array",
+                            minItems: 1,
+                            maxItems: 20,
+                            items: {
+                              type: "string",
+                              minLength: 1,
+                              maxLength: 500,
+                            },
+                          },
+                          targetFiles: {
+                            type: "array",
+                            maxItems: 50,
+                            items: { type: "string", minLength: 1 },
+                          },
+                        },
                       },
                     },
                   },
@@ -161,28 +199,83 @@ Return ONLY a valid JSON object matching this schema:
               },
             },
           },
-        },
-        validate: (value: unknown) => {
-          if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, errors: ["Kanban proposal must be an object"] };
-          const board = value as Record<string, unknown>;
-          if (Object.keys(board).some((key) => key !== "stages") || !Array.isArray(board.stages) || board.stages.length === 0 || board.stages.length > 20) return { valid: false, errors: ["Invalid stages"] };
-          const orders = new Set<number>();
-          for (const stage of board.stages) {
-            if (!stage || typeof stage !== "object" || Array.isArray(stage)) return { valid: false, errors: ["Invalid stage"] };
-            const item = stage as Record<string, unknown>;
-            const order = item.order;
-            if (Object.keys(item).some((key) => !["title", "order", "tasks"].includes(key)) || typeof item.title !== "string" || !item.title.trim() || typeof order !== "number" || !Number.isInteger(order) || order < 0 || order > 1000 || orders.has(order) || !Array.isArray(item.tasks) || item.tasks.length === 0 || item.tasks.length > 100) return { valid: false, errors: ["Invalid stage fields"] };
-            orders.add(order);
-            for (const task of item.tasks) {
-              if (!task || typeof task !== "object" || Array.isArray(task)) return { valid: false, errors: ["Invalid task"] };
-              const entry = task as Record<string, unknown>;
-              if (Object.keys(entry).some((key) => !["title", "description", "acceptanceCriteria", "targetFiles"].includes(key)) || typeof entry.title !== "string" || !entry.title.trim() || typeof entry.description !== "string" || !entry.description.trim() || !Array.isArray(entry.acceptanceCriteria) || entry.acceptanceCriteria.length === 0 || entry.acceptanceCriteria.some((criterion) => typeof criterion !== "string" || !criterion.trim()) || !Array.isArray(entry.targetFiles) || entry.targetFiles.some((file) => typeof file !== "string" || !isSafeRelativePath(file))) return { valid: false, errors: ["Invalid task fields"] };
+          validate: (value: unknown) => {
+            if (!value || typeof value !== "object" || Array.isArray(value))
+              return {
+                valid: false,
+                errors: ["Kanban proposal must be an object"],
+              };
+            const board = value as Record<string, unknown>;
+            if (
+              Object.keys(board).some((key) => key !== "stages") ||
+              !Array.isArray(board.stages) ||
+              board.stages.length === 0 ||
+              board.stages.length > 20
+            )
+              return { valid: false, errors: ["Invalid stages"] };
+            const orders = new Set<number>();
+            for (const stage of board.stages) {
+              if (!stage || typeof stage !== "object" || Array.isArray(stage))
+                return { valid: false, errors: ["Invalid stage"] };
+              const item = stage as Record<string, unknown>;
+              const order = item.order;
+              if (
+                Object.keys(item).some(
+                  (key) => !["title", "order", "tasks"].includes(key),
+                ) ||
+                typeof item.title !== "string" ||
+                !item.title.trim() ||
+                typeof order !== "number" ||
+                !Number.isInteger(order) ||
+                order < 0 ||
+                order > 1000 ||
+                orders.has(order) ||
+                !Array.isArray(item.tasks) ||
+                item.tasks.length === 0 ||
+                item.tasks.length > 100
+              )
+                return { valid: false, errors: ["Invalid stage fields"] };
+              orders.add(order);
+              for (const task of item.tasks) {
+                if (!task || typeof task !== "object" || Array.isArray(task))
+                  return { valid: false, errors: ["Invalid task"] };
+                const entry = task as Record<string, unknown>;
+                if (
+                  Object.keys(entry).some(
+                    (key) =>
+                      ![
+                        "title",
+                        "description",
+                        "acceptanceCriteria",
+                        "targetFiles",
+                      ].includes(key),
+                  ) ||
+                  typeof entry.title !== "string" ||
+                  !entry.title.trim() ||
+                  typeof entry.description !== "string" ||
+                  !entry.description.trim() ||
+                  !Array.isArray(entry.acceptanceCriteria) ||
+                  entry.acceptanceCriteria.length === 0 ||
+                  entry.acceptanceCriteria.some(
+                    (criterion) =>
+                      typeof criterion !== "string" || !criterion.trim(),
+                  ) ||
+                  !Array.isArray(entry.targetFiles) ||
+                  entry.targetFiles.some(
+                    (file) =>
+                      typeof file !== "string" || !isSafeRelativePath(file),
+                  )
+                )
+                  return { valid: false, errors: ["Invalid task fields"] };
+              }
             }
-          }
-          return { valid: true, data: board as unknown as KanbanBoardProposal };
+            return {
+              valid: true,
+              data: board as unknown as KanbanBoardProposal,
+            };
+          },
         },
-      },
-    });
+      });
 
     // Ensure board exists
     let board = await prisma.kanbanBoard.findUnique({ where: { projectId } });
@@ -226,9 +319,15 @@ Return ONLY a valid JSON object matching this schema:
   /**
    * Updates task status and appends optional execution logs.
    */
-  async updateTaskStatus(taskId: string, status: string, executionLogs?: string) {
+  async updateTaskStatus(
+    taskId: string,
+    status: string,
+    actor: ProjectActor,
+    executionLogs?: string,
+  ) {
+    await assertOwner(prisma, actor.projectId, actor.userId);
     return prisma.kanbanTask.update({
-      where: { id: taskId },
+      where: { id: taskId, stage: { board: { projectId: actor.projectId } } },
       data: {
         status,
         ...(executionLogs ? { executionLogs } : {}),
@@ -239,9 +338,18 @@ Return ONLY a valid JSON object matching this schema:
   /**
    * Resolves an interactive user clarification decision.
    */
-  async resolveClarification(clarificationId: string, selectedOption: string, userNotes?: string) {
+  async resolveClarification(
+    clarificationId: string,
+    selectedOption: string,
+    actor: ProjectActor,
+    userNotes?: string,
+  ) {
+    await assertOwner(prisma, actor.projectId, actor.userId);
     const qa = await prisma.clarificationQA.update({
-      where: { id: clarificationId },
+      where: {
+        id: clarificationId,
+        task: { stage: { board: { projectId: actor.projectId } } },
+      },
       data: {
         selectedOption,
         userNotes,

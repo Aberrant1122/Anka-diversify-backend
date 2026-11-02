@@ -160,41 +160,11 @@ describe("Checkpoint 3 deterministic runtime and workspace state", () => {
     })).toThrow(/must be boolean/);
   });
 
-  test("the user-facing production flow preserves deterministic state for CP8 completion evaluation", async () => {
-    (prisma.project.findUnique as jest.Mock).mockResolvedValue({
-      id: "project-1",
-      localPath: path.resolve("production-repository"),
-      githubUrl: null,
-    });
-    jest.spyOn(fs, "existsSync").mockReturnValue(true);
-    jest.spyOn(GitWorktreeService, "resolveRepositoryRoot").mockResolvedValue(path.resolve("production-repository"));
-    jest.spyOn(GitWorktreeService, "getHeadCommitSha").mockResolvedValue("deterministic-head");
-    const isolated = jest.spyOn(GitWorktreeService, "runIsolatedAgent").mockResolvedValue({
-      runId: "worktree-run",
-      branchName: "anka/run-test",
-      baseCommitSha: "deterministic-head",
-      worktreePath: path.resolve("isolated-worktree"),
-      changedFiles: ["src/feature.ts"],
-      diffSummary: "changed",
-      validationPassed: true,
-      validationCommands: ["npm test"],
-      agentResponse: { explanation: "done", changes: [], commitMessage: "change", sessionId: "session-1" },
-    });
-
-    const response = await CodingAgent.runCodingAgent("user-1", "project-1", { message: "Implement feature" });
-
-    expect(isolated).toHaveBeenCalledTimes(1);
-    expect(response.taskRuntime).toMatchObject({
-      originalGoal: "Implement feature",
-      status: "RUNNING",
-      runtimeScope: { budgetScopeId: response.taskRuntime?.taskId, contextScopeId: response.taskRuntime?.taskId },
-      workspace: {
-        repository: { projectId: "project-1", revision: "deterministic-head" },
-        relevantPaths: ["src/feature.ts"],
-        authority: "KNOWLEDGE_ONLY_NO_MUTATION_AUTHORITY",
-      },
-    });
-  });
+  test("the legacy production flow fails before runtime creation without document authority", async () => {
+const isolated = jest.spyOn(GitWorktreeService,"runIsolatedAgent");
+await expect(CodingAgent.runCodingAgent("user-1","project-1",{message:"Implement feature"})).rejects.toThrow("DOCUMENT_AUTHORITY_REQUIRED");
+expect(isolated).not.toHaveBeenCalled();
+});
 
   test("CP2 router, context, and budget authorities still gate the provider path", async () => {
     const router = new ModelRouter({

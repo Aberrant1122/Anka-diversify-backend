@@ -1,0 +1,453 @@
+import { createHash } from "crypto";
+
+export class WorkspaceError extends Error {
+  constructor(
+    public code: string,
+    public status = 409,
+  ) {
+    super(code);
+  }
+}
+export interface Named {
+  id: string;
+  description: string;
+}
+export interface Question {
+  id: string;
+  question: string;
+  blocking: boolean;
+}
+export interface MainDocument {
+  schemaVersion: 1;
+  brief: string;
+  purpose: string;
+  requirements: {
+    id: string;
+    description: string;
+    acceptanceCriteria: Named[];
+  }[];
+  features: Named[];
+  journeys: Named[];
+  constraints: string[];
+  exclusions: string[];
+  questions: Question[];
+  decisions: Named[];
+  legacySources: string[];
+}
+export interface Unit {
+  id: string;
+  title: string;
+  requirementIds: string[];
+  dependsOn: string[];
+  repositoryId: string;
+  files: { path: string; action: "create" | "modify" | "delete" }[];
+  checks: {
+    id: string;
+    criterionId: string;
+    type: "contains" | "not_contains" | "json" | "absent";
+    path: string;
+    expected: string;
+  }[];
+  commands?: VerificationCommand[];
+}
+export interface VerificationCommand {
+  id: string;
+  criterionId: string;
+  argv: string[];
+  cwd: string;
+  timeoutMs: number;
+}
+export function parseCommands(
+  raw: unknown,
+  criteria: Set<string>,
+): VerificationCommand[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 4)
+    throw new WorkspaceError("COMMAND_POLICY_INVALID", 422);
+  const seen = new Set<string>();
+  const executables = new Set([
+    "node",
+    "npm",
+    "pnpm",
+    "yarn",
+    "python3",
+    "pytest",
+    "go",
+    "cargo",
+    "dotnet",
+  ]);
+  return raw.map((command: any) => {
+    record(command, ["id", "criterionId", "argv", "cwd", "timeoutMs"]);
+    if (
+      typeof command.id !== "string" ||
+      !/^CMD-[A-Z0-9-]+$/.test(command.id) ||
+      seen.has(command.id) ||
+      !criteria.has(command.criterionId) ||
+      !Array.isArray(command.argv) ||
+      command.argv.length < 1 ||
+      command.argv.length > 32 ||
+      !executables.has(command.argv[0]) ||
+      command.argv.some(
+        (a: unknown) =>
+          typeof a !== "string" || a.length > 1000 || a.includes("\0"),
+      ) ||
+      typeof command.cwd !== "string" ||
+      !Number.isInteger(command.timeoutMs) ||
+      command.timeoutMs < 1000 ||
+      command.timeoutMs > 30000
+    )
+      throw new WorkspaceError("COMMAND_POLICY_INVALID", 422);
+    if (command.cwd !== ".") safePath(command.cwd);
+    seen.add(command.id);
+    return command;
+  });
+}
+export interface ArchitectureDocument {
+  schemaVersion: 1;
+  sourceMain: { id: string; hash: string };
+  overview: string;
+  components: Named[];
+  dataMigrations: string[];
+  interfaces: string[];
+  security: string[];
+  operations: string[];
+  repositories: { id: string; baseline: string }[];
+  units: Unit[];
+  questions: Question[];
+}
+export function canonical(value: unknown): string {
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value !== null && typeof value === "object")
+    return (
+      "{" +
+      Object.entries(value)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => JSON.stringify(k) + ":" + canonical(v))
+        .join(",") +
+      "}"
+    );
+  return JSON.stringify(value);
+}
+export const hash = (value: unknown) =>
+  createHash("sha256").update(canonical(value)).digest("hex");
+const fail = (): never => {
+  throw new WorkspaceError("DOCUMENT_INVALID", 422);
+};
+function record(v: any, keys: string[], optional: string[] = []): any {
+  if (
+    !v ||
+    typeof v !== "object" ||
+    Array.isArray(v) ||
+    Object.keys(v).some((k) => !keys.includes(k) && !optional.includes(k)) ||
+    keys.some((k) => !(k in v))
+  )
+    fail();
+  return v;
+}
+function text(v: any): asserts v is string {
+  if (typeof v !== "string" || !v.trim() || v.length > 100000) fail();
+}
+function array(v: any): asserts v is any[] {
+  if (!Array.isArray(v) || v.length > 1000) fail();
+}
+function strings(v: any) {
+  array(v);
+  v.forEach(text);
+}
+function ids(v: any[], prefix?: string) {
+  const seen = new Set<string>();
+  for (const item of v) {
+    text(item.id);
+    if (
+      !/^[A-Z][A-Z0-9-]*$/.test(item.id) ||
+      (prefix && !item.id.startsWith(prefix)) ||
+      seen.has(item.id)
+    )
+      fail();
+    seen.add(item.id);
+  }
+}
+function named(v: any) {
+  array(v);
+  ids(v);
+  v.forEach((i: any) => {
+    record(i, ["id", "description"]);
+    text(i.description);
+  });
+}
+function questions(v: any) {
+  array(v);
+  ids(v);
+  v.forEach((i: any) => {
+    record(i, ["id", "question", "blocking"]);
+    text(i.question);
+    if (typeof i.blocking !== "boolean") fail();
+  });
+}
+export function safePath(v: unknown): string {
+  if (
+    typeof v !== "string" ||
+    v.length > 300 ||
+    !/^[a-zA-Z0-9_./-]+$/.test(v) ||
+    v.startsWith("/") ||
+    v
+      .split("/")
+      .some(
+        (p) =>
+          !p ||
+          p === "." ||
+          p === ".." ||
+          p.endsWith(".") ||
+          /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(p) ||
+          p.toLowerCase() === ".git" ||
+          p.toLowerCase() === "node_modules" ||
+          p.toLowerCase().startsWith(".env"),
+      )
+  )
+    throw new WorkspaceError("SCOPE_PATH_INVALID", 422);
+  return v;
+}
+export function parseMain(raw: unknown): MainDocument {
+  const v = record(raw, [
+    "schemaVersion",
+    "brief",
+    "purpose",
+    "requirements",
+    "features",
+    "journeys",
+    "constraints",
+    "exclusions",
+    "questions",
+    "decisions",
+    "legacySources",
+  ]);
+  if (v.schemaVersion !== 1) fail();
+  text(v.brief);
+  text(v.purpose);
+  array(v.requirements);
+  ids(v.requirements, "REQ-");
+  if (!v.requirements.length) fail();
+  const criteria: any[] = [];
+  for (const r of v.requirements) {
+    record(r, ["id", "description", "acceptanceCriteria"]);
+    text(r.description);
+    named(r.acceptanceCriteria);
+    if (!r.acceptanceCriteria.length) fail();
+    criteria.push(...r.acceptanceCriteria);
+  }
+  ids(criteria, "AC-");
+  named(v.features);
+  named(v.journeys);
+  strings(v.constraints);
+  strings(v.exclusions);
+  questions(v.questions);
+  named(v.decisions);
+  strings(v.legacySources);
+  if (Buffer.byteLength(canonical(v)) > 256000) fail();
+  return JSON.parse(canonical(v));
+}
+export function parseArchitecture(
+  raw: unknown,
+  main: MainDocument,
+): ArchitectureDocument {
+  const v = record(raw, [
+    "schemaVersion",
+    "sourceMain",
+    "overview",
+    "components",
+    "dataMigrations",
+    "interfaces",
+    "security",
+    "operations",
+    "repositories",
+    "units",
+    "questions",
+  ]);
+  if (v.schemaVersion !== 1) fail();
+  record(v.sourceMain, ["id", "hash"]);
+  text(v.sourceMain.id);
+  if (!/^[a-f0-9]{64}$/.test(v.sourceMain.hash)) fail();
+  text(v.overview);
+  named(v.components);
+  for (const key of ["dataMigrations", "interfaces", "security", "operations"])
+    strings(v[key]);
+  if (!v.components.length || !v.security.length || !v.operations.length)
+    fail();
+  array(v.repositories);
+  const repos = new Set<string>();
+  for (const r of v.repositories) {
+    record(r, ["id", "baseline"]);
+    text(r.id);
+    if (repos.has(r.id) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(r.baseline))
+      fail();
+    repos.add(r.id);
+  }
+  array(v.units);
+  ids(v.units, "UNIT-");
+  const requirements = new Set(main.requirements.map((r) => r.id));
+  const units = new Set(v.units.map((u: any) => u.id));
+  const checkIds = new Set<string>();
+  for (const u of v.units) {
+    record(
+      u,
+      [
+        "id",
+        "title",
+        "requirementIds",
+        "dependsOn",
+        "repositoryId",
+        "files",
+        "checks",
+      ],
+      ["commands"],
+    );
+    text(u.title);
+    strings(u.requirementIds);
+    strings(u.dependsOn);
+    if (
+      !u.requirementIds.length ||
+      new Set(u.requirementIds).size !== u.requirementIds.length ||
+      u.requirementIds.some((id: string) => !requirements.has(id)) ||
+      u.dependsOn.some((id: string) => !units.has(id) || id === u.id) ||
+      !repos.has(u.repositoryId)
+    )
+      fail();
+    array(u.files);
+    const paths = new Set<string>();
+    if (!u.files.length) fail();
+    for (const f of u.files) {
+      record(f, ["path", "action"]);
+      safePath(f.path);
+      if (
+        paths.has(f.path.toLowerCase()) ||
+        !["create", "modify", "delete"].includes(f.action)
+      )
+        fail();
+      paths.add(f.path.toLowerCase());
+    }
+    array(u.checks);
+    const criteria = new Set(
+      main.requirements
+        .filter((r) => u.requirementIds.includes(r.id))
+        .flatMap((r) => r.acceptanceCriteria.map((a) => a.id)),
+    );
+    parseCommands(u.commands, criteria);
+    if (!u.checks.length) fail();
+    for (const c of u.checks) {
+      record(c, ["id", "criterionId", "type", "path", "expected"]);
+      text(c.id);
+      safePath(c.path);
+      if (
+        !criteria.has(c.criterionId) ||
+        !["contains", "not_contains", "json", "absent"].includes(c.type) ||
+        checkIds.has(c.id) ||
+        typeof c.expected !== "string" ||
+        (!["json", "absent"].includes(c.type) && !c.expected)
+      )
+        fail();
+      checkIds.add(c.id);
+    }
+    if (
+      [...criteria].some(
+        (id) => !u.checks.some((c: any) => c.criterionId === id),
+      )
+    )
+      fail();
+  }
+  const visiting = new Set<string>(),
+    done = new Set<string>();
+  const visit = (id: string) => {
+    if (visiting.has(id)) fail();
+    if (done.has(id)) return;
+    visiting.add(id);
+    v.units.find((u: any) => u.id === id).dependsOn.forEach(visit);
+    visiting.delete(id);
+    done.add(id);
+  };
+  v.units.forEach((u: any) => visit(u.id));
+  questions(v.questions);
+  if (Buffer.byteLength(canonical(v)) > 256000) fail();
+  return JSON.parse(canonical(v));
+}
+export function changedRequirements(
+  before: MainDocument,
+  after: MainDocument,
+): string[] {
+  const global = (m: MainDocument) => ({
+    purpose: m.purpose,
+    features: m.features,
+    journeys: m.journeys,
+    constraints: m.constraints,
+    exclusions: m.exclusions,
+    decisions: m.decisions,
+    questions: m.questions,
+  });
+  const all = [
+    ...new Set(
+      [...before.requirements, ...after.requirements].map((r) => r.id),
+    ),
+  ];
+  if (hash(global(before)) !== hash(global(after))) return all;
+  return all.filter(
+    (id) =>
+      hash(before.requirements.find((r) => r.id === id) ?? null) !==
+      hash(after.requirements.find((r) => r.id === id) ?? null),
+  );
+}
+export function affectedUnits(
+  architecture: ArchitectureDocument,
+  changed: string[],
+): string[] {
+  const affected = new Set(
+    architecture.units
+      .filter((u) => u.requirementIds.some((id) => changed.includes(id)))
+      .map((u) => u.id),
+  );
+  let size;
+  do {
+    size = affected.size;
+    architecture.units
+      .filter((u) => u.dependsOn.some((id) => affected.has(id)))
+      .forEach((u) => affected.add(u.id));
+  } while (size !== affected.size);
+  return [...affected];
+}
+export function mainFromBrief(brief: string): MainDocument {
+  text(brief);
+  return {
+    schemaVersion: 1,
+    brief,
+    purpose: brief,
+    requirements: [
+      {
+        id: "REQ-001",
+        description: brief,
+        acceptanceCriteria: [
+          {
+            id: "AC-001",
+            description:
+              "Replace this draft criterion with an observable outcome.",
+          },
+        ],
+      },
+    ],
+    features: [],
+    journeys: [],
+    constraints: [],
+    exclusions: [],
+    questions: [
+      {
+        id: "Q-001",
+        question:
+          "Review the requirements and acceptance criteria before approving Architecture.",
+        blocking: true,
+      },
+    ],
+    decisions: [],
+    legacySources: [],
+  };
+}
+
+export function requireDocumentAuthority(): void {
+  throw new WorkspaceError("DOCUMENT_AUTHORITY_REQUIRED");
+}

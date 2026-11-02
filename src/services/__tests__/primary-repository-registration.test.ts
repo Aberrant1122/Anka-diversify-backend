@@ -87,7 +87,7 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 1: Legacy Project with githubUrl and no ProjectRepository: list(projectId) creates/ensures primary row and returns one primary
   test("1. legacy Project with githubUrl and no ProjectRepository: list(projectId) creates/ensures primary row and returns one primary", async () => {
-    const repos = await repoService.list(legacyProjectId);
+    const repos = await repoService.list(legacyProjectId,testUserId);
     expect(repos.length).toBe(1);
     expect(repos[0].isPrimary).toBe(true);
     expect(repos[0].name).toBe("legacy-api");
@@ -96,7 +96,7 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 2: Legacy Project + one secondary: list(projectId) returns 2 repositories
   test("2. legacy Project + one secondary: list(projectId) returns 2 repositories", async () => {
-    const repos = await repoService.list(multiRepoProjectId);
+    const repos = await repoService.list(multiRepoProjectId,testUserId);
     expect(repos.length).toBe(2);
 
     const primary = repos.find((r) => r.isPrimary);
@@ -113,9 +113,9 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 3: Repeated list() does NOT create duplicate primary rows
   test("3. repeated list() does NOT create duplicate primary rows", async () => {
-    const firstCall = await repoService.list(multiRepoProjectId);
-    const secondCall = await repoService.list(multiRepoProjectId);
-    const thirdCall = await repoService.list(multiRepoProjectId);
+    const firstCall = await repoService.list(multiRepoProjectId,testUserId);
+    const secondCall = await repoService.list(multiRepoProjectId,testUserId);
+    const thirdCall = await repoService.list(multiRepoProjectId,testUserId);
 
     expect(firstCall.length).toBe(2);
     expect(secondCall.length).toBe(2);
@@ -134,14 +134,14 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
     });
     expect(primaryBefore).not.toBeNull();
 
-    const ensured = await repoService.ensurePrimaryRepository(multiRepoProjectId);
+    const ensured = await repoService.ensurePrimaryRepository(multiRepoProjectId,testUserId);
     expect(ensured?.id).toBe(primaryBefore!.id);
     expect(ensured?.name).toBe(primaryBefore!.name);
   });
 
   // Test 5: Project without githubUrl: no bogus primary created
   test("5. Project without githubUrl: no bogus primary created", async () => {
-    const repos = await repoService.list(noGithubProjectId);
+    const repos = await repoService.list(noGithubProjectId,testUserId);
     expect(repos.length).toBe(0);
 
     const rowsInDb = await prisma.projectRepository.findMany({
@@ -152,7 +152,7 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 6: Primary token: never returned plaintext
   test("6. primary token: never returned plaintext in list() response", async () => {
-    const repos = await repoService.list(multiRepoProjectId);
+    const repos = await repoService.list(multiRepoProjectId,testUserId);
     for (const r of repos) {
       expect((r as any).githubToken).toBeUndefined();
       expect((r as any).hasToken).toBe(true);
@@ -161,10 +161,10 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 7: Primary repository has stable real DB id
   test("7. primary repository has stable real DB id", async () => {
-    const repos1 = await repoService.list(multiRepoProjectId);
+    const repos1 = await repoService.list(multiRepoProjectId,testUserId);
     const primary1 = repos1.find((r) => r.isPrimary);
 
-    const repos2 = await repoService.list(multiRepoProjectId);
+    const repos2 = await repoService.list(multiRepoProjectId,testUserId);
     const primary2 = repos2.find((r) => r.isPrimary);
 
     expect(primary1?.id).toBeDefined();
@@ -174,14 +174,14 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 8: Multi-repo AI dispatch receives repository count 2 (repos.length >= 2 is true)
   test("8. multi-repo AI dispatch receives repository count 2", async () => {
-    const repos = await repoService.list(multiRepoProjectId);
+    const repos = await repoService.list(multiRepoProjectId,testUserId);
     const isMultiRepo = repos.length >= 2;
     expect(isMultiRepo).toBe(true);
   });
 
   // Test 9: Primary and secondary repositoryIds are both valid ProjectRepository IDs
   test("9. primary and secondary repositoryIds are both valid ProjectRepository IDs", async () => {
-    const repos = await repoService.list(multiRepoProjectId);
+    const repos = await repoService.list(multiRepoProjectId,testUserId);
     const ids = repos.map((r) => r.id);
 
     const foundInDb = await prisma.projectRepository.findMany({
@@ -192,7 +192,7 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 10: Multi-repo push can resolve both repository IDs
   test("10. multi-repo push can resolve both repository IDs", async () => {
-    const repos = await repoService.list(multiRepoProjectId);
+    const repos = await repoService.list(multiRepoProjectId,testUserId);
     for (const r of repos) {
       const dbRepo = await prisma.projectRepository.findFirst({
         where: { id: r.id, projectId: multiRepoProjectId },
@@ -204,7 +204,7 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 11: Repositories UI does not duplicate persisted primary
   test("11. Repositories UI does not duplicate persisted primary", async () => {
-    const list = await repoService.list(multiRepoProjectId);
+    const list = await repoService.list(multiRepoProjectId,testUserId);
     // Simulating project-repositories.tsx line 127:
     const hasPrimary = list.some((r) => r.isPrimary);
     expect(hasPrimary).toBe(true);
@@ -215,7 +215,7 @@ describe("Primary Repository Registration for Multi-Repo Execution", () => {
 
   // Test 12: Single-repo project still works exactly as before
   test("12. single-repo project still works exactly as before", async () => {
-    const repos = await repoService.list(legacyProjectId);
+    const repos = await repoService.list(legacyProjectId,testUserId);
     expect(repos.length).toBe(1);
     const isMultiRepo = repos.length >= 2;
     expect(isMultiRepo).toBe(false); // Dispatches to single-repo endpoint as expected

@@ -11,7 +11,7 @@ import { GitHubService } from "../github/GitHubService";
 jest.mock("@prisma/client", () => ({
   PrismaClient: jest.fn().mockImplementation(() => ({
     projectMemorySummary: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({}) },
-    project: { findUnique: jest.fn().mockResolvedValue({ githubUrl: "https://github.com/acme/repo", githubToken: null }) },
+    project: { findFirst: jest.fn(({where}) => Promise.resolve(where.id === "project-1" && where.userId === "owner-1" ? {id:"project-1"} : null)), findUnique: jest.fn().mockResolvedValue({ githubUrl: "https://github.com/acme/repo", githubToken: null }) },
     kanbanBoard: {
       findUnique: jest.fn().mockResolvedValue(null),
       delete: jest.fn().mockResolvedValue({}),
@@ -86,7 +86,7 @@ describe("Checkpoint 1 R2C advisory and utility gateway migration", () => {
     const gatewaySpy = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(
       gatewayResult({ stages: [{ title: "Setup", order: 0, tasks: [{ title: "Create schema", description: "Define models", acceptanceCriteria: ["Schema validates"], targetFiles: ["prisma/schema.prisma"] }] }] }, PipelineStages.TASK_DECOMPOSITION),
     );
-    await new KanbanService().generateBoardFromWorkflow("project-1");
+    await new KanbanService().generateBoardFromWorkflow("project-1", "owner-1");
     expect(gatewaySpy.mock.calls[0][0].stage).toBe(PipelineStages.TASK_DECOMPOSITION);
     expect(gatewaySpy.mock.calls[0][0].schema.validate({ stages: [{ title: "x", order: 0, tasks: [{ title: "x", description: "x", acceptanceCriteria: ["x"], targetFiles: ["../outside.ts"] }] }] }).valid).toBe(false);
     expect(gatewaySpy.mock.calls[0][0].schema.validate({ stages: [{ title: "x", order: 0, tasks: [{ title: "x", description: "x", acceptanceCriteria: ["x"], targetFiles: ["src/a.ts"], success: true }] }] }).valid).toBe(false);
@@ -94,7 +94,7 @@ describe("Checkpoint 1 R2C advisory and utility gateway migration", () => {
 
   test("Kanban provider failure cannot create a board", async () => {
     jest.spyOn(LLMGateway.getInstance(), "callStructured").mockRejectedValue(new Error("provider unavailable"));
-    await expect(new KanbanService().generateBoardFromWorkflow("project-1")).rejects.toThrow("provider unavailable");
+    await expect(new KanbanService().generateBoardFromWorkflow("project-1", "owner-1")).rejects.toThrow("provider unavailable");
   });
 
   test("all R2C requests use gateway stages and no direct provider fallback exists", () => {

@@ -1,13 +1,14 @@
 import { Router } from "express";
-import { TerminalController } from "../controllers/terminal-controller";
+import { authenticateToken } from "../middleware/auth";
+import { TERMINAL_DISABLED } from "../config/terminal-policy";
 
 const router = Router({ mergeParams: true });
-const controller = new TerminalController();
-
-router.post("/sessions", controller.createSession);
-router.get("/sessions/:sessionId", controller.getSession);
-router.post("/sessions/:sessionId/command", controller.runCommand);
-router.post("/sessions/:sessionId/interrupt", controller.interruptSession);
-router.delete("/sessions/:sessionId", controller.closeSession);
-
+router.use(authenticateToken);
+router.use((_req, res) => {
+  res.status(503).json({
+    success: false,
+    code: TERMINAL_DISABLED,
+    error: "Terminal access is unavailable until isolated execution is implemented.",
+  });
+});
 export default router;
