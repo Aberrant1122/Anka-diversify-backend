@@ -123,6 +123,15 @@ export function findChromiumExecutable(): string | null {
     }
   }
 
+  // Trusted vendor locations; launch a fresh test profile, never an existing session.
+  if (process.platform === "win32") {
+    for (const base of [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]].filter(Boolean) as string[]) {
+      for (const relative of ["Google/Chrome/Application/chrome.exe", "Microsoft/Edge/Application/msedge.exe"]) {
+        const candidate = path.join(base, relative);
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+      }
+    }
+  }
   return null;
 }
 
@@ -142,7 +151,7 @@ export async function preflightBrowser(): Promise<{
 
   let browser: Browser | null = null;
   try {
-    browser = await chromium.launch({ executablePath: execPath, headless: true });
+    browser = await chromium.launch({ executablePath: execPath, headless: true, env: Object.fromEntries(Object.entries(VisualVerifierService.buildServerEnv()).filter((entry): entry is [string, string] => entry[1] !== undefined)) });
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto("data:text/html,<h1>ANKA Browser Preflight</h1>", {

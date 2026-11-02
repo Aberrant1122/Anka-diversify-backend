@@ -17,7 +17,7 @@ import { OpenAIEmbeddingProvider } from "../../services/semantic-retrieval.engin
 
 jest.mock("@prisma/client", () => ({
   PrismaClient: jest.fn().mockImplementation(() => ({
-    project: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn() },
+    project: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(({where})=>Promise.resolve(where.id === "project-1" && where.userId === "user-1" ? {id:"project-1"} : null)), findUnique: jest.fn() },
     projectTask: { findMany: jest.fn() },
     projectActivity: { findMany: jest.fn().mockResolvedValue([]) },
     sprint: { findUnique: jest.fn() },
@@ -98,8 +98,8 @@ describe("Checkpoint 1 final completion contracts", () => {
       .mockResolvedValueOnce(result({ tasks: [{ taskId: "task-1", title: "One", reason: "Priority", priority: "high" }] }, PipelineStages.TASK_DECOMPOSITION))
       .mockResolvedValueOnce(result({ name: "Sprint", goal: "Ship", startDate: "2026-09-10", endDate: "2026-09-20", suggestedTasks: [{ taskId: "task-1", title: "One", reason: "Priority", priority: "high" }] }, PipelineStages.TASK_DECOMPOSITION));
     const service = new ProjectChatService();
-    await expect(service.suggestSprintTasks("project-1", "sprint-1", 5)).resolves.toHaveLength(1);
-    await expect(service.generateSprint("project-1", "Ship it")).resolves.toEqual(expect.objectContaining({ name: "Sprint" }));
+    await expect(service.suggestSprintTasks("project-1", "sprint-1", 5, "user-1")).resolves.toHaveLength(1);
+    await expect(service.generateSprint("project-1", "Ship it", "user-1")).resolves.toEqual(expect.objectContaining({ name: "Sprint" }));
     expect(structured.mock.calls.map((call) => call[0].stage)).toEqual([PipelineStages.TASK_DECOMPOSITION, PipelineStages.TASK_DECOMPOSITION]);
     expect(structured.mock.calls[0][0].schema.validate({ tasks: [{ taskId: "invented", title: "X", reason: "X", priority: "high" }] }).valid).toBe(false);
     expect(structured.mock.calls[1][0].schema.validate({ name: "S", goal: "G", startDate: "bad", endDate: "2026-09-20", suggestedTasks: [] }).valid).toBe(false);
@@ -108,15 +108,15 @@ describe("Checkpoint 1 final completion contracts", () => {
   test("ProjectChat ordering requires an exact permutation and technical failure propagates", async () => {
     const spy = jest.spyOn(LLMGateway.getInstance(), "callStructured").mockResolvedValue(result({ order: ["a", "b"] }, PipelineStages.PLAN_REORDER));
     const service = new ProjectChatService();
-    await expect(service.suggestTaskOrder([{ id: "a", title: "A" }, { id: "b", title: "B" }])).resolves.toEqual(["a", "b"]);
+    await expect(service.suggestTaskOrder("project-1", "user-1", [{ id: "a", title: "A" }, { id: "b", title: "B" }])).resolves.toEqual(["a", "b"]);
     expect(spy.mock.calls[0][0].schema.validate({ order: ["a", "a"] }).valid).toBe(false);
     spy.mockRejectedValueOnce(new LLMTimeoutError("timeout"));
-    await expect(service.suggestTaskOrder([{ id: "a", title: "A" }, { id: "b", title: "B" }])).rejects.toBeInstanceOf(LLMTimeoutError);
+    await expect(service.suggestTaskOrder("project-1", "user-1", [{ id: "a", title: "A" }, { id: "b", title: "B" }])).rejects.toBeInstanceOf(LLMTimeoutError);
   });
 
   test("ProjectChat phase proposal uses ROADMAP_PLANNING text completion", async () => {
     const spy = jest.spyOn(LLMGateway.getInstance(), "call").mockResolvedValue(result("# Proposal", PipelineStages.ROADMAP_PLANNING));
-    const proposal = await new ProjectChatService().generatePhaseProposal("project-1", "architecture");
+    const proposal = await new ProjectChatService().generatePhaseProposal("project-1", "architecture", "user-1");
     expect(spy.mock.calls[0][0].stage).toBe(PipelineStages.ROADMAP_PLANNING);
     expect(proposal.content).toBe("# Proposal");
   });

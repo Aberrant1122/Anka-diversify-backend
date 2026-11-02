@@ -1,3 +1,4 @@
+import { requireDocumentAuthority } from "../../workspace/document-contract";
 import crypto from "crypto";
 import {
   AgentFileChange,
@@ -127,7 +128,7 @@ export class MultiRepoCoordinator {
   private agentRunner: MultiRepoAgentRunner;
 
   constructor(agentRunner?: MultiRepoAgentRunner) {
-    this.agentRunner = agentRunner || GitWorktreeService.runIsolatedAgent.bind(GitWorktreeService);
+    this.agentRunner = agentRunner || (async options=>{ requireDocumentAuthority(); return GitWorktreeService.runIsolatedAgent(options); });
   }
 
   /**

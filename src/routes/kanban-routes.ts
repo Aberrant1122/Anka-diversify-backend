@@ -1,7 +1,11 @@
 import { Router } from "express";
 import { KanbanController } from "../controllers/kanban-controller";
 
+import { bindKanbanResource } from '../middleware/project-owner';
 const router = Router({ mergeParams: true });
+router.param('taskId', bindKanbanResource);
+router.param('clarificationId', bindKanbanResource);
+router.post('/clarifications', bindKanbanResource);
 const kanbanController = new KanbanController();
 
 // GET  /api/projects/:projectId/kanban — Get Kanban Board & Tasks

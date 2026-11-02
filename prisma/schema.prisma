@@ -64,6 +64,12 @@ model Project {
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
+  workspaceOperations WorkspaceOperation[]
+  workspaceDocuments WorkspaceDocument[]
+  workspaceHead WorkspaceHead?
+  workspaceApprovals WorkspaceApproval[]
+  workspaceRuns WorkspaceRun[]
+  workspaceEvents WorkspaceEvent[]
   user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   aiChatSessions AiChatSession[]
   memorySummary  ProjectMemorySummary?
@@ -838,4 +844,107 @@ model ClarificationQA {
 
   @@index([taskId, resolved])
   @@map("clarification_qas")
+}
+
+// Two-document authority is additive. Legacy phase artifacts remain intact.
+model WorkspaceDocument {
+  id String @id @default(cuid())
+  projectId String
+  kind String
+  version Int
+  contentHash String
+  content Json
+  previousId String?
+  sourceMainId String?
+  createdBy String
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  previous WorkspaceDocument? @relation("WorkspacePrevious", fields: [previousId], references: [id], onDelete: Restrict)
+  successors WorkspaceDocument[] @relation("WorkspacePrevious")
+  sourceMain WorkspaceDocument? @relation("WorkspaceSourceMain", fields: [sourceMainId], references: [id], onDelete: Restrict)
+  architectures WorkspaceDocument[] @relation("WorkspaceSourceMain")
+  mainHeads WorkspaceHead[] @relation("WorkspaceHeadMain")
+  architectureHeads WorkspaceHead[] @relation("WorkspaceHeadArchitecture")
+  mainApprovals WorkspaceApproval[] @relation("WorkspaceApprovalMain")
+  architectureApprovals WorkspaceApproval[] @relation("WorkspaceApprovalArchitecture")
+  @@unique([projectId, kind, version])
+  @@index([projectId, kind])
+}
+
+model WorkspaceHead {
+  projectId String @id
+  stateVersion Int @default(0)
+  mainId String?
+  architectureId String?
+  approvalId String?
+  main WorkspaceDocument? @relation("WorkspaceHeadMain",fields:[mainId],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"workspace_head_main_fk")
+  architecture WorkspaceDocument? @relation("WorkspaceHeadArchitecture",fields:[architectureId],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"workspace_head_architecture_fk")
+  approval WorkspaceApproval? @relation("WorkspaceHeadApproval",fields:[approvalId],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"workspace_head_approval_fk")
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
+}
+
+model WorkspaceApproval {
+  id String @id @default(cuid())
+  projectId String
+  mainId String
+  architectureId String
+  snapshot Json
+  main WorkspaceDocument @relation("WorkspaceApprovalMain",fields:[mainId],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"workspace_approval_main_fk")
+  architecture WorkspaceDocument @relation("WorkspaceApprovalArchitecture",fields:[architectureId],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"workspace_approval_architecture_fk")
+  heads WorkspaceHead[] @relation("WorkspaceHeadApproval")
+  createdBy String
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  runs WorkspaceRun[]
+  @@index([projectId, createdAt])
+}
+
+model WorkspaceRun {
+  id String @id @default(cuid())
+  projectId String
+  approvalId String
+  idempotencyKey String
+  authority Json
+  createdBy String
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  approval WorkspaceApproval @relation(fields: [approvalId], references: [id], onDelete: Restrict)
+  operations WorkspaceOperation[]
+  events WorkspaceEvent[]
+  @@unique([projectId, idempotencyKey])
+}
+
+model WorkspaceEvent {
+  id String @id @default(cuid())
+  projectId String
+  runId String?
+  kind String
+  payload Json
+  createdBy String
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  run WorkspaceRun? @relation(fields: [runId], references: [id], onDelete: Restrict)
+  @@index([projectId, createdAt])
+  @@index([runId, createdAt])
+}
+
+model WorkspaceOperation {
+  id String @id @default(cuid())
+  projectId String
+  runId String?
+  kind String
+  idempotencyKey String
+  stateVersion Int
+  inputHash String
+  context Json
+  createdBy String
+  createdAt DateTime @default(now())
+  status String @default("RUNNING")
+  result Json?
+  errorCode String?
+  completedAt DateTime?
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  run WorkspaceRun? @relation(fields: [runId], references: [id], onDelete: Restrict)
+  @@unique([projectId, kind, idempotencyKey])
+  @@index([projectId, createdAt])
 }

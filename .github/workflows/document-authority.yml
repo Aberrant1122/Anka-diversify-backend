@@ -1,0 +1,56 @@
+name: Document authority gates
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  local-authority:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx tsc --noEmit
+      - run: npm run test:workspace -- --json --outputFile=workspace-results.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workspace-test-results
+          path: workspace-results.json
+
+  native-concurrency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: anka_rehearsal
+          POSTGRES_PASSWORD: synthetic
+          POSTGRES_DB: anka_rehearsal
+        ports:
+          - 5432:5432
+        options: --health-cmd="pg_isready -U anka_rehearsal -d anka_rehearsal" --health-interval=5s --health-timeout=5s --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: node scripts/test-native-postgres.cjs > native-postgres-result.json
+        env:
+          ANKA_LOCAL_REHEARSAL: "1"
+          ANKA_REHEARSAL_DATABASE_URL: postgresql://anka_rehearsal:synthetic@127.0.0.1:5432/anka_rehearsal
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-postgres-result
+          path: native-postgres-result.json

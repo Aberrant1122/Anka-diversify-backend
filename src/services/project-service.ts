@@ -1,3 +1,4 @@
+import { assertOwner } from "../security/project-access";
 import { PrismaClient } from "@prisma/client";
 import { checkSprintAutoCloseForTask } from "./rule-engine";
 import { ProjectRepositoryService } from "./project-repository-service";
@@ -5,80 +6,78 @@ import { ProjectRepositoryService } from "./project-repository-service";
 const prisma = new PrismaClient();
 const repoService = new ProjectRepositoryService();
 
-const DEMO_USER_ID = "demo-user-id";
-
-// Ensure the demo user exists (for unauthenticated/demo usage)
 async function ensureUser(userId: string): Promise<void> {
-  const exists = await prisma.user.findUnique({ where: { id: userId } });
-  if (!exists) {
-    await prisma.user.create({
-      data: {
-        id: userId,
-        email: `${userId}@demo.anka.io`,
-        name: "Demo User",
-        password: "demo",
-        role: "admin",
-      },
-    });
-  }
+  if (!userId) throw new Error("Authenticated active user required");
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, status: true },
+  });
+  if (!user || user.status !== "active")
+    throw new Error("Authenticated active user required");
 }
 
+async function assertProjectOwner(projectId: string, actorId: string) {
+  return assertOwner(prisma, projectId, actorId);
+}
+export type ProjectActor = { projectId: string; userId: string };
 export class ProjectService {
   async getAllProjects(userId: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true },
-    });
-
-    const isSystemAdmin = user?.role === "admin";
-
+    if (!userId) throw new Error("Authenticated active user required");
     return prisma.project.findMany({
-      where: isSystemAdmin
-        ? {
-            NOT: { id: { startsWith: "eval-project-" } },
-          }
-        : {
-            OR: [
-              { userId },
-              { members: { some: { userId } } },
-            ],
-            NOT: { id: { startsWith: "eval-project-" } },
-          },
+      where: {
+        userId,
+        user: { status: "active" },
+        NOT: { id: { startsWith: "eval-project-" } },
+      },
       include: {
         tasks: true,
         memorySummary: { select: { summary: true, lastUpdated: true } },
-        repoSnapshot: { select: { githubUrl: true, repoName: true, lastSyncedAt: true } },
-        members: { include: { user: { select: { id: true, name: true, email: true, role: true, department: true, status: true } } } },
+        repoSnapshot: {
+          select: { githubUrl: true, repoName: true, lastSyncedAt: true },
+        },
+        members: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                role: true,
+                department: true,
+                status: true,
+              },
+            },
+          },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
   }
 
   async getProjectById(id: string, userId: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true },
-    });
-
-    const isSystemAdmin = user?.role === "admin";
-
+    if (!userId) throw new Error("Authenticated active user required");
     return prisma.project.findFirst({
-      where: isSystemAdmin
-        ? { id }
-        : {
-            id,
-            OR: [
-              { userId },
-              { members: { some: { userId } } },
-            ],
-          },
+      where: { id, userId, user: { status: "active" } },
       include: {
         tasks: true,
         memorySummary: true,
         repoSnapshot: true,
         decisions: { orderBy: { madeAt: "desc" }, take: 10 },
         rules: { orderBy: { createdAt: "desc" } },
-        members: { include: { user: { select: { id: true, name: true, email: true, role: true, department: true, status: true } } } },
+        members: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                role: true,
+                department: true,
+                status: true,
+              },
+            },
+          },
+        },
       },
     });
   }
@@ -98,11 +97,12 @@ export class ProjectService {
     },
     userId: string,
   ) {
+    await ensureUser(userId);
     const project = await prisma.project.create({
       data: {
         name: data.name,
         description: data.description,
-        phase: data.phase || "product-modeling",
+        phase: data.phase || "development",
         priority: data.priority || "medium",
         status: data.status || "active",
         githubUrl: data.githubUrl,
@@ -115,9 +115,14 @@ export class ProjectService {
     });
 
     if (project.githubUrl) {
-      await repoService.ensurePrimaryRepository(project.id).catch((err) => {
-        console.warn(`[ProjectService] Failed to ensure primary repository for ${project.id}:`, err?.message || err);
-      });
+      await repoService
+        .ensurePrimaryRepository(project.id, userId)
+        .catch((err) => {
+          console.warn(
+            `[ProjectService] Failed to ensure primary repository for ${project.id}:`,
+            err?.message || err,
+          );
+        });
     }
 
     return project;
@@ -128,21 +133,10 @@ export class ProjectService {
     githubToken: string,
     userId: string,
   ) {
-    // Verify project belongs to user
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    });
-
-    if (!project) {
-      throw new Error('Project not found');
-    }
-
-    if (project.userId !== userId) {
-      throw new Error('Unauthorized to update this project');
-    }
+    await assertProjectOwner(projectId, userId);
 
     return prisma.project.update({
-      where: { id: projectId },
+      where: { id: projectId, userId },
       data: { githubToken }, // Already encrypted by controller
     });
   }
@@ -162,7 +156,7 @@ export class ProjectService {
     },
     userId: string,
   ) {
-    // Owner-only: find the project only if the requesting user is its owner
+    await assertProjectOwner(id, userId);
     const project = await prisma.project.findFirst({ where: { id, userId } });
     if (!project) return null;
 
@@ -170,11 +164,15 @@ export class ProjectService {
       where: { id },
       data: {
         ...(data.name !== undefined && { name: data.name }),
-        ...(data.description !== undefined && { description: data.description }),
+        ...(data.description !== undefined && {
+          description: data.description,
+        }),
         ...(data.phase !== undefined && { phase: data.phase }),
         ...(data.priority !== undefined && { priority: data.priority }),
         ...(data.githubUrl !== undefined && { githubUrl: data.githubUrl }),
-        ...(data.localPath !== undefined && { localPath: data.localPath || null }),
+        ...(data.localPath !== undefined && {
+          localPath: data.localPath || null,
+        }),
         ...(data.status !== undefined && { status: data.status }),
         ...(data.progress !== undefined && { progress: data.progress }),
         ...(data.dueDate !== undefined && { dueDate: new Date(data.dueDate) }),
@@ -191,8 +189,8 @@ export class ProjectService {
     return true;
   }
 
-  async getProjectTasks(projectId: string, userId: string = DEMO_USER_ID) {
-    await ensureUser(userId);
+  async getProjectTasks(projectId: string, userId: string) {
+    await assertProjectOwner(projectId, userId);
     const tasks = await prisma.projectTask.findMany({
       where: { projectId },
       orderBy: { createdAt: "desc" },
@@ -223,8 +221,9 @@ export class ProjectService {
       phase?: string;
       due_date?: string;
     },
-    actor?: { userId: string; userName: string },
+    actor: { userId: string; userName: string },
   ) {
+    await assertProjectOwner(data.project_id, actor.userId);
     const task = await prisma.projectTask.create({
       data: {
         projectId: data.project_id,
@@ -260,13 +259,16 @@ export class ProjectService {
       phase?: string;
       dueDate?: string;
     },
-    actor?: { userId: string; userName: string; projectId: string },
+    actor: { userId: string; userName: string; projectId: string },
   ) {
+    await assertProjectOwner(actor.projectId, actor.userId);
     const task = await prisma.projectTask.update({
-      where: { id: taskId },
+      where: { id: taskId, projectId: actor.projectId },
       data: {
         ...(data.title !== undefined && { title: data.title }),
-        ...(data.description !== undefined && { description: data.description }),
+        ...(data.description !== undefined && {
+          description: data.description,
+        }),
         ...(data.status !== undefined && { status: data.status }),
         ...(data.priority !== undefined && { priority: data.priority }),
         ...(data.phase !== undefined && { phase: data.phase }),
@@ -295,11 +297,16 @@ export class ProjectService {
 
   async deleteTask(
     taskId: string,
-    actor?: { userId: string; userName: string; projectId: string },
+    actor: { userId: string; userName: string; projectId: string },
   ) {
-    const task = await prisma.projectTask.findUnique({ where: { id: taskId } });
+    await assertProjectOwner(actor.projectId, actor.userId);
+    const task = await prisma.projectTask.findFirst({
+      where: { id: taskId, projectId: actor.projectId },
+    });
     if (!task) return false;
-    await prisma.projectTask.delete({ where: { id: taskId } });
+    await prisma.projectTask.delete({
+      where: { id: taskId, projectId: actor.projectId },
+    });
     if (actor) {
       await this.logActivity({
         projectId: actor.projectId,
@@ -316,35 +323,67 @@ export class ProjectService {
 
   // ── Members ─────────────────────────────────────────────────────────────────
 
-  async getProjectMembers(projectId: string) {
+  async getProjectMembers(projectId: string, actorId: string) {
+    await assertProjectOwner(projectId, actorId);
     const members = await prisma.projectMember.findMany({
       where: { projectId },
-      include: { user: { select: { id: true, name: true, email: true, role: true, department: true, status: true } } },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+            department: true,
+            status: true,
+          },
+        },
+      },
       orderBy: { joinedAt: "asc" },
     });
     return members.map((m) => ({ ...m.user, joinedAt: m.joinedAt }));
   }
 
-  async addProjectMember(projectId: string, userId: string) {
+  async addProjectMember(projectId: string, userId: string, actorId: string) {
+    await assertProjectOwner(projectId, actorId);
     await ensureUser(userId);
     return prisma.projectMember.create({
       data: { projectId, userId },
-      include: { user: { select: { id: true, name: true, email: true, role: true, department: true, status: true } } },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+            department: true,
+            status: true,
+          },
+        },
+      },
     });
   }
 
-  async removeProjectMember(projectId: string, userId: string) {
+  async removeProjectMember(
+    projectId: string,
+    userId: string,
+    actorId: string,
+  ) {
+    await assertProjectOwner(projectId, actorId);
     const member = await prisma.projectMember.findUnique({
       where: { projectId_userId: { projectId, userId } },
     });
     if (!member) return false;
-    await prisma.projectMember.delete({ where: { projectId_userId: { projectId, userId } } });
+    await prisma.projectMember.delete({
+      where: { projectId_userId: { projectId, userId } },
+    });
     return true;
   }
 
   // ── Chat ────────────────────────────────────────────────────────────────────
 
-  async getChatMessages(projectId: string, limit = 100) {
+  async getChatMessages(projectId: string, actorId: string, limit = 100) {
+    await assertProjectOwner(projectId, actorId);
     return prisma.projectChatMessage.findMany({
       where: { projectId },
       orderBy: { createdAt: "asc" },
@@ -352,7 +391,13 @@ export class ProjectService {
     });
   }
 
-  async sendChatMessage(data: { projectId: string; userId: string; userName: string; content: string }) {
+  async sendChatMessage(data: {
+    projectId: string;
+    userId: string;
+    userName: string;
+    content: string;
+  }) {
+    await assertProjectOwner(data.projectId, data.userId);
     return prisma.projectChatMessage.create({ data });
   }
 
@@ -368,10 +413,12 @@ export class ProjectService {
     entityName?: string;
     meta?: Record<string, any>;
   }) {
+    await assertProjectOwner(data.projectId, data.userId);
     return prisma.projectActivity.create({ data });
   }
 
-  async getActivities(projectId: string, limit = 50) {
+  async getActivities(projectId: string, actorId: string, limit = 50) {
+    await assertProjectOwner(projectId, actorId);
     return prisma.projectActivity.findMany({
       where: { projectId },
       orderBy: { createdAt: "desc" },
@@ -381,9 +428,10 @@ export class ProjectService {
 
   // ── Comments ────────────────────────────────────────────────────────────────
 
-  async getComments(taskId: string) {
+  async getComments(taskId: string, actor: ProjectActor) {
+    await assertProjectOwner(actor.projectId, actor.userId);
     return prisma.taskComment.findMany({
-      where: { taskId },
+      where: { taskId, projectId: actor.projectId },
       orderBy: { createdAt: "asc" },
     });
   }
@@ -395,6 +443,14 @@ export class ProjectService {
     userName: string;
     content: string;
   }) {
+    await assertProjectOwner(data.projectId, data.userId);
+    if (
+      !(await prisma.projectTask.findFirst({
+        where: { id: data.taskId, projectId: data.projectId },
+        select: { id: true },
+      }))
+    )
+      throw new Error("Task not found or inaccessible");
     const comment = await prisma.taskComment.create({ data });
     await this.logActivity({
       projectId: data.projectId,
@@ -407,32 +463,59 @@ export class ProjectService {
     return comment;
   }
 
-  async deleteComment(commentId: string) {
-    const comment = await prisma.taskComment.findUnique({ where: { id: commentId } });
+  async deleteComment(
+    commentId: string,
+    actor: ProjectActor & { taskId: string },
+  ) {
+    await assertProjectOwner(actor.projectId, actor.userId);
+    const comment = await prisma.taskComment.findFirst({
+      where: {
+        id: commentId,
+        projectId: actor.projectId,
+        taskId: actor.taskId,
+      },
+    });
     if (!comment) return false;
-    await prisma.taskComment.delete({ where: { id: commentId } });
+    await prisma.taskComment.delete({
+      where: {
+        id: commentId,
+        projectId: actor.projectId,
+        taskId: actor.taskId,
+      },
+    });
     return true;
   }
 
   // ── Files ───────────────────────────────────────────────────────────────────
 
-  async getProjectFiles(projectId: string) {
+  async getProjectFiles(projectId: string, actorId: string) {
+    await assertProjectOwner(projectId, actorId);
     return prisma.projectFile.findMany({
       where: { projectId },
       orderBy: { createdAt: "desc" },
     });
   }
 
-  async createFile(data: {
-    projectId: string;
-    name: string;
-    type?: string;
-    phase?: string;
-    url?: string;
-    s3Key?: string;
-    size?: string;
-    uploadedBy?: string;
-  }) {
+  async createFile(
+    data: {
+      projectId: string;
+      name: string;
+      type?: string;
+      phase?: string;
+      url?: string;
+      s3Key?: string;
+      size?: string;
+      uploadedBy?: string;
+    },
+    actorId: string,
+  ) {
+    await assertProjectOwner(data.projectId, actorId);
+    if (
+      data.s3Key &&
+      (!data.s3Key.startsWith(`projects/${data.projectId}/`) ||
+        data.s3Key.includes(".."))
+    )
+      throw new Error("File key outside project");
     return prisma.projectFile.create({
       data: {
         projectId: data.projectId,
@@ -442,100 +525,156 @@ export class ProjectService {
         url: data.url,
         s3Key: data.s3Key,
         size: data.size,
-        uploadedBy: data.uploadedBy,
+        uploadedBy: actorId,
       },
     });
   }
 
-  async deleteFile(fileId: string) {
-    const file = await prisma.projectFile.findUnique({ where: { id: fileId } });
-    if (!file) return null;
-    await prisma.projectFile.delete({ where: { id: fileId } });
+  async deleteFile(fileId: string, actor: ProjectActor) {
+    await assertProjectOwner(actor.projectId, actor.userId);
+    const file = await prisma.projectFile.findFirst({
+      where: { id: fileId, projectId: actor.projectId },
+    });
+    if (!file) return undefined;
+    await prisma.projectFile.delete({
+      where: { id: fileId, projectId: actor.projectId },
+    });
     return file.s3Key || null; // return key so controller can delete from S3
   }
 
   // ── Project Rules ──────────────────────────────────────────────────────────
 
-  async createProjectRule(data: {
-    projectId: string;
-    title: string;
-    description: string;
-    priority?: string;
-  }) {
+  async createProjectRule(
+    data: {
+      projectId: string;
+      title: string;
+      description: string;
+      priority?: string;
+    },
+    actorId: string,
+  ) {
+    await assertProjectOwner(data.projectId, actorId);
     return prisma.projectRule.create({ data });
   }
 
-  async updateProjectRule(ruleId: string, data: {
-    title?: string;
-    description?: string;
-    priority?: string;
-  }) {
-    const rule = await prisma.projectRule.findUnique({ where: { id: ruleId } });
+  async updateProjectRule(
+    ruleId: string,
+    data: {
+      title?: string;
+      description?: string;
+      priority?: string;
+    },
+    actor: ProjectActor,
+  ) {
+    await assertProjectOwner(actor.projectId, actor.userId);
+    const rule = await prisma.projectRule.findFirst({
+      where: { id: ruleId, projectId: actor.projectId },
+    });
     if (!rule) return null;
     return prisma.projectRule.update({
-      where: { id: ruleId },
+      where: { id: ruleId, projectId: actor.projectId },
       data: {
         ...(data.title !== undefined && { title: data.title }),
-        ...(data.description !== undefined && { description: data.description }),
+        ...(data.description !== undefined && {
+          description: data.description,
+        }),
         ...(data.priority !== undefined && { priority: data.priority }),
       },
     });
   }
 
-  async deleteProjectRule(ruleId: string) {
-    const rule = await prisma.projectRule.findUnique({ where: { id: ruleId } });
+  async deleteProjectRule(ruleId: string, actor: ProjectActor) {
+    await assertProjectOwner(actor.projectId, actor.userId);
+    const rule = await prisma.projectRule.findFirst({
+      where: { id: ruleId, projectId: actor.projectId },
+    });
     if (!rule) return false;
-    await prisma.projectRule.delete({ where: { id: ruleId } });
+    await prisma.projectRule.delete({
+      where: { id: ruleId, projectId: actor.projectId },
+    });
     return true;
   }
 
   // ── Project Decisions ──────────────────────────────────────────────────────
 
-  async createProjectDecision(data: {
-    projectId: string;
-    title: string;
-    description: string;
-    impact?: string;
-    madeBy?: string;
-    artifactId?: string;
-  }) {
-    return prisma.projectDecision.create({ data });
+  async createProjectDecision(
+    data: {
+      projectId: string;
+      title: string;
+      description: string;
+      impact?: string;
+      madeBy?: string;
+      artifactId?: string;
+    },
+    actorId: string,
+  ) {
+    await assertProjectOwner(data.projectId, actorId);
+    if (
+      data.artifactId &&
+      !(await prisma.phaseArtifact.findFirst({
+        where: { id: data.artifactId, projectId: data.projectId },
+        select: { id: true },
+      }))
+    )
+      throw new Error("Artifact outside project");
+    return prisma.projectDecision.create({
+      data: { ...data, madeBy: actorId },
+    });
   }
 
-  async updateProjectDecision(decisionId: string, data: {
-    title?: string;
-    description?: string;
-    impact?: string;
-  }) {
-    const decision = await prisma.projectDecision.findUnique({ where: { id: decisionId } });
+  async updateProjectDecision(
+    decisionId: string,
+    data: {
+      title?: string;
+      description?: string;
+      impact?: string;
+    },
+    actor: ProjectActor,
+  ) {
+    await assertProjectOwner(actor.projectId, actor.userId);
+    const decision = await prisma.projectDecision.findFirst({
+      where: { id: decisionId, projectId: actor.projectId },
+    });
     if (!decision) return null;
     return prisma.projectDecision.update({
-      where: { id: decisionId },
+      where: { id: decisionId, projectId: actor.projectId },
       data: {
         ...(data.title !== undefined && { title: data.title }),
-        ...(data.description !== undefined && { description: data.description }),
+        ...(data.description !== undefined && {
+          description: data.description,
+        }),
         ...(data.impact !== undefined && { impact: data.impact }),
       },
     });
   }
 
-  async deleteProjectDecision(decisionId: string) {
-    const decision = await prisma.projectDecision.findUnique({ where: { id: decisionId } });
+  async deleteProjectDecision(decisionId: string, actor: ProjectActor) {
+    await assertProjectOwner(actor.projectId, actor.userId);
+    const decision = await prisma.projectDecision.findFirst({
+      where: { id: decisionId, projectId: actor.projectId },
+    });
     if (!decision) return false;
-    await prisma.projectDecision.delete({ where: { id: decisionId } });
+    await prisma.projectDecision.delete({
+      where: { id: decisionId, projectId: actor.projectId },
+    });
     return true;
   }
 
   // ── Memory Summary ─────────────────────────────────────────────────────────
 
-  async saveMemorySummary(projectId: string, summary: string) {
+  async saveMemorySummary(projectId: string, summary: string, actorId: string) {
+    await assertProjectOwner(projectId, actorId);
     const existing = await prisma.projectMemorySummary.findUnique({
       where: { projectId },
     });
     if (existing) {
       return prisma.projectMemorySummary.update({
         where: { projectId },
-        data: { summary, version: existing.version + 1, lastUpdated: new Date() },
+        data: {
+          summary,
+          version: existing.version + 1,
+          lastUpdated: new Date(),
+        },
       });
     }
     return prisma.projectMemorySummary.create({
@@ -545,7 +684,8 @@ export class ProjectService {
 
   // ── Task Stats ─────────────────────────────────────────────────────────────
 
-  async getTaskStats(projectId: string) {
+  async getTaskStats(projectId: string, actorId: string) {
+    await assertProjectOwner(projectId, actorId);
     const tasks = await prisma.projectTask.findMany({
       where: { projectId },
       select: { status: true, priority: true, dueDate: true },
@@ -566,7 +706,8 @@ export class ProjectService {
       priorityCounts[t.priority] = (priorityCounts[t.priority] || 0) + 1;
 
       if (t.status === "done") completedTasks++;
-      else if (t.status === "in_progress" || t.status === "in-progress") inProgressTasks++;
+      else if (t.status === "in_progress" || t.status === "in-progress")
+        inProgressTasks++;
       else if (t.status === "todo") todoTasks++;
       else if (t.status === "review") reviewTasks++;
 
@@ -582,7 +723,10 @@ export class ProjectService {
       todoTasks,
       reviewTasks,
       overdueTasks,
-      completionRate: totalTasks > 0 ? parseFloat(((completedTasks / totalTasks) * 100).toFixed(1)) : 0,
+      completionRate:
+        totalTasks > 0
+          ? parseFloat(((completedTasks / totalTasks) * 100).toFixed(1))
+          : 0,
       priorityCounts,
       statusCounts,
     };

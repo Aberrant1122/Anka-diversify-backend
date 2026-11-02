@@ -104,7 +104,7 @@ describe("AI Step 13C & Safety Fix — Fail-Closed Git Repository Detection & No
         message: "bypass attempt",
         context: { directExecution: true } as any,
       })
-    ).rejects.toThrow(/GIT_REPOSITORY_REQUIRED/);
+    ).rejects.toThrow(/DOCUMENT_AUTHORITY_REQUIRED/);
 
     expect(pipelineSpy).not.toHaveBeenCalled();
   });
@@ -121,7 +121,7 @@ describe("AI Step 13C & Safety Fix — Fail-Closed Git Repository Detection & No
         message: "bypass attempt 2",
         context: { isEvalFixture: true } as any,
       })
-    ).rejects.toThrow(/GIT_REPOSITORY_REQUIRED/);
+    ).rejects.toThrow(/DOCUMENT_AUTHORITY_REQUIRED/);
 
     expect(pipelineSpy).not.toHaveBeenCalled();
   });
@@ -138,39 +138,17 @@ describe("AI Step 13C & Safety Fix — Fail-Closed Git Repository Detection & No
         message: "bypass attempt 3",
         context: { effectiveLocalPath: "/tmp/fake" } as any,
       })
-    ).rejects.toThrow(/GIT_REPOSITORY_REQUIRED/);
+    ).rejects.toThrow(/DOCUMENT_AUTHORITY_REQUIRED/);
 
     expect(pipelineSpy).not.toHaveBeenCalled();
   });
 
-  test("D. Trusted backend internalOptions and runDirectAgent still work for EvalRunner/tests", async () => {
-    (prisma.project.findUnique as jest.Mock).mockResolvedValue({
-      localPath: nonGitDir,
-    });
-
-    const pipelineSpy = jest.spyOn(AgentPipeline, "runCodingAgent").mockResolvedValue({
-      explanation: "trusted direct pass",
-      changes: [],
-      commitMessage: "test",
-      sessionId: "s-1",
-    });
-
-    // 1. Via internalOptions argument
-    const response1 = await CodingAgent.runCodingAgent(
-      "user-1",
-      "proj-1",
-      { message: "trusted test" },
-      undefined,
-      { allowDirectExecution: true }
-    );
-    expect(response1.explanation).toBe("trusted direct pass");
-
-    // 2. Via runDirectAgent
-    const response2 = await CodingAgent.runDirectAgent("user-1", "proj-1", { message: "trusted direct test" });
-    expect(response2.explanation).toBe("trusted direct pass");
-
-    expect(pipelineSpy).toHaveBeenCalledTimes(2);
-  });
+  test("D. Legacy internal flags cannot bypass the document authority boundary", async () => {
+const pipelineSpy = jest.spyOn(AgentPipeline, "runCodingAgent");
+await expect(CodingAgent.runCodingAgent("user-1","proj-1",{message:"legacy bypass"},undefined,{allowDirectExecution:true})).rejects.toThrow("DOCUMENT_AUTHORITY_REQUIRED");
+await expect(CodingAgent.runDirectAgent("user-1","proj-1",{message:"legacy direct"})).rejects.toThrow("DOCUMENT_AUTHORITY_REQUIRED");
+expect(pipelineSpy).not.toHaveBeenCalled();
+});
 
   test("E. Git worktree preparation error fails closed and does NOT fall back to direct writes", async () => {
     (prisma.project.findUnique as jest.Mock).mockResolvedValue({
@@ -185,7 +163,7 @@ describe("AI Step 13C & Safety Fix — Fail-Closed Git Repository Detection & No
     try {
       await expect(
         CodingAgent.runCodingAgent("user-1", "proj-1", { message: "fix something" })
-      ).rejects.toThrow(/SOURCE_REPOSITORY_DIRTY/);
+      ).rejects.toThrow(/DOCUMENT_AUTHORITY_REQUIRED/);
 
       expect(pipelineSpy).not.toHaveBeenCalled();
     } finally {
@@ -202,7 +180,7 @@ describe("AI Step 13C & Safety Fix — Fail-Closed Git Repository Detection & No
 
     await expect(
       CodingAgent.runCodingAgent("user-1", "proj-1", { message: "add feature" })
-    ).rejects.toThrow(/GIT_REPOSITORY_REQUIRED/);
+    ).rejects.toThrow(/DOCUMENT_AUTHORITY_REQUIRED/);
 
     expect(pipelineSpy).not.toHaveBeenCalled();
   });

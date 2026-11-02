@@ -8,7 +8,17 @@ import projectRepositoryRoutes from './project-repository-routes';
 import terminalRoutes from './terminal-routes';
 import { requireRole } from '../middleware/rbac';
 
+import { requireProjectOwner, bindProjectResources, bindTaskChildren } from '../middleware/project-owner';
 const router = Router();
+router.param('id', requireProjectOwner);
+router.param('projectId', requireProjectOwner);
+bindProjectResources(router, { taskId: 'projectTask', fileId: 'projectFile', docId: 'projectDocument', ruleId: 'projectRule', decisionId: 'projectDecision' });
+router.param('commentId', bindTaskChildren);
+router.param('itemId', bindTaskChildren);
+router.param('blockingTaskId', bindTaskChildren);
+
+import workspaceRoutes from './workspace-routes';
+router.use('/:projectId/workspace', workspaceRoutes);
 const projectController = new ProjectController();
 const aiController = new AiController();
 
@@ -57,7 +67,7 @@ router.delete('/:id/tasks/:taskId', projectController.deleteTask.bind(projectCon
 router.get('/:id/files', projectController.getProjectFiles.bind(projectController));
 router.post('/:id/files', projectController.createFile.bind(projectController));
 router.post('/:id/files/presign', projectController.presignUpload.bind(projectController));
-router.post('/:id/files/confirm', projectController.confirmUpload.bind(projectController));
+router.post('/:id/files/confirm', bindTaskChildren, projectController.confirmUpload.bind(projectController));
 router.delete('/:id/files/:fileId', projectController.deleteFile.bind(projectController));
 router.get('/:id/files/:fileId/download', projectController.getFileDownloadUrl.bind(projectController));
 
@@ -84,7 +94,7 @@ router.post('/:id/tasks/:taskId/comments', projectController.createComment.bind(
 router.delete('/:id/tasks/:taskId/comments/:commentId', projectController.deleteComment.bind(projectController));
 
 // Task dependencies
-router.post('/:id/tasks/:taskId/dependencies', projectController.addDependency.bind(projectController));
+router.post('/:id/tasks/:taskId/dependencies', bindTaskChildren, projectController.addDependency.bind(projectController));
 router.delete('/:id/tasks/:taskId/dependencies/:blockingTaskId', projectController.removeDependency.bind(projectController));
 
 // Task checklist
@@ -125,7 +135,7 @@ router.use('/:projectId/kanban', kanbanRoutes);
 
 // Multi-repository support (Anka OS v2.0 spec §11)
 router.use('/:projectId/repositories', projectRepositoryRoutes);
-router.post('/:projectId/agent/multi-repo/run', aiController.runMultiRepoAgent.bind(aiController));
+router.post('/:projectId/agent/multi-repo/run', (_req,res)=>res.status(409).json({error:'DOCUMENT_AUTHORITY_REQUIRED'}), aiController.runMultiRepoAgent.bind(aiController));
 
 // Bounded developer terminal session support
 router.use('/:projectId/terminal', terminalRoutes);

@@ -1,3 +1,4 @@
+import { assertOwner } from "../../security/project-access";
 import OpenAI from "openai";
 import { PrismaClient } from "@prisma/client";
 import { extractDocumentText, injectImages, estimateCostUSD } from "../shared/utils";
@@ -197,16 +198,13 @@ export class ProjectChatService {
           } else if (call.name === "propose_document") {
             let projectId = args.projectId;
             let projectName = args.projectName;
-            if (!projectId && projectName) {
-              const found = await prisma.project.findFirst({
-                where: { name: { contains: projectName, mode: "insensitive" } },
-                select: { id: true, name: true },
-              });
-              if (found) { projectId = found.id; projectName = found.name; }
-            } else if (projectId && !projectName) {
-              const found = await prisma.project.findUnique({ where: { id: projectId }, select: { name: true } });
-              if (found) projectName = found.name;
-            }
+            const ownedProject = projectId
+              ? await prisma.project.findFirst({ where: { id: projectId, userId }, select: { id: true, name: true } })
+              : projectName
+                ? await prisma.project.findFirst({ where: { userId, name: { contains: projectName, mode: 'insensitive' } }, select: { id: true, name: true } })
+                : null;
+            projectId = ownedProject?.id;
+            projectName = ownedProject?.name;
             if (!projectId) {
               toolResult = JSON.stringify({ error: "Project not found. Call list_projects to get the correct project ID." });
             } else {
@@ -244,6 +242,7 @@ export class ProjectChatService {
   }
 
   async processProjectChat(userId: string, projectId: string, request: ChatRequest): Promise<ChatResponse> {
+    await assertOwner(prisma, projectId, userId);
     const session = await MemoryPersistence.getOrCreateSession(userId, "project", projectId, request.sessionId);
     const projectContext = await RepositoryContextBuilder.buildProjectContext(projectId);
     await MemoryPersistence.saveMessage(session.id, "user", request.message);
@@ -362,12 +361,14 @@ export class ProjectChatService {
   async suggestSprintTasks(
     projectId: string,
     sprintId: string,
-    capacity: number = 10,
+    capacity: number,
+    actorId: string,
   ): Promise<{ taskId: string; title: string; reason: string; priority: string }[]> {
+    await assertOwner(prisma, projectId, actorId);
     const suggestionLimit = Number.isInteger(capacity) ? Math.min(50, Math.max(1, capacity)) : 10;
     const [sprint, allTasks] = await Promise.all([
       prisma.sprint.findUnique({
-        where: { id: sprintId },
+        where: { id: sprintId, projectId },
         include: { tasks: { select: { taskId: true } } },
       }),
       prisma.projectTask.findMany({
@@ -425,6 +426,7 @@ export class ProjectChatService {
   async generateSprint(
     projectId: string,
     userPrompt: string,
+    actorId: string,
   ): Promise<{
     name: string;
     goal: string;
@@ -432,6 +434,7 @@ export class ProjectChatService {
     endDate: string;
     suggestedTasks: { taskId: string; title: string; reason: string; priority: string }[];
   }> {
+    await assertOwner(prisma, projectId, actorId);
     const [project, allTasks] = await Promise.all([
       prisma.project.findUnique({ where: { id: projectId } }),
       prisma.projectTask.findMany({
@@ -486,7 +489,8 @@ export class ProjectChatService {
     return res.content;
   }
 
-  async suggestTaskOrder(tasks: { id: string; title: string; description?: string }[]): Promise<string[]> {
+  async suggestTaskOrder(projectId: string, actorId: string, tasks: { id: string; title: string; description?: string }[]): Promise<string[]> {
+    await assertOwner(prisma, projectId, actorId);
     if (tasks.length <= 1) return tasks.map((t) => t.id);
 
     const validIds = new Set(tasks.map((task) => task.id));
@@ -521,9 +525,11 @@ export class ProjectChatService {
   async generatePhaseProposal(
     projectId: string,
     phase: string,
+    actorId: string,
     revision?: { previousContent: string; feedback: string },
     brief?: string,
   ): Promise<{ title: string; content: string; model: string; usage: { prompt_tokens: number; completion_tokens: number }; costUSD: number }> {
+    await assertOwner(prisma, projectId, actorId);
     const projectContext = await RepositoryContextBuilder.buildProjectContext(projectId);
     const revisionBlock = revision
       ? `\nPREVIOUS DRAFT:\n${revision.previousContent}\n\nREVIEWER FEEDBACK:\n${revision.feedback}\n`

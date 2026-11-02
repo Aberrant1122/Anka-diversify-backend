@@ -1,3 +1,4 @@
+import { assertOwner, ProjectActor } from "../security/project-access";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
@@ -20,7 +21,21 @@ export class ClarificationHandlerService {
    * Called by the AI Agent when missing info or out-of-scope ambiguity is encountered.
    * Pauses the task by setting status to 'needs_clarification' and creates a ClarificationQA record.
    */
-  async requestClarification(req: CreateClarificationRequest) {
+  async requestClarification(
+    req: CreateClarificationRequest,
+    actor: ProjectActor,
+  ) {
+    await assertOwner(prisma, actor.projectId, actor.userId);
+    if (
+      !(await prisma.kanbanTask.findFirst({
+        where: {
+          id: req.taskId,
+          stage: { board: { projectId: actor.projectId } },
+        },
+        select: { id: true },
+      }))
+    )
+      throw new Error("Task outside project");
     const qa = await prisma.clarificationQA.create({
       data: {
         taskId: req.taskId,
@@ -44,10 +59,15 @@ export class ClarificationHandlerService {
   async resolveClarification(
     clarificationId: string,
     selectedOption: string,
-    userNotes?: string
+    actor: ProjectActor,
+    userNotes?: string,
   ) {
+    await assertOwner(prisma, actor.projectId, actor.userId);
     const updatedQa = await prisma.clarificationQA.update({
-      where: { id: clarificationId },
+      where: {
+        id: clarificationId,
+        task: { stage: { board: { projectId: actor.projectId } } },
+      },
       data: {
         selectedOption,
         userNotes,
@@ -79,9 +99,17 @@ export class ClarificationHandlerService {
   /**
    * Retrieves all resolved clarification decisions for a task to inject into the agent prompt context.
    */
-  async getResolvedClarificationContext(taskId: string): Promise<string> {
+  async getResolvedClarificationContext(
+    taskId: string,
+    actor: ProjectActor,
+  ): Promise<string> {
+    await assertOwner(prisma, actor.projectId, actor.userId);
     const resolvedQAs = await prisma.clarificationQA.findMany({
-      where: { taskId, resolved: true },
+      where: {
+        taskId,
+        resolved: true,
+        task: { stage: { board: { projectId: actor.projectId } } },
+      },
       orderBy: { resolvedAt: "asc" },
     });
 
