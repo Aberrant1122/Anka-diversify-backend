@@ -648,4 +648,39 @@ describe("baseline authority lifecycle through real Prisma and isolated embedded
       ).status,
     ).toBe("CONFLICTED");
   });
+  it('reads immutable historical criterion scope from its bound Main after current document drift',async()=>{
+    const f=await claim();const before=await f.baseline.view(f.project,f.actor);
+    expect(before.operations[0]!.authority.scopeVerified).toBe(true);
+    const old=before.operations[0]!.authority.criteria;
+    const next=mainFromBrief('A new current Main with different scope');next.requirements[0]!.acceptanceCriteria.push({id:'AC-NEW',description:'New criterion'});
+    await f.workspace.save(f.project,f.actor,{kind:'MAIN',content:next,expectedVersion:5,reason:'Synthetic scope drift'});
+    const after=await f.baseline.view(f.project,f.actor);
+    expect(after.operations[0]!.authority.main.id).toBe(f.main.id);
+    expect(after.operations[0]!.authority.criteria).toEqual(old);
+    expect(after.operations[0]!.authorityCurrent).toBe(false);
+    expect(JSON.stringify(after.operations[0]!.authority.criteria)).not.toContain('AC-NEW');
+    await expect(f.baseline.view(f.project,'other-owner')).rejects.toThrow('PROJECT_RESOURCE_NOT_FOUND');
+  });
+  it('never includes another project operation or historical Main scope in the read DTO',async()=>{
+    const a=await claim(),b=await claim(),view=await a.baseline.view(a.project,a.actor);
+    expect(view.operations.map(o=>o.id)).toContain(a.op.id);
+    expect(view.operations.map(o=>o.id)).not.toContain(b.op.id);
+    expect(JSON.stringify(view)).not.toContain(b.main.id);
+  });
+
+  it('retains private evidence durably but redacts both baseline and generic event read paths',async()=>{
+    const f=await claim(),store=contractStore(),privateValue='SYNTHETIC-PRIVATE-PROOF-PATH';
+    const worker=new BaselineValidationService(db,{...store,cleanup:async(op,id)=>{const receipt=await store.cleanup(op,id);return receipt?{...receipt,privatePath:privateValue}:null;}});
+    await f.baseline.requestCleanup(f.project,f.actor,f.op.id);
+    await worker.confirmCleanup(f.project,f.op.id,'contract-cleanup');
+    const persisted=await db.baselineValidationOperation.findUniqueOrThrow({where:{id:f.op.id}});
+    expect(JSON.stringify(persisted.result)).toContain(privateValue);
+    const specific=await f.baseline.view(f.project,f.actor),generic=await f.workspace.view(f.project,f.actor);
+    for(const value of [specific,generic]){
+      expect(JSON.stringify(value)).not.toContain(privateValue);
+      expect(JSON.stringify(value)).not.toContain('contract-cleanup');
+    }
+    expect(generic.events.some(e=>e.kind==='BASELINE_VALIDATION_FAILED')).toBe(true);
+  });
+
 });

@@ -1,3 +1,4 @@
+import { baselineSafeEvent } from "./baseline-read-model";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 import {
@@ -113,11 +114,11 @@ export class WorkspaceService {
         where: { projectId },
         include: { events: { orderBy: { createdAt: "asc" } } },
         orderBy: { createdAt: "asc" },
-      }),
+      }).then(runs=>runs.map(run=>({...run,events:run.events.map(baselineSafeEvent)}))),
       events: await tx.workspaceEvent.findMany({
         where: { projectId },
         orderBy: { createdAt: "asc" },
-      }),
+      }).then(events=>events.map(baselineSafeEvent)),
       repositories: await tx.projectRepository
         .findMany({
           where: { projectId },

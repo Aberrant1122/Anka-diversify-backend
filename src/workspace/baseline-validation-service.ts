@@ -1,3 +1,4 @@
+import { baselineOperationView } from "./baseline-read-model";
 import {
   Prisma,
   PrismaClient,
@@ -325,24 +326,7 @@ export class BaselineValidationService {
     return op;
   }
   private publicOperation(op: BaselineValidationOperation, current = false) {
-    const r = op.result as any;
-    return {
-      id: op.id,
-      runId: op.runId,
-      status: op.status,
-      stateVersion: op.stateVersion,
-      authorityCurrent: current,
-      result: r
-        ? {
-            ...r,
-            authorityCurrentAtCompletion: r.authorityCurrent,
-            authorityCurrent: current,
-            acceptedForCurrentAuthority:
-              current && r.acceptedForCurrentAuthority === true,
-          }
-        : null,
-      createdAt: op.createdAt,
-    };
+    return baselineOperationView(op,current);
   }
   async preview(
     projectId: string,
@@ -614,9 +598,11 @@ export class BaselineValidationService {
               where: { projectId },
               orderBy: { createdAt: "asc" },
             })
-          ).map(async (op) =>
-            this.publicOperation(op, await this.current(tx, op)),
-          ),
+          ).map(async (op) => {
+            const id=(op.authority as any)?.binding?.main?.id;
+            const main=typeof id==='string'?await tx.workspaceDocument.findFirst({where:{id,projectId,kind:'MAIN'}}):null;
+            return baselineOperationView(op,await this.current(tx,op),main);
+          }),
         ),
         dispatchAvailable: false,
         runtimeAcceptanceVerified: false,
