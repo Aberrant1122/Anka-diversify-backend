@@ -101,6 +101,7 @@ export function validateBaselineRequest(request: BaselineRequest2): void {
             fail();
         sha(c.budgetProfileHash);
         if(q.profiles.find(p=>p.profileId===c.profileId)?.budgetProfile.hash!==c.budgetProfileHash)fail();
+        // parseCommands enforces the same 1000..30000ms per-command cap as runner-v2.
         parseCommands([{ id: c.id, criterionId: c.criterionId, argv: c.argv, cwd: c.cwd, timeoutMs: c.timeoutMs }], new Set([c.criterionId]));
         if (!/^AC-[A-Z0-9-]+$/.test(c.criterionId) || !m.executables[c.argv[0]] || c.cwd.includes('\\') || c.cwd.includes(':'))
             fail();

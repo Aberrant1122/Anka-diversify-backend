@@ -17,4 +17,11 @@ describe('protocol2 runner raw command primitive (injected processes only)', () 
     } });
     it('rejects shell paths, writable cwd and unbounded streams before spawning', () => { for (const bad of [{ ...command, executable: '/bin/sh' }, { ...command, cwd: '/tmp' }, { ...command, cwd: '/source/../tmp' }])
         expect(() => observeCommand(bad, limits, jest.fn())).toThrow(); expect(() => observeCommand(command, { ...limits, stdoutBytes: 65537 }, jest.fn())).toThrow(); });
+    it.each([999,30001,120000])('rejects the same out-of-range command timeout %i before spawning',timeoutMs=>{
+        const spawn=jest.fn();expect(()=>observeCommand({...command,timeoutMs},limits,spawn)).toThrow();expect(spawn).not.toHaveBeenCalled();
+    });
+    it.each([1000,30000])('accepts shared timeout boundary %i using injected processes only',async timeoutMs=>{
+        const c=child(),spawn=jest.fn(()=>c),pending=observeCommand({...command,timeoutMs},limits,spawn,jest.fn());c.emit('close',0,null);expect((await pending).timedOut).toBe(false);expect(spawn).toHaveBeenCalledTimes(1);
+    });
+
 });

@@ -59,4 +59,17 @@ describe('baseline protocol 2 fail-closed contract', () => {
       const f=protocolFixture();f.q.profiles.push(f.q.profiles[0]!);expect(()=>validateBaselineRequest(f.q)).toThrow();
     });
 
+    it.each([999,30001,120000])('rejects out-of-range command timeout %i before runner admission',timeoutMs=>{
+        const {q}=protocolFixture();q.plan.commands[0]!.timeoutMs=timeoutMs;
+        const reserved=Math.max(1000,timeoutMs);q.plan.limits.totalTimeoutMs=reserved;
+        const b=q.profiles[0]!.budgetProfile;b.limits.totalTimeoutMs=reserved;b.hash=hash({measurementHash:b.measurementHash,limits:b.limits});q.plan.commands[0]!.budgetProfileHash=b.hash;
+        q.planHash=hash(q.plan);expect(()=>validateBaselineRequest(q)).toThrow();
+    });
+    it.each([1000,30000])('accepts the shared command timeout boundary %i',timeoutMs=>{
+        const {q}=protocolFixture();q.plan.commands[0]!.timeoutMs=timeoutMs;q.plan.limits.totalTimeoutMs=timeoutMs;
+        q.profiles[0]!.budgetProfile.limits.totalTimeoutMs=timeoutMs;
+        const b=q.profiles[0]!.budgetProfile;b.hash=hash({measurementHash:b.measurementHash,limits:b.limits});q.plan.commands[0]!.budgetProfileHash=b.hash;
+        q.planHash=hash(q.plan);expect(()=>validateBaselineRequest(q)).not.toThrow();
+    });
+
 });

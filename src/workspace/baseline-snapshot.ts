@@ -46,6 +46,12 @@ function noLinks(target: string) {
             throw new WorkspaceError('BASELINE_SYMLINK_REJECTED');
     }
 }
+// Pure POSIX comparison is testable on any host; Windows stat/chmod cannot
+// establish that a Linux mount preserves these permission/executable semantics.
+export function assertBaselinePosixMode(actualMode:number, expectedMode:number) {
+    if (!Number.isInteger(actualMode) || (actualMode & 0o7777) !== expectedMode)
+        throw new WorkspaceError('BASELINE_SOURCE_MODE_CHANGED');
+}
 export class BaselineSnapshots {
     constructor(private policy: BaselineSourcePolicy) { }
     async create(repositoryId: string, commit: string): Promise<BaselineSnapshot> {
@@ -143,6 +149,11 @@ export class BaselineSnapshots {
         noLinks(s.directory);
         if (path.dirname(fs.realpathSync(s.directory)) !== fs.realpathSync(this.policy.snapshotsRoot))
             throw new WorkspaceError('BASELINE_SNAPSHOT_SCOPE');
+        const permissions = process.platform === 'win32' ? 'WINDOWS_MODE_NOT_VERIFIABLE' as const : 'POSIX_MODE_VERIFIED' as const;
+        const directoryMode = (dir:string) => {
+            if (process.platform !== 'win32') assertBaselinePosixMode(fs.lstatSync(dir).mode,0o755);
+        };
+        directoryMode(s.directory);
         const seen: string[] = [];
         const walk = (root: string, relative = '') => { for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
             const name = relative ? relative + '/' + entry.name : entry.name;
@@ -152,13 +163,19 @@ export class BaselineSnapshots {
             if (stat.isSymbolicLink())
                 throw new WorkspaceError('BASELINE_SYMLINK_REJECTED');
             if (stat.isDirectory()) {
+                directoryMode(file);
                 if (!s.files.some(f => f.path.startsWith(name + '/')))
                     throw new WorkspaceError('BASELINE_SOURCE_CHANGED');
                 walk(file, name);
             }
             else if (stat.isFile()) {
                 const expected = s.files.find(f => f.path === name);
-                if (!expected || stat.size !== expected.bytes || digest(fs.readFileSync(file)) !== expected.sha256)
+                if (!expected) throw new WorkspaceError('BASELINE_SOURCE_CHANGED');
+                if (!['100644','100755'].includes(expected.mode)) throw new WorkspaceError('BASELINE_SOURCE_MODE_CHANGED');
+                // Check mode before reading: chmod 000 must fail as mode drift,
+                // rather than depending on whether the verifier runs as root.
+                if (process.platform !== 'win32') assertBaselinePosixMode(stat.mode, expected.mode === '100755' ? 0o555 : 0o444);
+                if (stat.size !== expected.bytes || digest(fs.readFileSync(file)) !== expected.sha256)
                     throw new WorkspaceError('BASELINE_SOURCE_CHANGED');
                 seen.push(name);
             }
@@ -169,5 +186,6 @@ export class BaselineSnapshots {
         const { directory: _, snapshotHash, ...metadata } = s;
         if (seen.length !== s.files.length || hash(metadata) !== snapshotHash || hash(s.files) !== s.sourceHash || s.exclusionPolicyHash !== hash(baselineExclusions))
             throw new WorkspaceError('BASELINE_SOURCE_CHANGED');
+        return { permissionVerification: permissions };
     }
 }

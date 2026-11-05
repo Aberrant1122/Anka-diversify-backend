@@ -1,0 +1,26 @@
+name: Baseline POSIX source contracts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  posix-source-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx tsc --noEmit
+      - run: npx tsc --noEmit --project tsconfig.rehearsal.json
+      - name: Native Linux chmod, snapshot and protocol contracts
+        run: node scripts/test-baseline-posix.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: baseline-posix-source-results
+          path: baseline-posix-results.json

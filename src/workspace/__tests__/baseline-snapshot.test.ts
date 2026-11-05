@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import { BaselineSnapshots, baselinePath } from '../baseline-snapshot';
+import { BaselineSnapshots, baselinePath, assertBaselinePosixMode } from '../baseline-snapshot';
 import { baselineContainerSpec } from '../baseline-hardened-runner';
 import { hash } from '../document-contract';
 import { protocolFixture } from './baseline-protocol-fixture';
@@ -31,6 +31,7 @@ describe('immutable baseline snapshots from exact Git objects', () => {
     it.each(['modified', 'extra', 'missing', 'emptyDirectory', 'metadata'])('detects source postimage drift %s', async (kind) => { const s = await reader.create('repo', commit([{ name: 'file', content: 'a' }])); if (kind === 'modified') {
         fs.chmodSync(path.join(s.directory, 'file'), 0o600);
         fs.writeFileSync(path.join(s.directory, 'file'), 'b');
+        fs.chmodSync(path.join(s.directory, 'file'), 0o444);
     } if (kind === 'extra')
         fs.writeFileSync(path.join(s.directory, 'extra'), 'b'); if (kind === 'missing')
         fs.unlinkSync(path.join(s.directory, 'file')); if (kind === 'emptyDirectory')
@@ -53,6 +54,37 @@ describe('immutable baseline snapshots from exact Git objects', () => {
       fs.writeFileSync(object,require('zlib').deflateSync(Buffer.from('blob 1\0b')));
       await expect(reader.create('repo',head)).rejects.toThrow('BASELINE_PREIMAGE_CHANGED');
       expect(fs.readdirSync(output)).toEqual([]);
+    });
+
+    it('compares all POSIX permission and special bits without pretending host chmod evidence',()=>{
+        expect(()=>assertBaselinePosixMode(0o100444,0o444)).not.toThrow();
+        expect(()=>assertBaselinePosixMode(0o100555,0o555)).not.toThrow();
+        for(const mode of [0o400,0o644,0o555,0o744,0o2444,0o4444,0o1444])expect(()=>assertBaselinePosixMode(0o100000|mode,0o444)).toThrow('BASELINE_SOURCE_MODE_CHANGED');
+    });
+    it('labels Windows mode verification limitations explicitly',async()=>{
+        const snapshot=await reader.create('repo',commit([{name:'file',content:'same'}]));
+        expect(reader.verify(snapshot).permissionVerification).toBe(process.platform==='win32'?'WINDOWS_MODE_NOT_VERIFIABLE':'POSIX_MODE_VERIFIED');
+        if(process.env.ANKA_REQUIRE_POSIX_MODE_CHECKS==='1')expect(process.platform).not.toBe('win32');
+    });
+    const posixIt=process.platform==='win32'?it.skip:it;
+    posixIt.each([
+        ['100644',0o000],['100644',0o400],['100644',0o644],['100644',0o555],['100644',0o1444],['100644',0o2444],['100644',0o4444],
+        ['100755',0o444],['100755',0o755],['100755',0o1555],['100755',0o2555],['100755',0o4555],
+    ] as const)('rejects native POSIX chmod tampering for Git mode %s -> %i without byte changes',async(mode,tampered)=>{
+        const snapshot=await reader.create('repo',commit([{name:'file',content:'same',mode}])),file=path.join(snapshot.directory,'file');
+        expect(fs.lstatSync(file).mode&0o7777).toBe(mode==='100755'?0o555:0o444);
+        try{
+            fs.chmodSync(file,tampered);
+            expect(fs.lstatSync(file).mode&0o7777).toBe(tampered);
+            expect(fs.lstatSync(file).size).toBe(4);
+            expect(()=>reader.verify(snapshot)).toThrow('BASELINE_SOURCE_MODE_CHANGED');
+        }finally{fs.chmodSync(file,mode==='100755'?0o555:0o444);}
+        expect(fs.readFileSync(file,'utf8')).toBe('same');
+    });
+    posixIt.each(['root','nested'] as const)('rejects POSIX directory mode/special-bit drift: %s',async(kind)=>{
+        const snapshot=await reader.create('repo',commit([{name:'nested/file',content:'same'}])),dir=kind==='root'?snapshot.directory:path.join(snapshot.directory,'nested');
+        try{fs.chmodSync(dir,0o1777);expect(fs.lstatSync(dir).mode&0o7777).toBe(0o1777);expect(()=>reader.verify(snapshot)).toThrow('BASELINE_SOURCE_MODE_CHANGED');}
+        finally{fs.chmodSync(dir,0o755);}
     });
 
 });
