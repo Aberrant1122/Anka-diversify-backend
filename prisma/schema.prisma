@@ -884,6 +884,7 @@ model WorkspaceHead {
 }
 
 model WorkspaceApproval {
+  purpose String @default("IMPLEMENTATION")
   id String @id @default(cuid())
   projectId String
   mainId String
@@ -895,11 +896,14 @@ model WorkspaceApproval {
   createdBy String
   createdAt DateTime @default(now())
   project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
-  runs WorkspaceRun[]
+  runs WorkspaceRun[] @relation("WorkspaceRunApproval")
+  purposeBoundRuns WorkspaceRun[] @relation("WorkspaceRunPurposeApproval")
+  @@unique([id, purpose], map: "workspace_approval_id_purpose_key")
   @@index([projectId, createdAt])
 }
 
 model WorkspaceRun {
+  purpose String @default("IMPLEMENTATION")
   id String @id @default(cuid())
   projectId String
   approvalId String
@@ -908,7 +912,8 @@ model WorkspaceRun {
   createdBy String
   createdAt DateTime @default(now())
   project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
-  approval WorkspaceApproval @relation(fields: [approvalId], references: [id], onDelete: Restrict)
+  approval WorkspaceApproval @relation("WorkspaceRunApproval", fields: [approvalId], references: [id], onDelete: Restrict)
+  purposeApproval WorkspaceApproval @relation("WorkspaceRunPurposeApproval", fields: [approvalId, purpose], references: [id, purpose], onDelete: Restrict, onUpdate: NoAction, map: "workspace_run_approval_purpose_fk")
   operations WorkspaceOperation[]
   events WorkspaceEvent[]
   @@unique([projectId, idempotencyKey])

@@ -451,3 +451,232 @@ export function mainFromBrief(brief: string): MainDocument {
 export function requireDocumentAuthority(): void {
   throw new WorkspaceError("DOCUMENT_AUTHORITY_REQUIRED");
 }
+
+// V1 only stores/parses this purpose. The baseline lifecycle is not executable.
+export type WorkspacePurpose = "IMPLEMENTATION" | "BASELINE_VALIDATION";
+export function parseWorkspacePurpose(raw: unknown): WorkspacePurpose {
+  if (raw === undefined) return "IMPLEMENTATION";
+  if (raw !== "IMPLEMENTATION" && raw !== "BASELINE_VALIDATION")
+    throw new WorkspaceError("WORKSPACE_PURPOSE_INVALID", 422);
+  return raw;
+}
+export function assertImplementationPurpose(raw: unknown): void {
+  if (parseWorkspacePurpose(raw) !== "IMPLEMENTATION")
+    throw new WorkspaceError("VALIDATION_LIFECYCLE_UNAVAILABLE", 409);
+}
+export interface ValidationBudget {
+  hash: string;
+  measurementHash: string;
+  limits: {
+    totalTimeoutMs: number;
+    memoryMiB: number;
+    workMiB: number;
+    tmpMiB: number;
+    stdoutBytes: number;
+    stderrBytes: number;
+  };
+}
+export interface ValidationProfile {
+  id: string;
+  title: string;
+  requirementIds: string[];
+  criterionIds: string[];
+  repositoryId: string;
+  baseline: string;
+  runtimeProfileHash: string;
+  budgetProfile: ValidationBudget;
+  commands: VerificationCommand[];
+}
+export interface ValidationArchitectureDocument
+  extends Omit<ArchitectureDocument, "schemaVersion"> {
+  schemaVersion: 2;
+  validationProfiles: ValidationProfile[];
+}
+function digest(v: unknown): asserts v is string {
+  if (typeof v !== "string" || !/^[a-f0-9]{64}$/.test(v)) fail();
+}
+function uniqueStrings(v: unknown): asserts v is string[] {
+  strings(v);
+  if (
+    !(v as string[]).length ||
+    new Set(v as string[]).size !== (v as string[]).length
+  )
+    fail();
+}
+export function parseValidationArchitecture(
+  raw: unknown,
+  main: MainDocument,
+): ValidationArchitectureDocument {
+  const v = record(raw, [
+    "schemaVersion",
+    "sourceMain",
+    "overview",
+    "components",
+    "dataMigrations",
+    "interfaces",
+    "security",
+    "operations",
+    "repositories",
+    "units",
+    "questions",
+    "validationProfiles",
+  ]);
+  if (v.schemaVersion !== 2) fail();
+  // Reuse schema1 validation without changing its parser or canonical bytes.
+  const { validationProfiles, ...base } = v;
+  const common = parseArchitecture({ ...base, schemaVersion: 1 }, main);
+  array(validationProfiles);
+  ids(validationProfiles, "VAL-");
+  if (!validationProfiles.length) fail();
+  const profiles = validationProfiles.map((profile: any): ValidationProfile => {
+    record(profile, [
+      "id",
+      "title",
+      "requirementIds",
+      "criterionIds",
+      "repositoryId",
+      "baseline",
+      "runtimeProfileHash",
+      "budgetProfile",
+      "commands",
+    ]);
+    text(profile.title);
+    uniqueStrings(profile.requirementIds);
+    uniqueStrings(profile.criterionIds);
+    const requirements = main.requirements.filter((r) =>
+      profile.requirementIds.includes(r.id),
+    );
+    if (requirements.length !== profile.requirementIds.length) fail();
+    const criteria = new Set(
+      requirements.flatMap((r) => r.acceptanceCriteria.map((c) => c.id)),
+    );
+    if (
+      profile.criterionIds.some((id: string) => !criteria.has(id)) ||
+      requirements.some(
+        (r) =>
+          !r.acceptanceCriteria.some((c) =>
+            profile.criterionIds.includes(c.id),
+          ),
+      )
+    )
+      fail();
+    const repo = common.repositories.find((r) => r.id === profile.repositoryId);
+    if (!repo || repo.baseline !== profile.baseline) fail();
+    digest(profile.runtimeProfileHash);
+    const budget = record(profile.budgetProfile, [
+      "hash",
+      "measurementHash",
+      "limits",
+    ]);
+    digest(budget.hash);
+    digest(budget.measurementHash);
+    const limits = record(budget.limits, [
+      "totalTimeoutMs",
+      "memoryMiB",
+      "workMiB",
+      "tmpMiB",
+      "stdoutBytes",
+      "stderrBytes",
+    ]);
+    const maxima = {
+      totalTimeoutMs: 120000,
+      memoryMiB: 512,
+      workMiB: 256,
+      tmpMiB: 64,
+      stdoutBytes: 65536,
+      stderrBytes: 65536,
+    };
+    for (const [key, maximum] of Object.entries(maxima))
+      if (
+        !Number.isInteger(limits[key]) ||
+        limits[key] < 1 ||
+        limits[key] > maximum
+      )
+        fail();
+    if (
+      budget.hash !== hash({ measurementHash: budget.measurementHash, limits })
+    )
+      fail();
+    const commands = parseCommands(
+      profile.commands,
+      new Set<string>(profile.criterionIds),
+    );
+    if (
+      !commands.length ||
+      profile.criterionIds.some(
+        (id: string) => !commands.some((c) => c.criterionId === id),
+      ) ||
+      commands.reduce((n, c) => n + c.timeoutMs, 0) > limits.totalTimeoutMs
+    )
+      fail();
+    return { ...profile, commands };
+  });
+  const parsed = {
+    ...common,
+    schemaVersion: 2 as const,
+    validationProfiles: profiles,
+  };
+  if (Buffer.byteLength(canonical(parsed)) > 256000) fail();
+  return JSON.parse(canonical(parsed));
+}
+export function parseArchitectureDraft(
+  raw: unknown,
+  main: MainDocument,
+): ArchitectureDocument | ValidationArchitectureDocument {
+  return (raw as any)?.schemaVersion === 2
+    ? parseValidationArchitecture(raw, main)
+    : parseArchitecture(raw, main);
+}
+export interface ExactDocument<T> {
+  id: string;
+  contentHash: string;
+  content: T;
+}
+export interface BaselineValidationBinding {
+  purpose: "BASELINE_VALIDATION";
+  main: { id: string; hash: string };
+  architecture: { id: string; hash: string };
+  selectedProfileIds: string[];
+  profiles: ValidationProfile[];
+}
+// Pure binding construction, never an approval or executable run. Runtime and
+// measurement digests identify evidence; the future lifecycle must verify it.
+export function bindBaselineValidation(
+  main: ExactDocument<unknown>,
+  architecture: ExactDocument<unknown>,
+  selectedProfileIds: string[],
+): BaselineValidationBinding {
+  text(main.id);
+  text(architecture.id);
+  digest(main.contentHash);
+  digest(architecture.contentHash);
+  const m = parseMain(main.content),
+    a = parseValidationArchitecture(architecture.content, m);
+  if (main.contentHash !== hash(m) || architecture.contentHash !== hash(a))
+    throw new WorkspaceError("DOCUMENT_HASH_MISMATCH");
+  if (a.sourceMain.id !== main.id || a.sourceMain.hash !== main.contentHash)
+    throw new WorkspaceError("MAIN_VERSION_MISMATCH");
+  if ([...m.questions, ...a.questions].some((q) => q.blocking))
+    throw new WorkspaceError("BLOCKING_QUESTIONS");
+  uniqueStrings(selectedProfileIds);
+  const profiles = selectedProfileIds.map((id) =>
+    a.validationProfiles.find((p) => p.id === id),
+  );
+  if (profiles.some((p) => !p)) fail();
+  const selected = profiles as ValidationProfile[];
+  const commands = selected.flatMap((p) => p.commands);
+  if (
+    commands.length > 8 ||
+    commands.reduce((n, c) => n + c.timeoutMs, 0) > 120000
+  )
+    throw new WorkspaceError("COMMAND_BUDGET_EXCEEDED", 422);
+  return JSON.parse(
+    canonical({
+      purpose: "BASELINE_VALIDATION",
+      main: { id: main.id, hash: main.contentHash },
+      architecture: { id: architecture.id, hash: architecture.contentHash },
+      selectedProfileIds,
+      profiles: selected,
+    }),
+  );
+}

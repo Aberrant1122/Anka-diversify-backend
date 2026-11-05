@@ -3,6 +3,8 @@ import { randomUUID } from "crypto";
 import {
   parseMain,
   parseArchitecture,
+  parseArchitectureDraft,
+  assertImplementationPurpose,
   MainDocument,
   ArchitectureDocument,
   mainFromBrief,
@@ -184,7 +186,7 @@ export class WorkspaceService {
     const content =
       input.kind === "MAIN"
         ? parseMain(input.brief ? mainFromBrief(input.brief) : input.content)
-        : parseArchitecture(input.content, parseMain(main?.content));
+        : parseArchitectureDraft(input.content, parseMain(main?.content));
     if (input.kind === "ARCHITECTURE") {
       const arch = content as ArchitectureDocument;
       if (
@@ -257,6 +259,7 @@ export class WorkspaceService {
     projectId: string,
     actor: string,
     input: {
+      purpose?: unknown;
       architectureId: string;
       architectureHash: string;
       mainId: string;
@@ -265,6 +268,7 @@ export class WorkspaceService {
     },
   ) {
     return this.transaction(projectId, actor, async (tx) => {
+      assertImplementationPurpose(input.purpose);
       const head = await this.head(tx, projectId);
       if (
         head.stateVersion !== input.expectedVersion ||
@@ -289,6 +293,8 @@ export class WorkspaceService {
         hash(architecture.content) !== architecture.contentHash
       )
         throw new WorkspaceError("DOCUMENT_HASH_MISMATCH");
+      if ((architecture.content as any)?.schemaVersion === 2)
+        throw new WorkspaceError("VALIDATION_LIFECYCLE_UNAVAILABLE");
       const m = parseMain(main.content),
         a = parseArchitecture(architecture.content, m);
       if (a.sourceMain.id !== main.id || a.sourceMain.hash !== main.contentHash)
@@ -311,7 +317,10 @@ export class WorkspaceService {
             architectureId: architecture.id,
           },
         });
-        if (prior) return prior;
+        if (prior) {
+          assertImplementationPurpose(prior.purpose);
+          return prior;
+        }
       }
       const approval = await tx.workspaceApproval.create({
         data: {
@@ -347,6 +356,7 @@ export class WorkspaceService {
     approval: any,
     unitIds: string[],
   ) {
+    assertImplementationPurpose(approval?.purpose);
     const snapshot = approval.snapshot as unknown as {
       main: MainDocument;
       architecture: ArchitectureDocument;
@@ -380,6 +390,7 @@ export class WorkspaceService {
     projectId: string,
     actor: string,
     input: {
+      purpose?: unknown;
       approvalId: string;
       unitIds: string[];
       expectedVersion: number;
@@ -395,6 +406,7 @@ export class WorkspaceService {
     )
       throw new WorkspaceError("RUN_INPUT_INVALID", 422);
     return this.transaction(projectId, actor, async (tx) => {
+      assertImplementationPurpose(input.purpose);
       const old = await tx.workspaceRun.findUnique({
         where: {
           projectId_idempotencyKey: {
@@ -404,6 +416,7 @@ export class WorkspaceService {
         },
       });
       if (old) {
+        assertImplementationPurpose(old.purpose);
         if (
           old.approvalId !== input.approvalId ||
           hash((old.authority as any).unitIds) !== hash(input.unitIds) ||
@@ -503,6 +516,7 @@ export class WorkspaceService {
         include: { events: true },
       });
       if (!run) throw new WorkspaceError("RUN_NOT_FOUND", 404);
+      assertImplementationPurpose(run.purpose);
       const head = await this.head(tx, projectId);
       if (head.approvalId !== run.approvalId)
         throw new WorkspaceError("AUTHORITY_SUPERSEDED");
@@ -542,10 +556,11 @@ export class WorkspaceService {
     payload: unknown,
   ) {
     return this.transaction(projectId, actor, async (tx) => {
-      if (
-        !(await tx.workspaceRun.findFirst({ where: { id: runId, projectId } }))
-      )
-        throw new WorkspaceError("RUN_NOT_FOUND", 404);
+      const run = await tx.workspaceRun.findFirst({
+        where: { id: runId, projectId },
+      });
+      if (!run) throw new WorkspaceError("RUN_NOT_FOUND", 404);
+      assertImplementationPurpose(run.purpose);
       return this.event(tx, projectId, actor, kind, payload, runId);
     });
   }
@@ -564,6 +579,7 @@ export class WorkspaceService {
         include: { events: true },
       });
       if (!run) throw new WorkspaceError("RUN_NOT_FOUND", 404);
+      assertImplementationPurpose(run.purpose);
       if (
         run.events.some((e) =>
           [
@@ -605,6 +621,7 @@ export class WorkspaceService {
         include: { events: true },
       });
       if (!run) throw new WorkspaceError("RUN_NOT_FOUND", 404);
+      assertImplementationPurpose(run.purpose);
       const head = await this.head(tx, projectId);
       if (head.approvalId !== run.approvalId)
         throw new WorkspaceError("AUTHORITY_SUPERSEDED");
@@ -705,6 +722,11 @@ export class WorkspaceService {
       if (old) {
         if (old.inputHash !== inputHash)
           throw new WorkspaceError("IDEMPOTENCY_CONFLICT");
+        const priorRun = await tx.workspaceRun.findFirst({
+          where: { id: runId, projectId },
+        });
+        if (!priorRun) throw new WorkspaceError("RUN_NOT_FOUND", 404);
+        assertImplementationPurpose(priorRun.purpose);
         return { operation: old, reused: true };
       }
       const head = await this.head(tx, projectId);
@@ -714,6 +736,7 @@ export class WorkspaceService {
         where: { id: runId, projectId },
         include: { events: true },
       });
+      if (run) assertImplementationPurpose(run.purpose);
       if (!run || head.approvalId !== run.approvalId)
         throw new WorkspaceError("AUTHORITY_SUPERSEDED");
       const approval = await tx.workspaceApproval.findFirst({
@@ -827,6 +850,11 @@ export class WorkspaceService {
         )
       )
         throw new WorkspaceError("OPERATION_NOT_RUNNING");
+      const run = await tx.workspaceRun.findFirst({
+        where: { id: operation.runId, projectId },
+      });
+      if (!run) throw new WorkspaceError("RUN_NOT_FOUND", 404);
+      assertImplementationPurpose(run.purpose);
       const head = await this.head(tx, projectId),
         context = operation.context as any;
       const stale =
@@ -878,6 +906,11 @@ export class WorkspaceService {
         where: { id: operationId, projectId, status: "RUNNING" },
       });
       if (!op || !op.runId) return;
+      const run = await tx.workspaceRun.findFirst({
+        where: { id: op.runId, projectId },
+      });
+      if (!run) throw new WorkspaceError("RUN_NOT_FOUND", 404);
+      assertImplementationPurpose(run.purpose);
       const errorCode =
         op.kind === "PUBLICATION" ? "PUBLICATION_OUTCOME_UNCERTAIN" : code;
       await this.event(
@@ -912,6 +945,7 @@ export class WorkspaceService {
         where: { id: runId, projectId },
         include: { events: true },
       });
+      if (run) assertImplementationPurpose(run.purpose);
       if (!run || head.approvalId !== run.approvalId)
         throw new WorkspaceError("AUTHORITY_SUPERSEDED");
       const approval = await tx.workspaceApproval.findFirst({
@@ -1043,6 +1077,17 @@ export class WorkspaceService {
     )
       throw new WorkspaceError("GENERATION_INPUT_INVALID", 422);
     return this.transaction(projectId, actor, async (tx) => {
+      let run = null;
+      if (input.kind === "CODE_PROPOSAL") {
+        if (typeof input.runId !== "string")
+          throw new WorkspaceError("RUN_NOT_FOUND", 404);
+        run = await tx.workspaceRun.findFirst({
+          where: { id: input.runId, projectId },
+          include: { events: true },
+        });
+        if (!run) throw new WorkspaceError("RUN_NOT_FOUND", 404);
+        assertImplementationPurpose(run.purpose);
+      }
       const inputHash = hash(input);
       const old = await tx.workspaceOperation.findUnique({
         where: {
@@ -1086,16 +1131,9 @@ export class WorkspaceService {
             where: { id: head.architectureId, projectId, kind: "ARCHITECTURE" },
           })
         : null;
-      let run = null;
       if (input.kind === "ARCHITECTURE" && !main)
         throw new WorkspaceError("MAIN_REQUIRED");
       if (input.kind === "CODE_PROPOSAL") {
-        if (typeof input.runId !== "string")
-          throw new WorkspaceError("RUN_NOT_FOUND", 404);
-        run = await tx.workspaceRun.findFirst({
-          where: { id: input.runId, projectId },
-          include: { events: true },
-        });
         if (!run) throw new WorkspaceError("RUN_NOT_FOUND", 404);
         if (head.approvalId !== run.approvalId)
           throw new WorkspaceError("AUTHORITY_SUPERSEDED");
@@ -1168,6 +1206,7 @@ export class WorkspaceService {
           where: { id: op.runId!, projectId },
           include: { events: true },
         });
+        if (run) assertImplementationPurpose(run.purpose);
         if (
           !run ||
           head.approvalId !== run.approvalId ||
