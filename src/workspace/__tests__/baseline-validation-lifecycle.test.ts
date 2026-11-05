@@ -371,6 +371,28 @@ describe("baseline authority lifecycle through real Prisma and isolated embedded
       ).status,
     ).toBe("FAILED");
   });
+  it('blocks new run keys that omit a cleanup-required predecessor', async () => {
+    const f = await claim();
+    for (const retryOfOperationId of [null, f.op.id]) {
+      await expect(f.baseline.authorize(f.project, f.actor, {...f.runInput, expectedVersion:5, idempotencyKey:'fresh-key-'+String(retryOfOperationId), retryOfOperationId})).rejects.toThrow('BASELINE_CLEANUP_REQUIRED');
+    }
+    await f.baseline.requestCleanup(f.project,f.actor,f.op.id);
+    await expect(f.baseline.authorize(f.project,f.actor,{...f.runInput,expectedVersion:5,idempotencyKey:'omit-parent-cleanup',retryOfOperationId:null})).rejects.toThrow('BASELINE_CLEANUP_REQUIRED');
+    await new BaselineValidationService(db,contractStore()).confirmCleanup(f.project,f.op.id,'contract-cleanup');
+    await expect(f.baseline.authorize(f.project,f.actor,{...f.runInput,expectedVersion:5,idempotencyKey:'omit-terminal-parent',retryOfOperationId:null})).rejects.toThrow('BASELINE_RETRY_LINK_REQUIRED');
+  });
+  it('blocks claiming an earlier authorized second run while any project job is outstanding', async () => {
+    const f=await baselineFixture(db);
+    const second=await f.baseline.authorize(f.project,f.actor,{...f.runInput,expectedVersion:4,idempotencyKey:'preauthorized-second'});
+    await f.baseline.claim(f.project,f.actor,{...f.claimInput,expectedVersion:5});
+    await expect(f.baseline.claim(f.project,f.actor,{...f.claimInput,runId:second.id,expectedVersion:6,idempotencyKey:'claim-second-run'})).rejects.toThrow('BASELINE_CLEANUP_REQUIRED');
+  });
+  it('does not admit a typed dynamic receipt with asserted acceptance booleans', async () => {
+    const f=await claim(),store=contractStore();
+    const worker=new BaselineValidationService(db,{...store,admission:async(op,id)=>{const r=await store.admission(op,id);return r?{...r,evidenceClass:'DYNAMIC_ISOLATED_COMMAND_CHECKS',profiles:r.profiles.map(p=>({...p,runtimeAcceptanceVerified:true,measurementAcceptanceVerified:true}))}:null;}});
+    await expect(worker.recordStarted(f.project,f.op.id,'contract-start')).rejects.toThrow('BASELINE_RUNTIME_UNAVAILABLE');
+    expect((await db.baselineValidationOperation.findUniqueOrThrow({where:{id:f.op.id}})).status).toBe('PREPARING');
+  });
   it("enforces baseline pointer scope/purpose and immutable operation transition rules in SQL", async () => {
     const f = await claim(),
       other = await baselineFixture(db);
