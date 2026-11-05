@@ -1,3 +1,4 @@
+import { baselineOperationView } from "./baseline-read-model";
 import {
   Prisma,
   PrismaClient,
@@ -325,24 +326,7 @@ export class BaselineValidationService {
     return op;
   }
   private publicOperation(op: BaselineValidationOperation, current = false) {
-    const r = op.result as any;
-    return {
-      id: op.id,
-      runId: op.runId,
-      status: op.status,
-      stateVersion: op.stateVersion,
-      authorityCurrent: current,
-      result: r
-        ? {
-            ...r,
-            authorityCurrentAtCompletion: r.authorityCurrent,
-            authorityCurrent: current,
-            acceptedForCurrentAuthority:
-              current && r.acceptedForCurrentAuthority === true,
-          }
-        : null,
-      createdAt: op.createdAt,
-    };
+    return baselineOperationView(op,current);
   }
   async preview(
     projectId: string,
@@ -426,6 +410,10 @@ export class BaselineValidationService {
       return approval;
     });
   }
+  private async outstanding(tx: Tx, projectId: string) {
+    if (await tx.baselineValidationOperation.findFirst({ where: { projectId, status: { in: ['PREPARING','RUNNING','CLEANUP_REQUIRED'] } } }))
+      throw new WorkspaceError('BASELINE_CLEANUP_REQUIRED');
+  }
   async authorize(projectId: string, actor: string, request: BaselineRunInput) {
     input(request, [
       "approvalId",
@@ -468,13 +456,17 @@ export class BaselineValidationService {
       }
       if (current.head.stateVersion !== request.expectedVersion)
         throw new WorkspaceError("STATE_CONFLICT");
+      await this.outstanding(tx, projectId);
+      const predecessor = await tx.baselineValidationOperation.findFirst({where:{projectId},orderBy:{createdAt:'desc'}});
+      if (predecessor && ['FAILED','CONFLICTED'].includes(predecessor.status) && request.retryOfOperationId !== predecessor.id)
+        throw new WorkspaceError('BASELINE_RETRY_LINK_REQUIRED');
       if (request.retryOfOperationId) {
         const prior = await this.operation(
           tx,
           projectId,
           request.retryOfOperationId,
         );
-        if (!["FAILED", "CONFLICTED"].includes(prior.status))
+        if (!["FAILED", "CONFLICTED"].includes(prior.status) || !(prior.result as any)?.cleanup?.confirmed || (prior.result as any).cleanup.jobId !== prior.jobId || (prior.result as any).cleanup.operationId !== prior.id)
           throw new WorkspaceError("BASELINE_CLEANUP_REQUIRED");
       }
       const run = await tx.workspaceRun.create({
@@ -558,6 +550,10 @@ export class BaselineValidationService {
         throw new WorkspaceError("BASELINE_OPERATION_ALREADY_CLAIMED");
       if (current.head.stateVersion !== request.expectedVersion)
         throw new WorkspaceError("STATE_CONFLICT");
+      await this.outstanding(tx, projectId);
+      const predecessor = await tx.baselineValidationOperation.findFirst({where:{projectId},orderBy:{createdAt:'desc'}});
+      if (predecessor && ['FAILED','CONFLICTED'].includes(predecessor.status) && runAuthority.retryOfOperationId !== predecessor.id)
+        throw new WorkspaceError('BASELINE_RETRY_LINK_REQUIRED');
       const id = randomUUID();
       await this.advance(tx, projectId, request.expectedVersion);
       const operation = await tx.baselineValidationOperation.create({
@@ -602,9 +598,11 @@ export class BaselineValidationService {
               where: { projectId },
               orderBy: { createdAt: "asc" },
             })
-          ).map(async (op) =>
-            this.publicOperation(op, await this.current(tx, op)),
-          ),
+          ).map(async (op) => {
+            const id=(op.authority as any)?.binding?.main?.id;
+            const main=typeof id==='string'?await tx.workspaceDocument.findFirst({where:{id,projectId,kind:'MAIN'}}):null;
+            return baselineOperationView(op,await this.current(tx,op),main);
+          }),
         ),
         dispatchAvailable: false,
         runtimeAcceptanceVerified: false,
@@ -670,6 +668,9 @@ export class BaselineValidationService {
       )
         throw new WorkspaceError("TRUSTED_BASELINE_EVIDENCE_REQUIRED", 503);
     }
+    // Typed assertions alone cannot enable an unaccepted runtime.
+    if (r.evidenceClass === 'DYNAMIC_ISOLATED_COMMAND_CHECKS')
+      throw new WorkspaceError('BASELINE_RUNTIME_UNAVAILABLE', 503);
   }
   // Worker-only receipt consumers. Never routed to HTTP and never launch jobs.
   async recordStarted(projectId: string, id: string, recordId: string) {

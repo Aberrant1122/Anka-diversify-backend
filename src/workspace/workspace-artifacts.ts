@@ -1,3 +1,4 @@
+import { BaselineSnapshots, BaselineSourcePolicy } from "./baseline-snapshot";
 import fs from "fs";
 import path from "path";
 import { randomUUID, createHash } from "crypto";
@@ -13,6 +14,10 @@ export interface ImplementationArtifact {
 }
 export class WorkspaceArtifacts {
   constructor(private policy: ExecutionPolicy) {}
+  // Server registration only; no request-supplied repository paths.
+  baselineSnapshot(policy: BaselineSourcePolicy, repositoryId: string, commit: string) {
+    return new BaselineSnapshots(policy).create(repositoryId, commit);
+  }
   private contained(root: string, target: string) {
     const r = path.relative(root, target);
     return !!r && !r.startsWith("..") && !path.isAbsolute(r);

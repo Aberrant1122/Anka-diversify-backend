@@ -276,3 +276,6 @@ export class DockerSandbox implements SandboxAdapter {
     }
   }
 }
+
+// Protocol 1 remains unchanged; protocol 2 cannot enter DockerSandbox.
+export type VersionedSandboxRequest = SandboxRequest | import("./baseline-protocol").BaselineRequest2;

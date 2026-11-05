@@ -191,6 +191,12 @@ const { spawn, execFileSync } = require("node:child_process");
       } finally {
         await verify.$disconnect();
       }
+      const projectWideCleanupGuards=JSON.parse(execFileSync(process.execPath,[
+        'node_modules/ts-node/dist/bin.js','--project','tsconfig.rehearsal.json',
+        'scripts/baseline-native-worker.ts','guards',
+      ],{env:childEnv,encoding:'utf8',timeout:60000}).trim());
+      if(!projectWideCleanupGuards.passed||projectWideCleanupGuards.outcomes.length!==4)
+        throw Error('Native project-wide cleanup guards not verified');
       console.log(
         JSON.stringify({
           engine: "independent-native-postgresql",
@@ -201,6 +207,7 @@ const { spawn, execFileSync } = require("node:child_process");
           actualRuntimeDispatched: false,
           distinctBackendPids: true,
           outcomes,
+          projectWideCleanupGuards,
           passed: true,
         }),
       );
