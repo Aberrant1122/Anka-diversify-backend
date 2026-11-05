@@ -1,3 +1,4 @@
+import { BaselineValidationService } from "../workspace/baseline-validation-service";
 import { Router, Request, Response } from "express";
 import { prisma } from "../services/database";
 import { PrismaClient } from "@prisma/client";
@@ -67,6 +68,44 @@ export function createWorkspaceRouter(
     };
   const project = (r: Request) => String(r.params.projectId);
   const actor = (r: Request) => r.user.userId as string;
+  const baseline = new BaselineValidationService(database); // Default trusted evidence store unavailable.
+  router.get(
+    "/baseline-validation",
+    route((r) => baseline.view(project(r), actor(r))),
+  );
+  router.post(
+    "/baseline-validation/preview",
+    route((r) => baseline.preview(project(r), actor(r), r.body)),
+  );
+  router.post(
+    "/baseline-validation/approve",
+    route((r) => baseline.approve(project(r), actor(r), r.body)),
+  );
+  router.post(
+    "/baseline-validation/authorize",
+    route((r) => baseline.authorize(project(r), actor(r), r.body)),
+  );
+  router.post(
+    "/baseline-validation/claim",
+    route((r) => baseline.claim(project(r), actor(r), r.body)),
+  );
+  router.post(
+    "/baseline-validation/operations/:operationId/dispatch",
+    route((r) =>
+      baseline.dispatch(project(r), actor(r), String(r.params.operationId)),
+    ),
+  );
+  router.post(
+    "/baseline-validation/operations/:operationId/request-cleanup",
+    route((r) =>
+      baseline.requestCleanup(
+        project(r),
+        actor(r),
+        String(r.params.operationId),
+      ),
+    ),
+  );
+  // No HTTP receipt ingestion, worker-start/result or cleanup-confirmation route.
   router.post(
     "/repositories/:repositoryId/materialize",
     route((r) =>

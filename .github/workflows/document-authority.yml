@@ -17,6 +17,7 @@ jobs:
       - run: npm ci
       - run: npx prisma generate
       - run: npx tsc --noEmit
+      - run: npx tsc --noEmit --project tsconfig.rehearsal.json
       - run: npm run test:workspace -- --json --outputFile=workspace-results.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -49,8 +50,25 @@ jobs:
         env:
           ANKA_LOCAL_REHEARSAL: "1"
           ANKA_REHEARSAL_DATABASE_URL: postgresql://anka_rehearsal:synthetic@127.0.0.1:5432/anka_rehearsal
+      - name: Baseline claim race - same idempotency key
+        id: baseline_same
+        run: node scripts/test-baseline-native-postgres.cjs > baseline-same-key-result.json
+        env:
+          ANKA_LOCAL_REHEARSAL: "1"
+          ANKA_REHEARSAL_DATABASE_URL: postgresql://anka_rehearsal:synthetic@127.0.0.1:5432/anka_rehearsal
+          ANKA_BASELINE_RACE_VARIANT: same-key
+      - name: Baseline claim race - competing keys
+        if: ${{ !cancelled() && (steps.baseline_same.outcome == 'success' || steps.baseline_same.outcome == 'failure') }}
+        run: node scripts/test-baseline-native-postgres.cjs > baseline-different-key-result.json
+        env:
+          ANKA_LOCAL_REHEARSAL: "1"
+          ANKA_REHEARSAL_DATABASE_URL: postgresql://anka_rehearsal:synthetic@127.0.0.1:5432/anka_rehearsal
+          ANKA_BASELINE_RACE_VARIANT: different-key
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-postgres-result
-          path: native-postgres-result.json
+          path: |
+            native-postgres-result.json
+            baseline-same-key-result.json
+            baseline-different-key-result.json
