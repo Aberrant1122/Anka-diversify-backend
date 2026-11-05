@@ -872,6 +872,9 @@ model WorkspaceDocument {
 }
 
 model WorkspaceHead {
+  baselineApprovalId String?
+  baselinePurpose String @default("BASELINE_VALIDATION")
+  baselineApproval WorkspaceApproval? @relation("WorkspaceHeadBaselineApproval", fields: [baselineApprovalId, projectId, baselinePurpose], references: [id, projectId, purpose], onDelete: Restrict, onUpdate: NoAction, map: "workspace_head_baseline_approval_fk")
   projectId String @id
   stateVersion Int @default(0)
   mainId String?
@@ -884,6 +887,8 @@ model WorkspaceHead {
 }
 
 model WorkspaceApproval {
+  baselineRequestKey String?
+  @@unique([projectId, purpose, baselineRequestKey], map: "workspace_approval_baseline_request_key")
   purpose String @default("IMPLEMENTATION")
   id String @id @default(cuid())
   projectId String
@@ -898,6 +903,8 @@ model WorkspaceApproval {
   project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
   runs WorkspaceRun[] @relation("WorkspaceRunApproval")
   purposeBoundRuns WorkspaceRun[] @relation("WorkspaceRunPurposeApproval")
+  baselineHeads WorkspaceHead[] @relation("WorkspaceHeadBaselineApproval")
+  @@unique([id, projectId, purpose], map: "workspace_approval_scope_purpose_key")
   @@unique([id, purpose], map: "workspace_approval_id_purpose_key")
   @@index([projectId, createdAt])
 }
@@ -913,6 +920,8 @@ model WorkspaceRun {
   createdAt DateTime @default(now())
   project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
   approval WorkspaceApproval @relation("WorkspaceRunApproval", fields: [approvalId], references: [id], onDelete: Restrict)
+  baselineOperations BaselineValidationOperation[]
+  @@unique([id, projectId, purpose], map: "workspace_run_scope_purpose_key")
   purposeApproval WorkspaceApproval @relation("WorkspaceRunPurposeApproval", fields: [approvalId, purpose], references: [id, purpose], onDelete: Restrict, onUpdate: NoAction, map: "workspace_run_approval_purpose_fk")
   operations WorkspaceOperation[]
   events WorkspaceEvent[]
@@ -951,5 +960,26 @@ model WorkspaceOperation {
   project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
   run WorkspaceRun? @relation(fields: [runId], references: [id], onDelete: Restrict)
   @@unique([projectId, kind, idempotencyKey])
+  @@index([projectId, createdAt])
+}
+
+
+model BaselineValidationOperation {
+  id String @id
+  projectId String
+  runId String @unique
+  purpose String @default("BASELINE_VALIDATION")
+  idempotencyKey String
+  inputHash String
+  stateVersion Int
+  authority Json
+  createdBy String
+  jobId String @unique
+  status String @default("PREPARING")
+  result Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+  run WorkspaceRun @relation(fields: [runId, projectId, purpose], references: [id, projectId, purpose], onDelete: Restrict, onUpdate: NoAction, map: "baseline_operation_run_scope_fk")
+  @@unique([projectId, idempotencyKey])
   @@index([projectId, createdAt])
 }

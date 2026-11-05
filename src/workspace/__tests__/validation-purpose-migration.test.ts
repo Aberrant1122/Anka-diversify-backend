@@ -31,7 +31,7 @@ describe("V1 additive purpose migration and unsupported-purpose service boundari
     const dir = path.resolve(__dirname, "../../../prisma/migrations");
     for (const name of fs.readdirSync(dir).sort()) {
       const file = path.join(dir, name, "migration.sql");
-      if (name !== migrationName && fs.existsSync(file))
+      if (name < migrationName && fs.existsSync(file))
         await db.exec(fs.readFileSync(file, "utf8"));
     }
     await db.exec(`INSERT INTO users(id,email,password,"updatedAt") VALUES ('v1-owner','v1-owner@example.test','synthetic',now());
