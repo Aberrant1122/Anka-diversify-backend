@@ -15,6 +15,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Reject high and critical dependency advisories
+        run: npm audit --audit-level=high
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
       - run: npx prisma generate
       - run: npx tsc --noEmit
       - run: npx tsc --noEmit --project tsconfig.rehearsal.json
