@@ -1,8 +1,12 @@
 import { Router } from "express";
 import { PhaseController } from "../controllers/phase-controller";
 
+import { bindProjectResources } from '../middleware/project-owner';
 const router = Router({ mergeParams: true });
+bindProjectResources(router, {"artifactId":"phaseArtifact","runId":"workflowRun"});
 const phaseController = new PhaseController();
+router.post('/:phase/run', (req,res,next)=>['implementation','testing','review'].includes(String(req.params.phase))?res.status(409).json({error:'DOCUMENT_AUTHORITY_REQUIRED'}):next());
+router.post('/:phase/start', (req,res,next)=>['implementation','testing','review'].includes(String(req.params.phase))?res.status(409).json({error:'DOCUMENT_AUTHORITY_REQUIRED'}):next());
 
 // GET    /api/projects/:projectId/phases
 router.get("/", phaseController.getPhaseStates.bind(phaseController));

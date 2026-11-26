@@ -1,3 +1,5 @@
+import { sessionVersion } from "../../security/session-version";
+jest.mock("../../services/database", () => ({ prisma: { user: { findUnique: jest.fn(async ({ where }: any) => ({ id: where.id, email: 'fixture@example.test', role: 'developer', status: 'active', password: 'fixture-hash' })) }, phaseArtifact: { findFirst: jest.fn(async () => ({ id: 'artifact' })) }, workflowRun: { findFirst: jest.fn(async () => ({ id: 'run' })) } } }));
 import express from "express";
 import http from "http";
 import jwt from "jsonwebtoken";
@@ -12,7 +14,7 @@ jest.mock("../../config/env", () => ({ JWT_SECRET: "architecture-generation-api-
 describe("Architecture generation API", () => {
   let server: http.Server;
   let baseUrl: string;
-  const token = jwt.sign({ userId: "editor-1" }, JWT_SECRET);
+  const token = jwt.sign({ userId: "editor-1", sessionVersion: sessionVersion({ id: "editor-1", password: "fixture-hash" }) }, JWT_SECRET);
   beforeAll(async () => {
     const app = express(); app.use(express.json());
     app.use("/api/projects/:projectId/phases", authenticateToken, phaseRoutes);

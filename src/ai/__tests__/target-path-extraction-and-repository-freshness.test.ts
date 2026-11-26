@@ -96,8 +96,10 @@ describe("Execution Contract Path Extraction + Iterative Repository Freshness (S
       // Create a remote origin git repo
       const originDir = path.join(tempBase, "remote-origin.git");
       const initialCloneDir = path.join(tempBase, "initial-work");
-      execSync(`git init --bare "${originDir}"`);
+      execSync(`git -c init.defaultBranch=main init --bare "${originDir}"`);
       execSync(`git clone "${originDir}" "${initialCloneDir}"`);
+      execSync("git config user.name Fixture", {cwd: initialCloneDir});
+      execSync("git config user.email fixture@example.test", {cwd: initialCloneDir});
       
       // Setup initial commit
       fs.writeFileSync(path.join(initialCloneDir, "package.json"), JSON.stringify({ name: "app" }));
@@ -149,7 +151,9 @@ describe("Execution Contract Path Extraction + Iterative Repository Freshness (S
 
     test("D, E: Newly-pushed created file becomes visible to repository scan on next run", async () => {
       const repoDir = path.join(tempBase, "local-repo");
-      execSync(`git init "${repoDir}"`);
+      execSync(`git init -b main "${repoDir}"`);
+      execSync("git config user.name Fixture", {cwd: repoDir});
+      execSync("git config user.email fixture@example.test", {cwd: repoDir});
       fs.writeFileSync(path.join(repoDir, "app.ts"), "const a = 1;");
       execSync('git add . && git commit -m "Initial"', { cwd: repoDir });
 

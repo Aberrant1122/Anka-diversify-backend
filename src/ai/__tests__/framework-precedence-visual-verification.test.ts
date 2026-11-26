@@ -133,63 +133,11 @@ describe("Framework Precedence & Visual Verification Live Path Regressions", () 
   });
 
   // Test 8: visualVerification survives GitWorktreeService -> AgentResponse -> CodingAgent
-  test("8. visualVerification is preserved through CodingAgent return", async () => {
-    const mockVisualResult: VisualVerificationResult = {
-      status: "PASSED",
-      framework: "VITE_REACT",
-      route: "/",
-      url: "http://127.0.0.1:54321/",
-      httpStatus: 200,
-      screenshotPath: "C:\\tmp\\screenshot.png",
-      pageErrors: [],
-      consoleErrors: [],
-      failedRequests: [],
-      durationMs: 150,
-    };
-
-    const { RepositoryMaterializationService } = require("../../services/repository-materialization.service");
-    const fs = require("fs");
-    jest.spyOn(RepositoryMaterializationService, "ensureProjectRepositoryCurrent").mockResolvedValue({
-      success: true,
-      metadata: { canonicalRoot: "C:\\fake\\repo" } as any,
-    });
-    const origExists = fs.existsSync;
-    jest.spyOn(fs, "existsSync").mockImplementation((p: any) => {
-      if (typeof p === "string" && p.includes("fake")) return true;
-      return origExists(p);
-    });
-    jest.spyOn(GitWorktreeService, "resolveRepositoryRoot").mockResolvedValue("C:\\fake\\repo");
-    jest.spyOn(GitWorktreeService, "getHeadCommitSha").mockResolvedValue("abcdef123456");
-    jest.spyOn(GitWorktreeService, "runIsolatedAgent").mockResolvedValue({
-      runId: "test-run",
-      branchName: "temp-branch",
-      baseCommitSha: "abcdef",
-      worktreePath: "C:\\fake\\worktree",
-      changedFiles: ["src/App.tsx"],
-      diffSummary: "1 file changed",
-      validationPassed: true,
-      validationCommands: ["npm test"],
-      visualVerification: mockVisualResult,
-      agentResponse: {
-        explanation: "All good",
-        changes: [{ path: "src/App.tsx", content: "export default () => null;", description: "test" }],
-        commitMessage: "test commit",
-        sessionId: "sess-1",
-        buildVerified: true,
-        visualVerification: mockVisualResult,
-      },
-    });
-
-    const response = await CodingAgent.runCodingAgent("user-1", "cmtkf3pfn000xdmesn1s7haz2", {
-      message: "Update dashboard",
-      sessionId: "sess-1",
-    });
-
-    expect(response.visualVerification).toBeDefined();
-    expect(response.visualVerification?.status).toBe("PASSED");
-    expect(response.visualVerification?.framework).toBe("VITE_REACT");
-    expect(response.visualVerification?.screenshotPath).toBe("C:\\tmp\\screenshot.png");
-  });
+  test("8. Legacy CodingAgent does not fabricate visual evidence without document authority", async () => {
+const isolated = jest.spyOn(GitWorktreeService,"runIsolatedAgent");
+await expect(CodingAgent.runCodingAgent("user-1","project-1",{message:"Update dashboard"})).rejects.toThrow("DOCUMENT_AUTHORITY_REQUIRED");
+expect(isolated).not.toHaveBeenCalled();
+});
 
   // Test 9: single-repo controller complete payload includes visualVerification
   test("9. single-repo controller complete payload includes visualVerification", async () => {

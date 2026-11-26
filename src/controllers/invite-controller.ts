@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { InviteService } from "../services/invite.service";
 import jwt from "jsonwebtoken";
+import { sessionVersion } from "../security/session-version";
 import { JWT_SECRET } from "../config/env";
 import { isValidRole } from "../middleware/rbac";
 
@@ -93,7 +94,7 @@ export class InviteController {
       const user = await inviteService.acceptInvite(req.params.token as string, { name, password });
 
       const token = jwt.sign(
-        { userId: user.id, email: user.email, role: user.role },
+        { userId: user.id, sessionVersion: sessionVersion(user) },
         JWT_SECRET,
         { expiresIn: "7d" } as any,
       );

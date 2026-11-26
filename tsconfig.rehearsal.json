@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.seed.json",
+  "include": [
+    "scripts/workspace-rehearsal.ts",
+    "scripts/native-postgres-worker.ts",
+    "scripts/baseline-native-worker.ts"
+  ]
+}

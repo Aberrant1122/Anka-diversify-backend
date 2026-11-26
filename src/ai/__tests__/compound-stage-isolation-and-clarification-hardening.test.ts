@@ -1,3 +1,4 @@
+import * as SharedUtils from "../shared/utils";
 import { TargetPathExtractor } from "../contracts/TargetPathExtractor";
 import { DestructiveTargetResolver } from "../contracts/DestructiveTargetResolver";
 import { TargetScopeExpander } from "../contracts/TargetScopeExpander";
@@ -20,6 +21,10 @@ describe("Compound Stage Isolation and Clarification Input Hardening", () => {
   let tempDir: string;
 
   beforeEach(() => {
+    // The manifest method is mocked below; its unused provider constructor must
+    // also be deterministic. This object has no transport and cannot call a provider.
+    jest.spyOn(SharedUtils,"getOpenAI").mockReturnValue({} as never);
+
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "compound-isolation-test-"));
     jest.spyOn(MemoryPersistence, "saveMessage").mockResolvedValue(undefined as any);
     jest.spyOn(MemoryPersistence, "persistProjectMemory").mockResolvedValue(undefined as any);

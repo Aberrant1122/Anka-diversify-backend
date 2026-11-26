@@ -109,7 +109,7 @@ export class AiController {
         return res.status(400).json({ error: "Invalid session ID" });
       }
 
-      const session = await aiService.getSessionMessages(sessionId, userId);
+      const session = await aiService.getSessionMessages(sessionId, userId, { type: "general" });
       res.json({
         messages: session.messages,
         session: {
@@ -217,7 +217,7 @@ export class AiController {
         return res.status(400).json({ error: "Invalid session ID" });
       }
 
-      const session = await aiService.getSessionMessages(sessionId, userId);
+      const session = await aiService.getSessionMessages(sessionId, userId, { type: "project", projectId: String(projectId) });
       res.json({
         messages: session.messages,
         session: {
@@ -621,7 +621,7 @@ export class AiController {
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
       const project = await ProjectSidebarService.getAccessibleProject(projectId, userId);
       if (!project) return res.status(404).json({ error: "PROJECT_NOT_FOUND", message: "Project not found or access denied." });
-      const health = await aiService.getProjectHealth(projectId);
+      const health = await aiService.getProjectHealth(projectId, userId);
       console.info(`[PROJECT_HEALTH] project=${projectId} score=${health.score} status=${health.status}`);
       res.json(health);
     } catch (error) {
@@ -667,7 +667,7 @@ export class AiController {
       if (Array.isArray(projectId) || Array.isArray(sprintId))
         return res.status(400).json({ error: "Invalid params" });
       const capacity = Number(req.query.capacity) || 10;
-      const suggestions = await aiService.suggestSprintTasks(projectId, sprintId, capacity);
+      const suggestions = await aiService.suggestSprintTasks(projectId, sprintId, capacity, req.user?.userId as string);
       res.json({ suggestions });
     } catch (error) {
       console.error("Sprint suggest error:", error);
@@ -680,7 +680,7 @@ export class AiController {
       const { projectId, prNumber } = req.params;
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
       const num = Array.isArray(prNumber) ? prNumber[0] : prNumber;
-      const result = await aiService.generatePRDescription(projectId, parseInt(num, 10));
+      const result = await aiService.generatePRDescription(projectId, parseInt(num, 10), req.user?.userId as string);
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Generate PR description error:", error);
@@ -694,7 +694,7 @@ export class AiController {
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
       const { prompt } = req.body;
       if (!prompt) return res.status(400).json({ error: "prompt is required" });
-      const result = await aiService.generateSprint(projectId, prompt);
+      const result = await aiService.generateSprint(projectId, prompt, req.user?.userId as string);
       res.json({ success: true, data: result });
     } catch (error) {
       console.error("Generate sprint error:", error);
@@ -708,7 +708,7 @@ export class AiController {
       if (!Array.isArray(tasks) || tasks.length === 0) {
         return res.status(400).json({ error: "tasks array is required" });
       }
-      const order = await aiService.suggestTaskOrder(tasks);
+      const order = await aiService.suggestTaskOrder(String(req.params.projectId || req.body.projectId || ""), req.user?.userId as string, tasks);
       res.json({ success: true, data: { order } });
     } catch (error) {
       console.error("Suggest task order error:", error);
@@ -721,7 +721,7 @@ export class AiController {
       const { projectId, prNumber } = req.params;
       if (Array.isArray(projectId)) return res.status(400).json({ error: "Invalid project ID" });
       const num = Array.isArray(prNumber) ? prNumber[0] : prNumber;
-      const review = await aiService.reviewPullRequest(projectId, parseInt(num, 10));
+      const review = await aiService.reviewPullRequest(projectId, parseInt(num, 10), req.user?.userId as string);
       res.json(review);
     } catch (error) {
       console.error("PR review error:", error);
@@ -752,7 +752,7 @@ export class AiController {
       // Compatibility endpoint: approval is human planning-workflow metadata.
       // It is never consumed as mutation, validation, checkpoint, or completion authority.
       const updated = await prisma.agentManifest.update({
-        where: { id: String(id) },
+        where: { id: String(id), project: { userId: req.user.userId } },
         data: { validationStatus: "approved", approvedAt: new Date() },
       });
       res.json({ success: true, role: "PLANNING_WORKFLOW_ONLY", data: updated });
@@ -766,7 +766,7 @@ export class AiController {
     try {
       const { id } = req.params;
       const updated = await prisma.agentManifest.update({
-        where: { id: String(id) },
+        where: { id: String(id), project: { userId: req.user.userId } },
         data: { validationStatus: "rejected" },
       });
       res.json({ success: true, role: "PLANNING_WORKFLOW_ONLY", data: updated });
@@ -780,7 +780,7 @@ export class AiController {
     try {
       const { sessionId } = req.params;
       const decomposition = await prisma.taskDecomposition.findFirst({
-        where: { sessionId: String(sessionId) },
+        where: { sessionId: String(sessionId), project: { userId: req.user.userId } },
         include: { subTasksExecs: true },
         orderBy: { createdAt: "desc" },
       });

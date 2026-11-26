@@ -2,11 +2,20 @@ import { Router } from 'express';
 import { AiController } from '../controllers/ai-controller';
 import { authenticateToken } from '../middleware/auth';
 
+import { requireProjectOwner, bindProjectResources } from '../middleware/project-owner';
 const router = Router();
+router.param('projectId', requireProjectOwner);
+bindProjectResources(router, { recordId: 'architectureDriftRecord', sprintId: 'sprint' });
 const aiController = new AiController();
 
 // Require a valid JWT for every AI endpoint.
 router.use(authenticateToken);
+// Legacy coding and publication paths cannot consume document authority yet.
+router.post('/projects/:projectId/agent/:operation', (req,res,next)=>{
+  if(['run','stream','push'].includes(String(req.params.operation))) return res.status(409).json({error:'DOCUMENT_AUTHORITY_REQUIRED'});
+  next();
+});
+router.post('/projects/:projectId/agent/multi-repo/run', (_req,res)=>res.status(409).json({error:'DOCUMENT_AUTHORITY_REQUIRED'}));
 
 // General Assistant Routes
 router.post('/general/chat', aiController.generalChat.bind(aiController));

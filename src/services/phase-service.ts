@@ -323,7 +323,7 @@ export class PhaseService {
       const revision = previousArtifact && latestDecision?.decision === "changes_requested" && latestDecision.comments
         ? { previousContent: previousArtifact.content, feedback: latestDecision.comments }
         : undefined;
-      const proposal = await this.aiService.generatePhaseProposal(projectId, phase, revision, brief);
+      const proposal = await this.aiService.generatePhaseProposal(projectId, phase, createdBy, revision, brief);
       const artifact = await this.prisma.phaseArtifact.create({
         data: {
           projectId,

@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { SprintController } from "../controllers/sprint-controller";
 
+import { requireProjectTaskBody, bindProjectResources } from '../middleware/project-owner';
 const router = Router({ mergeParams: true });
+bindProjectResources(router, {"sprintId":"sprint","taskId":"projectTask"});
 const sprintController = new SprintController();
 
 // GET    /api/projects/:projectId/sprints
@@ -17,7 +19,7 @@ router.put("/:sprintId", sprintController.updateSprint.bind(sprintController));
 router.delete("/:sprintId", sprintController.deleteSprint.bind(sprintController));
 
 // POST   /api/projects/:projectId/sprints/:sprintId/tasks
-router.post("/:sprintId/tasks", sprintController.addTaskToSprint.bind(sprintController));
+router.post("/:sprintId/tasks", requireProjectTaskBody, sprintController.addTaskToSprint.bind(sprintController));
 
 // DELETE /api/projects/:projectId/sprints/:sprintId/tasks/:taskId
 router.delete("/:sprintId/tasks/:taskId", sprintController.removeTaskFromSprint.bind(sprintController));

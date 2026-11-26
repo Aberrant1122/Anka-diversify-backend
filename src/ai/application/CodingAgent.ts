@@ -1,3 +1,4 @@
+import { requireDocumentAuthority } from "../../workspace/document-contract";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -51,6 +52,7 @@ export class CodingAgent {
     onProgress?: (event: AgentProgressEvent) => void,
     internalOptions?: CodingAgentInternalOptions,
   ): Promise<AgentResponse> {
+    requireDocumentAuthority();
     console.log(`[ANKA_EXEC] CodingAgent entered`);
 
     // 1. Trusted internal-only direct execution path (used by EvalRunner and explicit test fixtures)
@@ -252,6 +254,7 @@ export class CodingAgent {
     options?: { effectiveLocalPath?: string },
     onProgress?: (event: AgentProgressEvent) => void,
   ): Promise<AgentResponse> {
+    requireDocumentAuthority();
     return AgentPipeline.runCodingAgent(userId, projectId, request, onProgress, options);
   }
 }
