@@ -168,3 +168,59 @@ only its generated schema. No existing schema or production data is touched.
 The new native-concurrency CI job supplies this disposable service. The harness
 has source/type/guard checks locally; native engine execution and remote CI
 results remain unverified until run on the exact candidate.
+
+## Standalone manual native workflow (November 2026 candidate)
+
+The owner project screen can register a manual native assignment after a current
+saved-document preview and explicit scope confirmation. The assignment binds the
+owner, original session reference, exact Main/Architecture IDs and hashes,
+selected criteria, declared files and evidence-backed repository baselines.
+Registration does not launch a provider, shell, native app or WorkspaceRun.
+
+`ANKA_NATIVE_WORKFLOW_ENABLED` defaults off. Deploy the backend with it off first;
+keep `ANKA_WORKSPACE_AI_ENABLED` off unless separately authorized. After the
+backend schema/health and frontend rollout are verified, explicitly enabling the
+native flag exposes the ledger controls through `/workspace/capabilities`.
+Turning the flag off blocks the native endpoints while preserving their immutable
+records. The ledger reuses WorkspaceOperation and WorkspaceEvent; it adds no new
+migration. The four older pending migrations still require upgrade review.
+
+Receipts are owner-reported and never independently verified merely by saving
+them. A passed receipt must name the same implementation and tested commit and
+have exit code zero. Missing, NOT_RUN, failed, mixed-commit and stale results remain
+explicit. Exact retries are idempotent; changed payloads under the same key and
+conflicting scope/receipts are rejected. Recovery reads reconstruct persisted
+scope, original owner/session, files/baselines, evidence, missing criteria and the
+next decision. Recovery observations require explicit owner reporting and cannot
+be presented as an automatically measured native session.
+
+The native assignment test suite defaults to an isolated embedded Postgres
+engine. Its guarded `ANKA_NATIVE_ASSIGNMENT_POSTGRES_URL` CI mode requires
+`ANKA_LOCAL_REHEARSAL=1`, loopback `anka_rehearsal`, and a unique generated schema.
+It applies real migrations and verifies competing clients use distinct native
+PostgreSQL backend PIDs. That CI result is required on the final integrated tree;
+embedded-engine race coverage is not a substitute.
+
+Production configuration uses existing DATABASE_URL, JWT_SECRET (nonempty),
+ENCRYPTION_KEY (at least 32 characters), FRONTEND_URL and frontend API_URL /
+NEXT_PUBLIC_API_URL. Preserve their existing secrets; do not regenerate them as
+part of rollout. Uploads accept either AWS_S3_BUCKET or the existing
+AWS_S3_BUCKET_NAME, with the former taking precedence. Audit variable names and
+value contracts without exposing credentials. Owner bootstrap is manual only;
+startup must never seed/reset an existing production owner.
+
+Publish backend/frontend candidates on non-deploy branches and verify exact Git
+blob/tree identity before running PR checks. Both current Railway production
+services track main and have checkSuites=false: that setting is not a CI gate.
+Do not merge until all required checks, production-compatible migration rehearsal,
+recoverable production backup/restore proof, configuration contracts and rollback
+readiness are satisfied. A disposable restore rehearsal does not prove a
+production backup exists. If backup access or verification is unavailable, hold
+the merge and leave the current deployment untouched.
+
+Coordinate rollout backend first (native flag off), then frontend, then the
+explicit native feature flag. Verify public health and signed-in owner/project
+isolation using an authorized disposable project. Preserve audit and legacy
+records. App rollback should reuse the previous known deployment builds and keep
+additive schema/data intact; never run destructive down migrations. No paid
+provider acceptance or runtime dispatch is included in this manual-work ledger.

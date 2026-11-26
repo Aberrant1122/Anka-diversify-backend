@@ -1,3 +1,5 @@
+import { HandoffPreviewService } from "../workspace/handoff-preview";
+import { NativeAssignmentService } from "../workspace/native-assignment";
 import { BaselineValidationService } from "../workspace/baseline-validation-service";
 import { Router, Request, Response } from "express";
 import { prisma } from "../services/database";
@@ -68,6 +70,18 @@ export function createWorkspaceRouter(
     };
   const project = (r: Request) => String(r.params.projectId);
   const actor = (r: Request) => r.user.userId as string;
+  const native = new NativeAssignmentService(database);
+  const nativeRoute = (work: (r: Request) => Promise<unknown>) => route(async r => {
+    if (process.env.ANKA_NATIVE_WORKFLOW_ENABLED !== "true") throw new WorkspaceError("NATIVE_WORKFLOW_DISABLED", 503);
+    return work(r);
+  });
+  router.get("/native-assignments", nativeRoute(r => native.list(project(r), actor(r))));
+  router.post("/native-assignments", nativeRoute(r => native.create(project(r), actor(r), r.body)));
+  router.get("/native-assignments/:assignmentId/recovery", nativeRoute(r => native.recovery(project(r), actor(r), String(r.params.assignmentId))));
+  router.post("/native-assignments/:assignmentId/evidence", nativeRoute(r => native.evidence(project(r), actor(r), String(r.params.assignmentId), r.body)));
+  router.post("/native-assignments/:assignmentId/recovery-observations", nativeRoute(r => native.observeRecovery(project(r), actor(r), String(r.params.assignmentId), r.body)));
+  const handoffPreview = new HandoffPreviewService(database);
+  router.post("/handoff-preview", route((r) => handoffPreview.preview(project(r), r.user?.userId || "", r.body)));
   const baseline = new BaselineValidationService(database); // Default trusted evidence store unavailable.
   router.get(
     "/baseline-validation",
@@ -130,7 +144,7 @@ export function createWorkspaceRouter(
     "/capabilities",
     route(async (r) => {
       const capabilities = await execution.capabilities(project(r), actor(r));
-      return { ...generation.capabilities(), ...capabilities };
+      return { ...generation.capabilities(), ...capabilities, nativeAssignment: process.env.ANKA_NATIVE_WORKFLOW_ENABLED === "true" };
     }),
   );
   router.post(

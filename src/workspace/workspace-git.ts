@@ -28,6 +28,9 @@ export function workspaceGit(
     execFile(
       "git",
       [
+        // Task/managed paths can exceed MAX_PATH on transferred Windows drives.
+        // Keep this command-scoped; do not change global Git configuration.
+        ...(process.platform === "win32" ? ["-c", "core.longpaths=true"] : []),
         "-c",
         "core.hooksPath=" + path.join(options.runsRoot, "disabled-hooks"),
         "-c",

@@ -54,6 +54,11 @@ jobs:
         env:
           ANKA_LOCAL_REHEARSAL: "1"
           ANKA_REHEARSAL_DATABASE_URL: postgresql://anka_rehearsal:synthetic@127.0.0.1:5432/anka_rehearsal
+      - name: Native manual assignment owner, evidence, recovery and independent-client race gates
+        run: npm test -- --runInBand src/workspace/__tests__/native-assignment.test.ts --json --outputFile=native-assignment-results.json
+        env:
+          ANKA_LOCAL_REHEARSAL: "1"
+          ANKA_NATIVE_ASSIGNMENT_POSTGRES_URL: postgresql://anka_rehearsal:synthetic@127.0.0.1:5432/anka_rehearsal
       - name: Baseline claim race - same idempotency key
         id: baseline_same
         run: node scripts/test-baseline-native-postgres.cjs > baseline-same-key-result.json
@@ -74,5 +79,6 @@ jobs:
           name: native-postgres-result
           path: |
             native-postgres-result.json
+            native-assignment-results.json
             baseline-same-key-result.json
             baseline-different-key-result.json
